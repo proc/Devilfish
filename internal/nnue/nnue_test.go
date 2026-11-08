@@ -117,3 +117,37 @@ func TestSaveAndLoad(t *testing.T) {
 		t.Errorf("eval changed after load: before %d, after %d", scoreBefore, scoreAfter)
 	}
 }
+
+func BenchmarkVectorOpsNEON(b *testing.B) {
+	var acc [HiddenSize]int16
+	var w [HiddenSize]int16
+	for i := 0; i < HiddenSize; i++ {
+		acc[i] = int16(i)
+		w[i] = int16(i * 2)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		addVectorNEON(&acc, &w)
+		subVectorNEON(&acc, &w)
+	}
+}
+
+func BenchmarkVectorOpsScalar(b *testing.B) {
+	var acc [HiddenSize]int16
+	var w [HiddenSize]int16
+	for i := 0; i < HiddenSize; i++ {
+		acc[i] = int16(i)
+		w[i] = int16(i * 2)
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < HiddenSize; j++ {
+			acc[j] += w[j]
+		}
+		for j := 0; j < HiddenSize; j++ {
+			acc[j] -= w[j]
+		}
+	}
+}

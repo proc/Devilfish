@@ -5,15 +5,11 @@ import (
 )
 
 func addVector(acc *[HiddenSize]int16, weights *[HiddenSize]int16) {
-	for i := 0; i < HiddenSize; i++ {
-		acc[i] += weights[i]
-	}
+	addVectorNEON(acc, weights)
 }
 
 func subVector(acc *[HiddenSize]int16, weights *[HiddenSize]int16) {
-	for i := 0; i < HiddenSize; i++ {
-		acc[i] -= weights[i]
-	}
+	subVectorNEON(acc, weights)
 }
 
 func clamp8(val int16) int8 {
