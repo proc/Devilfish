@@ -340,3 +340,65 @@ func GenerateLegalMoves(b *board.Board) []types.Move {
 	}
 	return legalMoves
 }
+
+func IsPseudoLegal(b *board.Board, m types.Move) bool {
+	if m == types.MoveNone {
+		return false
+	}
+	from := m.From()
+	to := m.To()
+	if from >= types.SquareNone || to >= types.SquareNone || from == to {
+		return false
+	}
+
+	p := b.Pieces[from]
+	us := b.SideToMove
+	if p == types.PieceNone || p.Color() != us {
+		return false
+	}
+
+	target := b.Pieces[to]
+	if target != types.PieceNone && target.Color() == us {
+		return false
+	}
+
+	pt := p.Type()
+	switch pt {
+	case types.Knight:
+		return bitboard.KnightAttacks(from)&bitboard.SquareBB[to] != 0
+	case types.Bishop:
+		return bitboard.BishopAttacks(from, b.Occupied())&bitboard.SquareBB[to] != 0
+	case types.Rook:
+		return bitboard.RookAttacks(from, b.Occupied())&bitboard.SquareBB[to] != 0
+	case types.Queen:
+		return bitboard.QueenAttacks(from, b.Occupied())&bitboard.SquareBB[to] != 0
+	case types.King:
+		if m.IsCastle() {
+			return false
+		}
+		return bitboard.KingAttacks(from)&bitboard.SquareBB[to] != 0
+	case types.Pawn:
+		if us == types.White {
+			if to == from+8 && target == types.PieceNone {
+				return true
+			}
+			if from.Rank() == types.Rank2 && to == from+16 && b.Pieces[from+8] == types.PieceNone && target == types.PieceNone {
+				return true
+			}
+			if (to == from+7 || to == from+9) && (target != types.PieceNone || to == b.EPSquare) {
+				return true
+			}
+		} else {
+			if to == from-8 && target == types.PieceNone {
+				return true
+			}
+			if from.Rank() == types.Rank7 && to == from-16 && b.Pieces[from-8] == types.PieceNone && target == types.PieceNone {
+				return true
+			}
+			if (to == from-7 || to == from-9) && (target != types.PieceNone || to == b.EPSquare) {
+				return true
+			}
+		}
+	}
+	return false
+}

@@ -2,7 +2,6 @@ package search
 
 import (
 	"devilfish/internal/board"
-	"devilfish/internal/eval"
 	"devilfish/internal/movegen"
 	"devilfish/internal/types"
 )
@@ -53,16 +52,8 @@ func ScoreMoves(
 			if m.IsEnPassant() {
 				victim = types.Pawn
 			}
-
 			mvvLva := PieceMVV[victim]*10 - PieceMVV[attacker]
-
-			// Run SEE to determine if winning/equal or losing capture
-			seeVal := eval.SEE(b, m)
-			if seeVal >= 0 {
-				scores[i] = 10000000 + mvvLva*1000 + seeVal
-			} else {
-				scores[i] = -1000000 + seeVal
-			}
+			scores[i] = 10000000 + mvvLva*1000
 			continue
 		}
 

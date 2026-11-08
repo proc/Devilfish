@@ -25,22 +25,32 @@ func Evaluate(b *board.Board) int32 {
 	blackPawns := b.PieceBB[types.BlackPawn]
 	occ := b.Occupied()
 
-	// 1. Material and PST
-	for sq := 0; sq < 64; sq++ {
-		p := b.Pieces[sq]
-		if p == types.PieceNone {
-			continue
+	// 1. Material and PST (Bitboard iteration)
+	for pt := types.Pawn; pt <= types.King; pt++ {
+		wp := types.MakePiece(types.White, pt)
+		wBB := b.PieceBB[wp]
+		if wBB != 0 {
+			wCount := int32(bitboard.Count(wBB))
+			phase += wCount * PiecePhase[pt]
+			whiteScore.mg += wCount * PieceValues[pt].mg
+			whiteScore.eg += wCount * PieceValues[pt].eg
+			for wBB != 0 {
+				sq := bitboard.PopLSB(&wBB)
+				whiteScore = whiteScore.Add(PST[pt][sq])
+			}
 		}
-		pt := p.Type()
-		phase += PiecePhase[pt]
 
-		if p.Color() == types.White {
-			val := PieceValues[pt].Add(PST[pt][sq])
-			whiteScore = whiteScore.Add(val)
-		} else {
-			mirroredSq := sq ^ 56
-			val := PieceValues[pt].Add(PST[pt][mirroredSq])
-			blackScore = blackScore.Add(val)
+		bp := types.MakePiece(types.Black, pt)
+		bBB := b.PieceBB[bp]
+		if bBB != 0 {
+			bCount := int32(bitboard.Count(bBB))
+			phase += bCount * PiecePhase[pt]
+			blackScore.mg += bCount * PieceValues[pt].mg
+			blackScore.eg += bCount * PieceValues[pt].eg
+			for bBB != 0 {
+				sq := bitboard.PopLSB(&bBB)
+				blackScore = blackScore.Add(PST[pt][sq^56])
+			}
 		}
 	}
 

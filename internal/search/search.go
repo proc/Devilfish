@@ -174,21 +174,69 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 	}
 
-	// 7. Move Generation & Scoring
-	var ml movegen.MoveList
-	movegen.GenerateMoves(w.Board, false, &ml)
-
-	var scores [256]int32
-	ScoreMoves(w.Board, &ml, scores[:ml.Count], ttMove, ply, prevMove, w.History)
-
 	var bestMove types.Move
 	var searchedMoves [256]types.Move
 	movesSearched := 0
 	legalMoves := 0
 	bestType := tt.UpperBound
 
+	// Staged Move Generation: Search TT move first before generating all moves
+	if ttMove != types.MoveNone && movegen.IsPseudoLegal(w.Board, ttMove) {
+		if w.Board.MakeMove(ttMove) {
+			legalMoves++
+			searchedMoves[movesSearched] = ttMove
+
+			score := -w.Search(depth-1, -beta, -alpha, ply+1, isPVNode, ttMove)
+			w.Board.UnmakeMove(ttMove)
+			movesSearched++
+
+			if w.TimeMan.Stopped.Load() {
+				return 0
+			}
+
+			// Beta Cutoff (Fail-High)
+			if score >= beta {
+				w.TT.Store(w.Board.Hash, ttMove, tt.ScoreToTT(score, ply), depth, tt.LowerBound)
+
+				if ply == 0 {
+					bestMove = ttMove
+					w.PVArray[0][0] = ttMove
+					w.PVLength[0] = 1
+				}
+
+				if !ttMove.IsCapture() && !ttMove.IsPromotion() {
+					w.History.UpdateKillers(ply, ttMove)
+					w.History.UpdateHistory(us, ttMove, depth)
+					w.History.UpdateCounterMove(prevMove, ttMove)
+				}
+				return beta
+			}
+
+			// Alpha improvement
+			if score > alpha {
+				alpha = score
+				bestMove = ttMove
+				bestType = tt.Exact
+
+				w.PVArray[ply][0] = ttMove
+				copy(w.PVArray[ply][1:1+w.PVLength[ply+1]], w.PVArray[ply+1][:w.PVLength[ply+1]])
+				w.PVLength[ply] = 1 + w.PVLength[ply+1]
+			}
+		}
+	}
+
+	// 7. Move Generation & Scoring (only needed if TT move did not cut off)
+	var ml movegen.MoveList
+	movegen.GenerateMoves(w.Board, false, &ml)
+
+	var scores [256]int32
+	ScoreMoves(w.Board, &ml, scores[:ml.Count], types.MoveNone, ply, prevMove, w.History)
+
 	for i := 0; i < ml.Count; i++ {
 		m := PickNextMove(&ml, scores[:ml.Count], i)
+		if m == ttMove {
+			continue
+		}
 		isQuiet := !m.IsCapture() && !m.IsPromotion()
 
 		// Late Move Pruning (LMP)
@@ -357,7 +405,17 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 	movegen.GenerateMoves(w.Board, !inCheck, &ml)
 
 	var scores [256]int32
-	ScoreMoves(w.Board, &ml, scores[:ml.Count], types.MoveNone, ply, types.MoveNone, w.History)
+	for i := 0; i < ml.Count; i++ {
+		m := ml.Moves[i]
+		if m.IsCapture() || m.IsPromotion() {
+			attacker := w.Board.Pieces[m.From()].Type()
+			victim := w.Board.Pieces[m.To()].Type()
+			if m.IsEnPassant() {
+				victim = types.Pawn
+			}
+			scores[i] = PieceMVV[victim]*10 - PieceMVV[attacker]
+		}
+	}
 
 	legalMoves := 0
 	for i := 0; i < ml.Count; i++ {

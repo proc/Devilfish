@@ -2,7 +2,6 @@ package tt
 
 import (
 	"math/bits"
-	"sync/atomic"
 
 	"devilfish/internal/types"
 )
@@ -108,8 +107,8 @@ func (tt *TT) Resize(sizeMB int) {
 
 func (tt *TT) Clear() {
 	for i := range tt.entries {
-		atomic.StoreUint64(&tt.entries[i].Key, 0)
-		atomic.StoreUint64(&tt.entries[i].Data, 0)
+		tt.entries[i].Key = 0
+		tt.entries[i].Data = 0
 	}
 	tt.age = 0
 }
@@ -120,8 +119,9 @@ func (tt *TT) IncrementAge() {
 
 func (tt *TT) Probe(hash uint64) (m types.Move, score int32, depth int8, nodeType uint8, found bool) {
 	idx := hash & tt.mask
-	key := atomic.LoadUint64(&tt.entries[idx].Key)
-	data := atomic.LoadUint64(&tt.entries[idx].Data)
+	entry := &tt.entries[idx]
+	key := entry.Key
+	data := entry.Data
 
 	// Invert key with data to verify atomic integrity
 	if key == (hash ^ data) {
@@ -134,8 +134,9 @@ func (tt *TT) Probe(hash uint64) (m types.Move, score int32, depth int8, nodeTyp
 
 func (tt *TT) Store(hash uint64, m types.Move, score int32, depth int8, nodeType uint8) {
 	idx := hash & tt.mask
-	currKey := atomic.LoadUint64(&tt.entries[idx].Key)
-	currData := atomic.LoadUint64(&tt.entries[idx].Data)
+	entry := &tt.entries[idx]
+	currKey := entry.Key
+	currData := entry.Data
 
 	if currKey == (hash ^ currData) {
 		_, _, currDepth, _, currAge := unpackData(currData)
@@ -146,8 +147,8 @@ func (tt *TT) Store(hash uint64, m types.Move, score int32, depth int8, nodeType
 				existingMove, existingScore, existingDepth, existingType, existingAge := unpackData(currData)
 				if existingMove == types.MoveNone {
 					newData := packData(m, existingScore, existingDepth, existingType, existingAge)
-					atomic.StoreUint64(&tt.entries[idx].Key, hash^newData)
-					atomic.StoreUint64(&tt.entries[idx].Data, newData)
+					entry.Data = newData
+					entry.Key = hash ^ newData
 				}
 			}
 			return
@@ -155,8 +156,8 @@ func (tt *TT) Store(hash uint64, m types.Move, score int32, depth int8, nodeType
 	}
 
 	newData := packData(m, score, depth, nodeType, tt.age)
-	atomic.StoreUint64(&tt.entries[idx].Key, hash^newData)
-	atomic.StoreUint64(&tt.entries[idx].Data, newData)
+	entry.Data = newData
+	entry.Key = hash ^ newData
 }
 
 func (tt *TT) HashFull() int {
@@ -166,7 +167,7 @@ func (tt *TT) HashFull() int {
 	}
 	used := 0
 	for i := 0; i < sampled; i++ {
-		data := atomic.LoadUint64(&tt.entries[i].Data)
+		data := tt.entries[i].Data
 		if data != 0 {
 			_, _, _, _, age := unpackData(data)
 			if age == tt.age {
