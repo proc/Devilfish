@@ -57,7 +57,7 @@ func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *a
 	}
 }
 
-func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode bool, canMultiCut bool, prevMove types.Move) int32 {
+func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode bool, canMultiCut bool, excludedMove types.Move, prevMove types.Move) int32 {
 	// Periodically check search time/limits
 	w.LocalNodes++
 	if w.LocalNodes%2048 == 0 {
@@ -114,7 +114,8 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		ttMove = ttEntryMove
 		ttScore = tt.ScoreFromTT(ttScore, ply)
 
-		if !isPVNode && ttDepth >= depth {
+		// Don't take TT cutoffs if searching with an excluded move
+		if excludedMove == types.MoveNone && !isPVNode && ttDepth >= depth {
 			switch ttType {
 			case tt.Exact:
 				return ttScore
@@ -160,7 +161,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	if !isPVNode && !inCheck && depth >= 3 && staticEval >= beta && hasNonPawns {
 		r := int8(3 + depth/4)
 		w.Board.MakeNullMove()
-		nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, false, types.MoveNone)
+		nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, false, types.MoveNone, types.MoveNone)
 		w.Board.UnmakeNullMove()
 
 		if w.TimeMan.Stopped.Load() {
@@ -174,6 +175,39 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 	}
 
+	extension := int8(0)
+
+	// Singular Extension (SE)
+	// If the TT move is significantly better than all other alternative moves,
+	// extend the search depth for the TT move.
+	if excludedMove == types.MoveNone && depth >= 6 && ttMove != types.MoveNone &&
+		!inCheck && ttFound && ttDepth >= depth-3 && ttType != tt.UpperBound &&
+		ttScore > -MateThreshold && ttScore < MateThreshold {
+
+		singularMargin := int32(depth) * 2
+		singularBeta := ttScore - singularMargin
+		sDepth := (depth - 1) / 2
+		if sDepth < 1 {
+			sDepth = 1
+		}
+
+		sScore := w.Search(sDepth, singularBeta-1, singularBeta, ply, false, false, ttMove, prevMove)
+
+		if w.TimeMan.Stopped.Load() {
+			return 0
+		}
+
+		if sScore < singularBeta {
+			extension = 1
+			if !isPVNode && sScore < singularBeta-25 {
+				extension = 2
+			}
+		} else if singularBeta >= beta {
+			// Multi-cut fail high: an alternative move beats beta at reduced depth
+			return singularBeta
+		}
+	}
+
 	var bestMove types.Move
 	var searchedMoves [256]types.Move
 	movesSearched := 0
@@ -181,12 +215,12 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	bestType := tt.UpperBound
 
 	// Staged Move Generation: Search TT move first before generating all moves
-	if ttMove != types.MoveNone && movegen.IsPseudoLegal(w.Board, ttMove) {
+	if ttMove != types.MoveNone && ttMove != excludedMove && movegen.IsPseudoLegal(w.Board, ttMove) {
 		if w.Board.MakeMove(ttMove) {
 			legalMoves++
 			searchedMoves[movesSearched] = ttMove
 
-			score := -w.Search(depth-1, -beta, -alpha, ply+1, isPVNode, true, ttMove)
+			score := -w.Search(depth-1+extension, -beta, -alpha, ply+1, isPVNode, true, types.MoveNone, ttMove)
 			w.Board.UnmakeMove(ttMove)
 			movesSearched++
 
@@ -246,14 +280,14 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		for i := 0; i < c; i++ {
 			m := PickNextMove(&mcList, mcScores[:mcList.Count], i)
-			if m == ttMove {
+			if m == ttMove || m == excludedMove {
 				continue
 			}
 			if !w.Board.MakeMove(m) {
 				continue
 			}
 
-			mcScore := -w.Search(mcDepth, -beta, -beta+1, ply+1, false, false, m)
+			mcScore := -w.Search(mcDepth, -beta, -beta+1, ply+1, false, false, types.MoveNone, m)
 			w.Board.UnmakeMove(m)
 
 			if w.TimeMan.Stopped.Load() {
@@ -279,7 +313,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 	for i := 0; i < ml.Count; i++ {
 		m := PickNextMove(&ml, scores[:ml.Count], i)
-		if m == ttMove {
+		if m == ttMove || m == excludedMove {
 			continue
 		}
 		isQuiet := !m.IsCapture() && !m.IsPromotion()
@@ -309,8 +343,8 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		// Principal Variation Search & LMR
 		if movesSearched == 0 {
-			// First move: full window
-			score = -w.Search(depth-1, -beta, -alpha, ply+1, isPVNode, true, m)
+			// First move: full window (extended if singular)
+			score = -w.Search(depth-1+extension, -beta, -alpha, ply+1, isPVNode, true, types.MoveNone, m)
 		} else {
 			// Late Move Reductions (LMR)
 			reduction := int8(0)
@@ -336,16 +370,16 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			}
 
 			// Null-window search with reduction
-			score = -w.Search(depth-1-reduction, -alpha-1, -alpha, ply+1, false, false, m)
+			score = -w.Search(depth-1-reduction, -alpha-1, -alpha, ply+1, false, false, types.MoveNone, m)
 
 			// If reduced search fails high, re-search at full depth
 			if reduction > 0 && score > alpha {
-				score = -w.Search(depth-1, -alpha-1, -alpha, ply+1, false, true, m)
+				score = -w.Search(depth-1, -alpha-1, -alpha, ply+1, false, true, types.MoveNone, m)
 			}
 
 			// If null-window fails high and in PV node, re-search with full window
 			if isPVNode && score > alpha && score < beta {
-				score = -w.Search(depth-1, -beta, -alpha, ply+1, true, true, m)
+				score = -w.Search(depth-1, -beta, -alpha, ply+1, true, true, types.MoveNone, m)
 			}
 		}
 
@@ -397,6 +431,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 	// 8. Checkmate or Stalemate detection
 	if legalMoves == 0 {
+		if excludedMove != types.MoveNone {
+			return alpha
+		}
 		if inCheck {
 			return -MateScore + int32(ply)
 		}

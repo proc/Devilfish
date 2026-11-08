@@ -46,6 +46,7 @@
   - **Razoring** to drop directly into quiescence when static eval is far below alpha.
   - **Null Move Pruning (NMP)** with adaptive reduction $R = 3 + \lfloor\text{depth}/4\rfloor$ and zugzwang safeguards.
   - **Multi-Cut Pruning (MPC)** in expected CUT nodes (depth $\ge 6$), pruning the sub-tree when $M \ge 3$ candidate moves out of $C = 8$ cause a beta cutoff at reduced depth ($d - 1 - 3$).
+  - **Singular Extensions (SE)** to verify whether the Transposition Table move is uniquely superior to all other alternatives; if so, extends search depth by +1 (or +2) ply to explore critical forced lines deeper.
   - **Late Move Pruning (LMP)** to prune quiet moves after finding a strong move at shallow depths.
   - **Futility Pruning** at frontier nodes.
   - **Late Move Reductions (LMR)** using logarithmic reduction tables based on depth and move number.
