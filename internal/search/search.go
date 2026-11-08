@@ -57,7 +57,7 @@ func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *a
 	}
 }
 
-func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode bool, prevMove types.Move) int32 {
+func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode bool, canMultiCut bool, prevMove types.Move) int32 {
 	// Periodically check search time/limits
 	w.LocalNodes++
 	if w.LocalNodes%2048 == 0 {
@@ -160,7 +160,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	if !isPVNode && !inCheck && depth >= 3 && staticEval >= beta && hasNonPawns {
 		r := int8(3 + depth/4)
 		w.Board.MakeNullMove()
-		nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, types.MoveNone)
+		nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, false, types.MoveNone)
 		w.Board.UnmakeNullMove()
 
 		if w.TimeMan.Stopped.Load() {
@@ -186,7 +186,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			legalMoves++
 			searchedMoves[movesSearched] = ttMove
 
-			score := -w.Search(depth-1, -beta, -alpha, ply+1, isPVNode, ttMove)
+			score := -w.Search(depth-1, -beta, -alpha, ply+1, isPVNode, true, ttMove)
 			w.Board.UnmakeMove(ttMove)
 			movesSearched++
 
@@ -225,7 +225,52 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 	}
 
-	// 7. Move Generation & Scoring (only needed if TT move did not cut off)
+	// 7. Multi-Cut Pruning (MPC)
+	// If at least M=3 out of the first C=8 candidate moves produce a beta cutoff
+	// at reduced depth (depth - 1 - R, R=3), the position is almost certainly a CUT node.
+	if canMultiCut && !isPVNode && !inCheck && depth >= 6 && hasNonPawns && staticEval >= beta-100 {
+		var mcList movegen.MoveList
+		movegen.GenerateMoves(w.Board, false, &mcList)
+
+		var mcScores [256]int32
+		ScoreMoves(w.Board, &mcList, mcScores[:mcList.Count], ttMove, ply, prevMove, w.History)
+
+		c := 8
+		if mcList.Count < c {
+			c = mcList.Count
+		}
+
+		mcR := int8(3)
+		mcDepth := depth - 1 - mcR
+		cutoffs := 0
+
+		for i := 0; i < c; i++ {
+			m := PickNextMove(&mcList, mcScores[:mcList.Count], i)
+			if m == ttMove {
+				continue
+			}
+			if !w.Board.MakeMove(m) {
+				continue
+			}
+
+			mcScore := -w.Search(mcDepth, -beta, -beta+1, ply+1, false, false, m)
+			w.Board.UnmakeMove(m)
+
+			if w.TimeMan.Stopped.Load() {
+				return 0
+			}
+
+			if mcScore >= beta {
+				cutoffs++
+				if cutoffs >= 3 {
+					w.TT.Store(w.Board.Hash, m, tt.ScoreToTT(beta, ply), depth, tt.LowerBound)
+					return beta
+				}
+			}
+		}
+	}
+
+	// 8. Move Generation & Scoring (only needed if TT move and Multi-Cut did not cut off)
 	var ml movegen.MoveList
 	movegen.GenerateMoves(w.Board, false, &ml)
 
@@ -265,7 +310,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		// Principal Variation Search & LMR
 		if movesSearched == 0 {
 			// First move: full window
-			score = -w.Search(depth-1, -beta, -alpha, ply+1, isPVNode, m)
+			score = -w.Search(depth-1, -beta, -alpha, ply+1, isPVNode, true, m)
 		} else {
 			// Late Move Reductions (LMR)
 			reduction := int8(0)
@@ -291,16 +336,16 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			}
 
 			// Null-window search with reduction
-			score = -w.Search(depth-1-reduction, -alpha-1, -alpha, ply+1, false, m)
+			score = -w.Search(depth-1-reduction, -alpha-1, -alpha, ply+1, false, false, m)
 
 			// If reduced search fails high, re-search at full depth
 			if reduction > 0 && score > alpha {
-				score = -w.Search(depth-1, -alpha-1, -alpha, ply+1, false, m)
+				score = -w.Search(depth-1, -alpha-1, -alpha, ply+1, false, true, m)
 			}
 
 			// If null-window fails high and in PV node, re-search with full window
 			if isPVNode && score > alpha && score < beta {
-				score = -w.Search(depth-1, -beta, -alpha, ply+1, true, m)
+				score = -w.Search(depth-1, -beta, -alpha, ply+1, true, true, m)
 			}
 		}
 
