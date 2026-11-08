@@ -14,23 +14,21 @@
 - **Zobrist Hashing** for positions, castling rights, and en passant files with full 3-fold repetition detection.
 - Fast move make/unmake with delta undo stack.
 
-### 2. Modern Tapered Evaluation
-- **Phase-interpolated Evaluation**: Smoothly blends Midgame (MG) and Endgame (EG) scores based on remaining non-pawn material.
-- **PeSTO-style Piece-Square Tables (PSQT)** for all piece types, mathematically mirrored for White and Black.
-- **Pawn Structure Analysis**:
-  - Doubled pawns penalty.
-  - Isolated pawns penalty.
-  - Passed pawns with rank-based exponential bonus and protected passer detection.
-- **Piece Positional Features**:
-  - Bishop pair bonus.
-  - Rooks on open and semi-open files.
-  - Rooks on the 7th rank.
-  - Knight and Bishop safe mobility counts (excluding squares under enemy pawn control).
-- **King Safety**:
-  - Midgame pawn shields.
-  - Open file penalties near the king.
-- **Static Exchange Evaluation (SEE)**:
-  - Exact net-gain calculation via swap algorithms for move ordering and pruning.
+### 2. Evaluation: NNUE & Handcrafted Classical Fallback
+- **NNUE (Efficiently Updatable Neural Network)**:
+  - Perspective-oriented neural network architecture: $768 \to 256 \times 2 \to 32 \to 1$.
+  - 768 input features ($12$ piece types $\times 64$ squares) with vertical symmetry ($sq \oplus 56$).
+  - **Incremental Accumulator Updates**: Updates 256-dimensional accumulators incrementally during search ($2$ to $4$ vector additions/subtractions per move) in $< 10$ nanoseconds.
+  - **Embedded Default Network**: Ships with a fully calibrated embedded network inside the binary, running with zero external dependencies.
+  - **Custom Model Loading**: Load external `.nnue` binary models via `--eval-file <path>` or UCI `setoption name EvalFile value <path>`.
+  - **Dual Engine Evaluation**: Toggle between NNUE and classical evaluation via `--no-nnue` or `setoption name UseNNUE value false`.
+- **Classical Tapered Evaluation (HCE)**:
+  - Smoothly blends Midgame (MG) and Endgame (EG) scores based on non-pawn material phase.
+  - PeSTO-style Piece-Square Tables (PSQT) for all piece types.
+  - Doubled, isolated, and protected passed pawns with exponential advance bonuses.
+  - Bishop pair, open/semi-open files, 7th rank rooks, and safe minor piece mobility.
+  - Midgame pawn shields and open file penalties near kings.
+  - **Static Exchange Evaluation (SEE)**: Exact net-gain calculation via swap algorithms for move ordering and pruning.
 
 ### 3. Search Engine
 - **Principal Variation Search (PVS)** / Negamax with Alpha-Beta pruning.
@@ -93,15 +91,21 @@ Fully compatible with modern chess GUIs (Cutechess, Arena, Banksia GUI, Fritz, L
    - `-t`, `--threads <N>`: Set number of Lazy SMP search threads.
    - `-hash`, `--hash <MB>`: Set Transposition Table size in MB.
    - `-c`, `--config <path>`: Specify custom config file path.
+   - `--eval-file <path>`: Specify external `.nnue` network file.
+   - `--no-nnue`: Disable NNUE evaluation and use classical HCE.
 3. **Runtime UCI Options**:
    - `setoption name Threads value <N>`
    - `setoption name Hash value <MB>`
+   - `setoption name UseNNUE value <true|false>`
+   - `setoption name EvalFile value <path>`
 
 Supports:
 - `uci`
 - `isready`
 - `setoption name Hash value <MB>`
 - `setoption name Threads value <N>`
+- `setoption name UseNNUE value <true|false>`
+- `setoption name EvalFile value <path>`
 - `ucinewgame`
 - `position [startpos | fen <fen>] [moves <m1> ...]`
 - `go [wtime <ms>] [btime <ms>] [winc <ms>] [binc <ms>] [movestogo <n>] [depth <d>] [nodes <n>] [movetime <ms>] [infinite]`

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"devilfish/internal/config"
+	"devilfish/internal/nnue"
 	"devilfish/internal/uci"
 )
 
@@ -21,6 +22,8 @@ func printHelp() {
 	fmt.Println("  -t, --threads <N>           Number of Lazy SMP search threads (overrides config file)")
 	fmt.Println("  -hash <MB>, --hash <MB>     Transposition Table size in Megabytes")
 	fmt.Println("  -c, --config <path>         Path to JSON config file (default: ~/.devilfish/config.json)")
+	fmt.Println("  --eval-file <path>          Path to custom NNUE network file (default: embedded)")
+	fmt.Println("  --no-nnue                   Disable NNUE evaluation (use classical HCE)")
 	fmt.Println("\nConfiguration File:")
 	fmt.Printf("  If present, configuration is automatically loaded from:\n    %s\n", config.GetDefaultConfigPath())
 	fmt.Println("  Example format: {\"threads\": 4, \"hash\": 128}")
@@ -28,6 +31,7 @@ func printHelp() {
 
 func main() {
 	var customConfigPath string
+	var evalFilePath string
 	var cliThreads int
 	var cliHash int
 	var isBench bool
@@ -111,6 +115,33 @@ func main() {
 			parts := strings.SplitN(arg, "=", 2)
 			customConfigPath = parts[1]
 			continue
+		}
+
+		// Handle --eval-file
+		if arg == "-eval-file" || arg == "--eval-file" {
+			if i+1 < len(args) {
+				evalFilePath = args[i+1]
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--eval-file=") || strings.HasPrefix(arg, "-eval-file=") {
+			parts := strings.SplitN(arg, "=", 2)
+			evalFilePath = parts[1]
+			continue
+		}
+
+		// Handle --no-nnue
+		if arg == "--no-nnue" || arg == "-no-nnue" {
+			nnue.Enabled = false
+			continue
+		}
+	}
+
+	if evalFilePath != "" {
+		if err := nnue.LoadFile(evalFilePath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
 		}
 	}
 

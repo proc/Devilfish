@@ -7,6 +7,7 @@ import (
 	"devilfish/internal/board"
 	"devilfish/internal/eval"
 	"devilfish/internal/movegen"
+	"devilfish/internal/nnue"
 	"devilfish/internal/tt"
 	"devilfish/internal/types"
 )
@@ -43,12 +44,20 @@ type SearchWorker struct {
 	PVArray           [MaxPly][MaxPly]types.Move
 	PVLength          [MaxPly]int
 	StaticEvalHistory [MaxPly]int32
+	Accumulators      [MaxPly]nnue.Accumulator
 	RootBestMove      types.Move
 	RootScore         int32
 }
 
+func (w *SearchWorker) Evaluate(ply int) int32 {
+	if nnue.Enabled && nnue.ActiveNetwork != nil && ply < MaxPly {
+		return nnue.Evaluate(&w.Accumulators[ply], w.Board.SideToMove)
+	}
+	return eval.EvaluateClassical(w.Board)
+}
+
 func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *atomic.Uint64) *SearchWorker {
-	return &SearchWorker{
+	w := &SearchWorker{
 		ID:      id,
 		Board:   b.Clone(),
 		TT:      ttTable,
@@ -56,9 +65,15 @@ func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *a
 		History: NewSearchHistory(),
 		Nodes:   nodes,
 	}
+	nnue.Refresh(w.Board, &w.Accumulators[0])
+	return w
 }
 
 func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode bool, canMultiCut bool, excludedMove types.Move, prevMove types.Move) int32 {
+	if ply == 0 {
+		nnue.Refresh(w.Board, &w.Accumulators[0])
+	}
+
 	// Periodically check search time/limits
 	w.LocalNodes++
 	if w.LocalNodes%2048 == 0 {
@@ -105,7 +120,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	}
 
 	if ply >= MaxPly-1 {
-		return eval.Evaluate(w.Board)
+		return w.Evaluate(ply)
 	}
 
 	// 3. Transposition Table Probe
@@ -136,7 +151,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	if inCheck {
 		staticEval = -Infinity
 	} else {
-		staticEval = eval.Evaluate(w.Board)
+		staticEval = w.Evaluate(ply)
 		if ttFound {
 			if ttType == tt.Exact || (ttType == tt.LowerBound && ttScore > staticEval) || (ttType == tt.UpperBound && ttScore < staticEval) {
 				staticEval = ttScore
@@ -185,6 +200,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		r := int8(3 + depth/4)
 		if !improving {
 			r++
+		}
+		if ply+1 < MaxPly {
+			w.Accumulators[ply+1] = w.Accumulators[ply]
 		}
 		w.Board.MakeNullMove()
 		nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, false, types.MoveNone, types.MoveNone)
@@ -242,6 +260,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 	// Staged Move Generation: Search TT move first before generating all moves
 	if ttMove != types.MoveNone && ttMove != excludedMove && movegen.IsPseudoLegal(w.Board, ttMove) {
+		if ply+1 < MaxPly {
+			nnue.Update(&w.Accumulators[ply], &w.Accumulators[ply+1], ttMove, w.Board)
+		}
 		if w.Board.MakeMove(ttMove) {
 			legalMoves++
 			searchedMoves[movesSearched] = ttMove
@@ -313,6 +334,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			if m == ttMove || m == excludedMove {
 				continue
 			}
+			if ply+1 < MaxPly {
+				nnue.Update(&w.Accumulators[ply], &w.Accumulators[ply+1], m, w.Board)
+			}
 			if !w.Board.MakeMove(m) {
 				continue
 			}
@@ -354,6 +378,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			m := PickNextMove(&mcList, mcScores[:mcList.Count], i)
 			if m == ttMove || m == excludedMove {
 				continue
+			}
+			if ply+1 < MaxPly {
+				nnue.Update(&w.Accumulators[ply], &w.Accumulators[ply+1], m, w.Board)
 			}
 			if !w.Board.MakeMove(m) {
 				continue
@@ -438,6 +465,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			continue
 		}
 
+		if ply+1 < MaxPly {
+			nnue.Update(&w.Accumulators[ply], &w.Accumulators[ply+1], m, w.Board)
+		}
 		if !w.Board.MakeMove(m) {
 			continue
 		}
@@ -589,7 +619,7 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 	}
 
 	if ply >= MaxPly-1 {
-		return eval.Evaluate(w.Board)
+		return w.Evaluate(ply)
 	}
 
 	// Draw detection in quiescence
@@ -601,7 +631,7 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 
 	// Stand-pat score
 	if !inCheck {
-		standPat := eval.Evaluate(w.Board)
+		standPat := w.Evaluate(ply)
 		if standPat >= beta {
 			return beta
 		}
@@ -639,6 +669,9 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 			continue
 		}
 
+		if ply+1 < MaxPly {
+			nnue.Update(&w.Accumulators[ply], &w.Accumulators[ply+1], m, w.Board)
+		}
 		if !w.Board.MakeMove(m) {
 			continue
 		}

@@ -1,0 +1,119 @@
+package nnue
+
+import (
+	"os"
+	"testing"
+
+	"devilfish/internal/board"
+	"devilfish/internal/movegen"
+	"devilfish/internal/types"
+)
+
+func TestFeatureIndex(t *testing.T) {
+	wpE2 := FeatureIndex(types.White, types.WhitePawn, types.E2)
+	bpE7 := FeatureIndex(types.Black, types.BlackPawn, types.E7)
+
+	if wpE2 < 0 || wpE2 >= NumFeatures {
+		t.Fatalf("invalid feature index for White Pawn on E2: %d", wpE2)
+	}
+
+	// Due to vertical symmetry (sq ^ 56), White Pawn on E2 should match Black Pawn on E7
+	if wpE2 != bpE7 {
+		t.Errorf("expected vertical symmetry between White P on E2 (%d) and Black P on E7 (%d)", wpE2, bpE7)
+	}
+}
+
+func TestAccumulatorRefreshAndEvaluate(t *testing.T) {
+	b, err := board.ParseFEN(board.StartFEN)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var acc Accumulator
+	Refresh(b, &acc)
+
+	score := Evaluate(&acc, b.SideToMove)
+	// Startpos score should be balanced around zero (within tempo margin)
+	if score < -100 || score > 100 {
+		t.Errorf("expected balanced startpos score, got %d", score)
+	}
+
+	// White is up a queen
+	bQueenUp, _ := board.ParseFEN("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+	var accQueen Accumulator
+	Refresh(bQueenUp, &accQueen)
+	scoreQueen := Evaluate(&accQueen, bQueenUp.SideToMove)
+
+	if scoreQueen <= score+300 {
+		t.Errorf("expected substantial White advantage when up a queen, got %d vs %d", scoreQueen, score)
+	}
+}
+
+func TestIncrementalUpdateConsistency(t *testing.T) {
+	b, err := board.ParseFEN(board.StartFEN)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var accRoot, accIncremental, accFresh Accumulator
+	Refresh(b, &accRoot)
+
+	// Test across all legal moves from start position
+	legalMoves := movegen.GenerateLegalMoves(b)
+	for _, m := range legalMoves {
+		// 1. Incremental update
+		Update(&accRoot, &accIncremental, m, b)
+
+		// 2. Make move on board and compute fresh accumulator
+		bCopy := b.Clone()
+		bCopy.MakeMove(m)
+		Refresh(bCopy, &accFresh)
+
+		// 3. Verify White accumulator matches exactly
+		for i := 0; i < HiddenSize; i++ {
+			if accIncremental.White[i] != accFresh.White[i] {
+				t.Fatalf("move %s: mismatch in White accumulator at index %d: incremental %d vs fresh %d",
+					m, i, accIncremental.White[i], accFresh.White[i])
+			}
+			if accIncremental.Black[i] != accFresh.Black[i] {
+				t.Fatalf("move %s: mismatch in Black accumulator at index %d: incremental %d vs fresh %d",
+					m, i, accIncremental.Black[i], accFresh.Black[i])
+			}
+		}
+
+		// 4. Verify evaluation scores match
+		incScore := Evaluate(&accIncremental, bCopy.SideToMove)
+		freshScore := Evaluate(&accFresh, bCopy.SideToMove)
+		if incScore != freshScore {
+			t.Fatalf("move %s: eval score mismatch: incremental %d vs fresh %d", m, incScore, freshScore)
+		}
+	}
+}
+
+func TestSaveAndLoad(t *testing.T) {
+	tmpFile := "test_network.nnue"
+	defer os.Remove(tmpFile)
+
+	b, _ := board.ParseFEN(board.StartFEN)
+	var accBefore Accumulator
+	Refresh(b, &accBefore)
+	scoreBefore := Evaluate(&accBefore, b.SideToMove)
+
+	// Save active network
+	if err := SaveFile(tmpFile); err != nil {
+		t.Fatalf("SaveFile failed: %v", err)
+	}
+
+	// Load it back
+	if err := LoadFile(tmpFile); err != nil {
+		t.Fatalf("LoadFile failed: %v", err)
+	}
+
+	var accAfter Accumulator
+	Refresh(b, &accAfter)
+	scoreAfter := Evaluate(&accAfter, b.SideToMove)
+
+	if scoreBefore != scoreAfter {
+		t.Errorf("eval changed after load: before %d, after %d", scoreBefore, scoreAfter)
+	}
+}

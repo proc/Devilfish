@@ -14,6 +14,7 @@ import (
 	"devilfish/internal/config"
 	"devilfish/internal/eval"
 	"devilfish/internal/movegen"
+	"devilfish/internal/nnue"
 	"devilfish/internal/search"
 	"devilfish/internal/types"
 )
@@ -102,6 +103,8 @@ func (u *UCI) cmdUCI() {
 	fmt.Fprintf(u.out, "id author %s\n", EngineAuthor)
 	fmt.Fprintf(u.out, "option name Hash type spin default %d min 1 max 65536\n", u.engine.TT.SizeMB())
 	fmt.Fprintf(u.out, "option name Threads type spin default %d min 1 max 512\n", u.engine.NumThreads)
+	fmt.Fprintf(u.out, "option name UseNNUE type check default %t\n", nnue.Enabled)
+	fmt.Fprintf(u.out, "option name EvalFile type string default <embedded>\n")
 	fmt.Fprintf(u.out, "uciok\n")
 }
 
@@ -125,6 +128,22 @@ func (u *UCI) cmdSetOption(args []string) {
 					threads, err := strconv.Atoi(valStr)
 					if err == nil && threads > 0 {
 						u.engine.SetThreads(threads)
+					}
+				case "usennue":
+					valLower := strings.ToLower(valStr)
+					if valLower == "true" || valLower == "1" {
+						nnue.Enabled = true
+					} else if valLower == "false" || valLower == "0" {
+						nnue.Enabled = false
+					}
+				case "evalfile":
+					if valStr != "" && valStr != "<embedded>" {
+						err := nnue.LoadFile(valStr)
+						if err != nil {
+							fmt.Fprintf(u.out, "info string failed to load nnue file: %v\n", err)
+						} else {
+							fmt.Fprintf(u.out, "info string loaded nnue file %s\n", valStr)
+						}
 					}
 				}
 			}
@@ -295,8 +314,21 @@ func (u *UCI) cmdPerft(args []string) {
 }
 
 func (u *UCI) cmdEval() {
-	score := eval.Evaluate(u.board)
-	fmt.Fprintf(u.out, "Static evaluation: %d centipawns (from %s's perspective)\n", score, u.board.SideToMove)
+	classicalScore := eval.EvaluateClassical(u.board)
+	var acc nnue.Accumulator
+	nnue.Refresh(u.board, &acc)
+	nnueScore := nnue.Evaluate(&acc, u.board.SideToMove)
+
+	active := "NNUE"
+	activeScore := nnueScore
+	if !nnue.Enabled {
+		active = "Classical"
+		activeScore = classicalScore
+	}
+
+	fmt.Fprintf(u.out, "NNUE evaluation       : %+d cp\n", nnueScore)
+	fmt.Fprintf(u.out, "Classical evaluation  : %+d cp\n", classicalScore)
+	fmt.Fprintf(u.out, "Active evaluation (%s): %+d cp (from %s's perspective)\n", active, activeScore, u.board.SideToMove)
 }
 
 func (u *UCI) cmdDisplay() {

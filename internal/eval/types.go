@@ -13,6 +13,14 @@ func (s Score) Sub(other Score) Score {
 	return Score{mg: s.mg - other.mg, eg: s.eg - other.eg}
 }
 
+func (s Score) MG() int32 {
+	return s.mg
+}
+
+func (s Score) EG() int32 {
+	return s.eg
+}
+
 const (
 	PawnPhase   = 0
 	KnightPhase = 1

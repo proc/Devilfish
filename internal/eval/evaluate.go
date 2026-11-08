@@ -3,6 +3,7 @@ package eval
 import (
 	"devilfish/internal/bitboard"
 	"devilfish/internal/board"
+	"devilfish/internal/nnue"
 	"devilfish/internal/types"
 )
 
@@ -18,6 +19,15 @@ var PassedPawnBonus = [8]Score{
 }
 
 func Evaluate(b *board.Board) int32 {
+	if nnue.Enabled && nnue.ActiveNetwork != nil {
+		var acc nnue.Accumulator
+		nnue.Refresh(b, &acc)
+		return nnue.Evaluate(&acc, b.SideToMove)
+	}
+	return EvaluateClassical(b)
+}
+
+func EvaluateClassical(b *board.Board) int32 {
 	var whiteScore, blackScore Score
 	var phase int32
 
