@@ -77,6 +77,9 @@ func (b *Board) KingSquare(c types.Color) types.Square {
 }
 
 func (b *Board) PutPiece(p types.Piece, sq types.Square) {
+	if p == types.PieceNone || p.Color() >= types.ColorNone || sq >= types.SquareNone {
+		return
+	}
 	b.Pieces[sq] = p
 	bb := bitboard.SquareBB[sq]
 	b.PieceBB[p] |= bb
@@ -85,8 +88,11 @@ func (b *Board) PutPiece(p types.Piece, sq types.Square) {
 }
 
 func (b *Board) RemovePiece(sq types.Square) types.Piece {
+	if sq >= types.SquareNone {
+		return types.PieceNone
+	}
 	p := b.Pieces[sq]
-	if p == types.PieceNone {
+	if p == types.PieceNone || p.Color() >= types.ColorNone {
 		return types.PieceNone
 	}
 	b.Pieces[sq] = types.PieceNone
@@ -98,6 +104,9 @@ func (b *Board) RemovePiece(sq types.Square) types.Piece {
 }
 
 func (b *Board) MovePiece(p types.Piece, from, to types.Square) {
+	if p == types.PieceNone || p.Color() >= types.ColorNone || from >= types.SquareNone || to >= types.SquareNone {
+		return
+	}
 	fromBB := bitboard.SquareBB[from]
 	toBB := bitboard.SquareBB[to]
 	fromToBB := fromBB | toBB

@@ -148,10 +148,12 @@ func (e *Engine) Search(
 
 		// Ensure we extract a valid move
 		bestMoveCandidate := master.PVArray[0][0]
-		if bestMoveCandidate == types.MoveNone {
+		if bestMoveCandidate == types.MoveNone || !isLegalMove(b, bestMoveCandidate) {
 			ttM, _, _, _, found := e.TT.Probe(b.Hash)
-			if found && ttM != types.MoveNone {
+			if found && ttM != types.MoveNone && isLegalMove(b, ttM) {
 				bestMoveCandidate = ttM
+			} else {
+				bestMoveCandidate = types.MoveNone
 			}
 		}
 
@@ -215,8 +217,8 @@ func (e *Engine) Search(
 	e.Stopped.Store(true)
 	wg.Wait()
 
-	// Fallback move if no move was found (e.g. instant time stop)
-	if rootBestMove == types.MoveNone {
+	// Fallback move if no move was found or if rootBestMove is not legal
+	if rootBestMove == types.MoveNone || !isLegalMove(b, rootBestMove) {
 		legalMoves := movegen.GenerateLegalMoves(b)
 		if len(legalMoves) > 0 {
 			rootBestMove = legalMoves[0]
@@ -239,13 +241,17 @@ func (e *Engine) extractPV(b *board.Board, master *SearchWorker, depth int8) []t
 		visited[hash] = true
 
 		m, _, _, _, found := e.TT.Probe(hash)
-		if !found || m == types.MoveNone {
+		if !found || m == types.MoveNone || !isLegalMove(tempB, m) {
 			// Fallback to PVArray
 			if d < master.PVLength[0] {
 				m = master.PVArray[0][d]
 			} else {
 				break
 			}
+		}
+
+		if m == types.MoveNone || !isLegalMove(tempB, m) {
+			break
 		}
 
 		if !tempB.MakeMove(m) {
@@ -255,6 +261,19 @@ func (e *Engine) extractPV(b *board.Board, master *SearchWorker, depth int8) []t
 	}
 
 	return pv
+}
+
+func isLegalMove(b *board.Board, m types.Move) bool {
+	if m == types.MoveNone {
+		return false
+	}
+	legalMoves := movegen.GenerateLegalMoves(b)
+	for _, lm := range legalMoves {
+		if lm == m {
+			return true
+		}
+	}
+	return false
 }
 
 func FormatInfo(info SearchInfo) string {

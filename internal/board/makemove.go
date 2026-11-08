@@ -5,18 +5,35 @@ import (
 )
 
 func (b *Board) MakeMove(m types.Move) bool {
+	if m == types.MoveNone {
+		return false
+	}
 	from := m.From()
 	to := m.To()
-	flags := m.Flags()
+	if from >= types.SquareNone || to >= types.SquareNone || from == to {
+		return false
+	}
+
 	us := b.SideToMove
-	them := us.Other()
 	movingPiece := b.Pieces[from]
+	if movingPiece == types.PieceNone || movingPiece.Color() != us {
+		return false
+	}
+
+	flags := m.Flags()
+	them := us.Other()
 
 	capturedPiece := b.Pieces[to]
 	if m.IsEnPassant() {
 		if us == types.White {
+			if to < 8 {
+				return false
+			}
 			capturedPiece = b.Pieces[to-8]
 		} else {
+			if to >= 56 {
+				return false
+			}
 			capturedPiece = b.Pieces[to+8]
 		}
 	}
@@ -116,6 +133,9 @@ func (b *Board) MakeMove(m types.Move) bool {
 }
 
 func (b *Board) UnmakeMove(m types.Move) {
+	if len(b.UndoStack) == 0 {
+		return
+	}
 	undo := b.UndoStack[len(b.UndoStack)-1]
 	b.UndoStack = b.UndoStack[:len(b.UndoStack)-1]
 
