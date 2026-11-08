@@ -53,7 +53,11 @@ func ScoreMoves(
 				victim = types.Pawn
 			}
 			mvvLva := PieceMVV[victim]*10 - PieceMVV[attacker]
-			scores[i] = 10000000 + mvvLva*1000
+			capHist := int32(0)
+			if attacker < 7 && victim < 7 && m.To() < 64 {
+				capHist = history.CaptureHistory[attacker][m.To()][victim]
+			}
+			scores[i] = 10000000 + mvvLva*1000 + capHist
 			continue
 		}
 
@@ -73,8 +77,12 @@ func ScoreMoves(
 			continue
 		}
 
-		// 5. History Heuristic
-		scores[i] = history.HistoryTable[side][m.From()][m.To()]
+		// 5. History Heuristic + Continuation History
+		histScore := history.HistoryTable[side][m.From()][m.To()]
+		if prevMove != types.MoveNone && prevMove.To() < 64 && m.To() < 64 {
+			histScore += history.ContHistory[prevMove.To()][m.To()]
+		}
+		scores[i] = histScore
 	}
 }
 

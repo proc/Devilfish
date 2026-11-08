@@ -32,18 +32,19 @@ func init() {
 }
 
 type SearchWorker struct {
-	ID          int
-	Board       *board.Board
-	TT          *tt.TT
-	TimeMan     *TimeManager
-	History     *SearchHistory
-	Nodes       *atomic.Uint64
-	LocalNodes  uint64
-	SelDepth    int8
-	PVArray     [MaxPly][MaxPly]types.Move
-	PVLength    [MaxPly]int
-	RootBestMove types.Move
-	RootScore   int32
+	ID                int
+	Board             *board.Board
+	TT                *tt.TT
+	TimeMan           *TimeManager
+	History           *SearchHistory
+	Nodes             *atomic.Uint64
+	LocalNodes        uint64
+	SelDepth          int8
+	PVArray           [MaxPly][MaxPly]types.Move
+	PVLength          [MaxPly]int
+	StaticEvalHistory [MaxPly]int32
+	RootBestMove      types.Move
+	RootScore         int32
 }
 
 func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *atomic.Uint64) *SearchWorker {
@@ -131,13 +132,35 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 	}
 
-	staticEval := eval.Evaluate(w.Board)
+	var staticEval int32
+	if inCheck {
+		staticEval = -Infinity
+	} else {
+		staticEval = eval.Evaluate(w.Board)
+		if ttFound {
+			if ttType == tt.Exact || (ttType == tt.LowerBound && ttScore > staticEval) || (ttType == tt.UpperBound && ttScore < staticEval) {
+				staticEval = ttScore
+			}
+		}
+	}
+	if ply < MaxPly {
+		w.StaticEvalHistory[ply] = staticEval
+	}
+
+	// Improving flag: static evaluation is higher than 2 plies ago (same player's last turn)
+	improving := false
+	if !inCheck && ply >= 2 && ply < MaxPly && w.StaticEvalHistory[ply-2] != -Infinity {
+		improving = staticEval > w.StaticEvalHistory[ply-2]
+	}
 
 	// 4. Reverse Futility Pruning (Static Null Move Pruning)
-	if !isPVNode && !inCheck && depth <= 4 {
+	if !isPVNode && !inCheck && depth <= 6 && abs(beta) < MateThreshold {
 		margin := int32(depth) * 80
+		if !improving {
+			margin = int32(depth) * 60
+		}
 		if staticEval-margin >= beta {
-			return staticEval
+			return staticEval - margin
 		}
 	}
 
@@ -160,6 +183,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 	if !isPVNode && !inCheck && depth >= 3 && staticEval >= beta && hasNonPawns {
 		r := int8(3 + depth/4)
+		if !improving {
+			r++
+		}
 		w.Board.MakeNullMove()
 		nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, false, types.MoveNone, types.MoveNone)
 		w.Board.UnmakeNullMove()
@@ -241,7 +267,15 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				if !ttMove.IsCapture() && !ttMove.IsPromotion() {
 					w.History.UpdateKillers(ply, ttMove)
 					w.History.UpdateHistory(us, ttMove, depth)
+					w.History.UpdateContHistory(prevMove, ttMove, depth)
 					w.History.UpdateCounterMove(prevMove, ttMove)
+				} else if ttMove.IsCapture() {
+					attacker := w.Board.Pieces[ttMove.From()].Type()
+					victim := w.Board.Pieces[ttMove.To()].Type()
+					if ttMove.IsEnPassant() {
+						victim = types.Pawn
+					}
+					w.History.UpdateCaptureHistory(attacker, victim, ttMove.To(), depth)
 				}
 				return beta
 			}
@@ -259,7 +293,45 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 	}
 
-	// 7. Multi-Cut Pruning (MPC)
+	// 7. ProbCut (Probability Cut)
+	// If a shallow capture search with elevated beta fails high, the node is almost certainly a CUT node.
+	if canMultiCut && !isPVNode && !inCheck && depth >= 5 && abs(beta) < MateThreshold {
+		probBeta := beta + 200
+		probDepth := depth - 4
+		if probDepth < 1 {
+			probDepth = 1
+		}
+
+		var probList movegen.MoveList
+		movegen.GenerateMoves(w.Board, true, &probList)
+
+		var probScores [256]int32
+		ScoreMoves(w.Board, &probList, probScores[:probList.Count], ttMove, ply, prevMove, w.History)
+
+		for i := 0; i < probList.Count; i++ {
+			m := PickNextMove(&probList, probScores[:probList.Count], i)
+			if m == ttMove || m == excludedMove {
+				continue
+			}
+			if !w.Board.MakeMove(m) {
+				continue
+			}
+
+			probScore := -w.Search(probDepth, -probBeta, -probBeta+1, ply+1, false, false, types.MoveNone, m)
+			w.Board.UnmakeMove(m)
+
+			if w.TimeMan.Stopped.Load() {
+				return 0
+			}
+
+			if probScore >= probBeta {
+				w.TT.Store(w.Board.Hash, m, tt.ScoreToTT(probScore, ply), depth, tt.LowerBound)
+				return probScore
+			}
+		}
+	}
+
+	// 8. Multi-Cut Pruning (MPC)
 	// If at least M=3 out of the first C=8 candidate moves produce a beta cutoff
 	// at reduced depth (depth - 1 - R, R=3), the position is almost certainly a CUT node.
 	if canMultiCut && !isPVNode && !inCheck && depth >= 6 && hasNonPawns && staticEval >= beta-100 {
@@ -328,12 +400,20 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		isQuiet := !m.IsCapture() && !m.IsPromotion()
 
 		// Late Move Pruning (LMP)
-		if !isPVNode && !inCheck && depth <= 4 && isQuiet && legalMoves >= (3+2*int(depth)*int(depth)) {
+		lmpThreshold := 3 + 2*int(depth)*int(depth)
+		if !improving {
+			lmpThreshold = lmpThreshold / 2
+		}
+		if !isPVNode && !inCheck && depth <= 4 && isQuiet && legalMoves >= lmpThreshold {
 			continue
 		}
 
 		// Futility Pruning
-		if !isPVNode && !inCheck && depth <= 3 && isQuiet && (staticEval+int32(depth)*100 <= alpha) {
+		futMargin := int32(depth) * 100
+		if !improving {
+			futMargin = int32(depth) * 75
+		}
+		if !isPVNode && !inCheck && depth <= 3 && isQuiet && (staticEval+futMargin <= alpha) {
 			continue
 		}
 
@@ -341,7 +421,14 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		// Prune quiet moves with poor history score at shallow depths
 		if !isPVNode && !inCheck && depth <= 4 && isQuiet && movesSearched > 0 && m != killer1 && m != killer2 && m != counterMove {
 			histScore := w.History.HistoryTable[us][m.From()][m.To()]
-			if histScore < -int32(depth)*512 {
+			if prevMove != types.MoveNone && prevMove.To() < 64 && m.To() < 64 {
+				histScore += w.History.ContHistory[prevMove.To()][m.To()]
+			}
+			histMargin := -int32(depth) * 512
+			if !improving {
+				histMargin = -int32(depth) * 256
+			}
+			if histScore < histMargin {
 				continue
 			}
 		}
@@ -379,6 +466,23 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				if isPVNode {
 					reduction--
 				}
+				if !improving {
+					reduction++
+				} else {
+					reduction--
+				}
+
+				// History-based LMR adjustment
+				hist := w.History.HistoryTable[us][m.From()][m.To()]
+				if prevMove != types.MoveNone && prevMove.To() < 64 && m.To() < 64 {
+					hist += w.History.ContHistory[prevMove.To()][m.To()]
+				}
+				if hist > 4000 {
+					reduction--
+				} else if hist < -4000 {
+					reduction++
+				}
+
 				if reduction < 0 {
 					reduction = 0
 				}
@@ -421,6 +525,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			if isQuiet {
 				w.History.UpdateKillers(ply, m)
 				w.History.UpdateHistory(us, m, depth)
+				w.History.UpdateContHistory(prevMove, m, depth)
 				w.History.UpdateCounterMove(prevMove, m)
 
 				// Penalize preceding quiet moves that failed to produce a cutoff
@@ -428,8 +533,16 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					prevQuiet := searchedMoves[j]
 					if !prevQuiet.IsCapture() && !prevQuiet.IsPromotion() {
 						w.History.PenalizeHistory(us, prevQuiet, depth)
+						w.History.PenalizeContHistory(prevMove, prevQuiet, depth)
 					}
 				}
+			} else if m.IsCapture() {
+				attacker := w.Board.Pieces[m.From()].Type()
+				victim := w.Board.Pieces[m.To()].Type()
+				if m.IsEnPassant() {
+					victim = types.Pawn
+				}
+				w.History.UpdateCaptureHistory(attacker, victim, m.To(), depth)
 			}
 			return beta
 		}
@@ -551,4 +664,11 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 	}
 
 	return alpha
+}
+
+func abs(x int32) int32 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }

@@ -130,3 +130,19 @@ func (tm *TimeManager) CanStartNewIteration() bool {
 	}
 	return true
 }
+
+// AdjustOptTime dynamically scales the optimal search time based on move stability and score drops.
+func (tm *TimeManager) AdjustOptTime(factor float64) {
+	if tm.OptTime <= 0 || tm.Infinite {
+		return
+	}
+	newOptMs := int64(float64(tm.OptTime.Milliseconds()) * factor)
+	if newOptMs < 10 {
+		newOptMs = 10
+	}
+	maxMs := tm.MaxTime.Milliseconds()
+	if maxMs > 0 && newOptMs > maxMs {
+		newOptMs = maxMs
+	}
+	tm.OptTime = time.Duration(newOptMs) * time.Millisecond
+}

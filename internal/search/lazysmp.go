@@ -100,6 +100,9 @@ func (e *Engine) Search(
 	}
 
 	startTime := time.Now()
+	var prevIterationScore int32
+	var prevIterationBestMove types.Move
+	var bestMoveStability int
 
 	// Master iterative deepening loop
 	for depth := int8(1); depth <= maxDepth; depth++ {
@@ -207,6 +210,26 @@ func (e *Engine) Search(
 		if isMate && mateIn > 0 && mateIn <= int(depth)/2 {
 			break
 		}
+
+		// Dynamic Time Management: Best move stability & fail-low recovery
+		if depth >= 5 && rootBestMove != types.MoveNone {
+			if rootBestMove == prevIterationBestMove {
+				bestMoveStability++
+				// If the best move has been rock-solid across 4+ iterations, reduce time to save clock
+				if bestMoveStability >= 4 {
+					tm.AdjustOptTime(0.85)
+				}
+			} else {
+				bestMoveStability = 0
+			}
+
+			// If the score dropped significantly from the previous iteration, extend time to recover
+			if prevIterationScore != 0 && score < prevIterationScore-40 {
+				tm.AdjustOptTime(1.35)
+			}
+		}
+		prevIterationBestMove = rootBestMove
+		prevIterationScore = rootScore
 
 		if !tm.CanStartNewIteration() {
 			break

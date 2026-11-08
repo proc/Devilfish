@@ -42,28 +42,34 @@
   - Dynamic evasion search when in check.
   - SEE pruning to eliminate losing captures.
 - **Pruning & Reductions**:
-  - **Reverse Futility Pruning (Static Null Move Pruning)** at shallow depths.
+  - **The `improving` Flag Heuristic**: Tracks whether the static evaluation has improved compared to two plies ago (same player's previous turn), dynamically tuning pruning aggressiveness and LMR depth reductions.
+  - **Reverse Futility Pruning (Static Null Move Pruning)** at shallow depths, tightened when `!improving`.
   - **Razoring** to drop directly into quiescence when static eval is far below alpha.
-  - **Null Move Pruning (NMP)** with adaptive reduction $R = 3 + \lfloor\text{depth}/4\rfloor$ and zugzwang safeguards.
+  - **Null Move Pruning (NMP)** with adaptive reduction $R = 3 + \lfloor\text{depth}/4\rfloor$ (+1 if `!improving`) and zugzwang safeguards.
+  - **ProbCut (Probability Cut)** at depth $\ge 5$, quickly pruning CUT nodes when a shallow capture search beats $\beta + 200$ at reduced depth ($d - 4$).
   - **Multi-Cut Pruning (MPC)** in expected CUT nodes (depth $\ge 6$), pruning the sub-tree when $M \ge 3$ candidate moves out of $C = 8$ cause a beta cutoff at reduced depth ($d - 1 - 3$).
   - **Singular Extensions (SE)** to verify whether the Transposition Table move is uniquely superior to all other alternatives; if so, extends search depth by +1 (or +2) ply to explore critical forced lines deeper.
-  - **Late Move Pruning (LMP)** to prune quiet moves after finding a strong move at shallow depths.
+  - **Late Move Pruning (LMP)** to prune quiet moves after finding a strong move at shallow depths (scaled by `improving`).
   - **History Pruning**: Pruning unpromising quiet moves whose history heuristic scores are significantly negative at shallow depths ($d \le 4$), bypassing moves that have consistently failed to produce cutoffs.
   - **Futility Pruning** at frontier nodes.
-  - **Late Move Reductions (LMR)** using logarithmic reduction tables based on depth and move number.
+  - **Late Move Reductions (LMR)** using logarithmic reduction tables dynamically scaled by the `improving` flag, quiet history, and continuation history.
   - **Check Extensions** to search critical checks deeper.
   - **Mate Distance Pruning** to prioritize faster mates.
 
 ### 4. Move Ordering
 1. **Transposition Table Best Move** (PV move).
-2. **Winning & Equal Captures / Promotions** (MVV-LVA + SEE $\ge 0$).
+2. **Winning & Equal Captures / Promotions** (MVV-LVA + Capture History + SEE $\ge 0$).
 3. **Killer Moves** (2 killer slots per ply).
 4. **Countermove Heuristic** (history of responses to opponent's previous move).
-5. **History Heuristic** (gravity-damped cutoff bonus table).
+5. **History & Continuation History** (gravity-damped cutoff bonus table + 1-ply `conthist`).
 6. **Losing Captures** (SEE $< 0$).
 7. **Quiet Moves**.
 
-### 5. Multithreading: Lazy Symmetric Multiprocessing (Lazy SMP)
+### 5. Dynamic Time Management
+- **Best Move Stability**: Dynamically tracks whether the root move remains stable across multiple iterative deepening iterations ($\ge 4$), scaling back time consumption to save clock for complex positions.
+- **Fail-Low Recovery**: Automatically grants search time extensions when the root evaluation drops unexpectedly ($\Delta > 40$ cp), enabling recovery against hidden tactical refutations.
+
+### 6. Multithreading: Lazy Symmetric Multiprocessing (Lazy SMP)
 - Multiple worker goroutines search the tree concurrently.
 - Workers share a unified **Transposition Table** using lockless XOR verification:
   $$\text{Key} = \text{Hash} \oplus \text{Data}$$
