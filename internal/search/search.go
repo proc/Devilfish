@@ -311,6 +311,15 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	var scores [256]int32
 	ScoreMoves(w.Board, &ml, scores[:ml.Count], types.MoveNone, ply, prevMove, w.History)
 
+	var killer1, killer2, counterMove types.Move
+	if ply < MaxPly {
+		killer1 = w.History.Killers[ply][0]
+		killer2 = w.History.Killers[ply][1]
+	}
+	if prevMove != types.MoveNone {
+		counterMove = w.History.CounterMoves[prevMove.From()][prevMove.To()]
+	}
+
 	for i := 0; i < ml.Count; i++ {
 		m := PickNextMove(&ml, scores[:ml.Count], i)
 		if m == ttMove || m == excludedMove {
@@ -326,6 +335,15 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		// Futility Pruning
 		if !isPVNode && !inCheck && depth <= 3 && isQuiet && (staticEval+int32(depth)*100 <= alpha) {
 			continue
+		}
+
+		// History Pruning
+		// Prune quiet moves with poor history score at shallow depths
+		if !isPVNode && !inCheck && depth <= 4 && isQuiet && movesSearched > 0 && m != killer1 && m != killer2 && m != counterMove {
+			histScore := w.History.HistoryTable[us][m.From()][m.To()]
+			if histScore < -int32(depth)*512 {
+				continue
+			}
 		}
 
 		// SEE Pruning

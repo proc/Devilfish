@@ -52,3 +52,16 @@ func TestLazySMPScaling(t *testing.T) {
 		t.Errorf("Lazy SMP search returned MoveNone")
 	}
 }
+
+func TestHistoryPruning(t *testing.T) {
+	b, err := board.ParseFEN(board.StartFEN)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewEngine(64, 1)
+	mv := engine.Search(b, SearchLimits{MaxDepth: 5}, nil)
+	if mv == types.MoveNone {
+		t.Errorf("Search with History Pruning returned MoveNone")
+	}
+}
