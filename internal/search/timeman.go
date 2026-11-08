@@ -1,0 +1,132 @@
+package search
+
+import (
+	"sync/atomic"
+	"time"
+
+	"devilfish/internal/types"
+)
+
+type SearchLimits struct {
+	WhiteTime    int64 // ms
+	BlackTime    int64
+	WhiteInc     int64
+	BlackInc     int64
+	MovesToGo    int
+	MoveTime     int64
+	MaxDepth     int8
+	MaxNodes     uint64
+	Infinite     bool
+	Ponder       bool
+}
+
+type TimeManager struct {
+	StartTime   time.Time
+	OptTime     time.Duration
+	MaxTime     time.Duration
+	MaxDepth    int8
+	MaxNodes    uint64
+	Infinite    bool
+	Stopped     *atomic.Bool
+	Nodes       *atomic.Uint64
+}
+
+func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool, nodes *atomic.Uint64) *TimeManager {
+	tm := &TimeManager{
+		StartTime: time.Now(),
+		MaxDepth:  limits.MaxDepth,
+		MaxNodes:  limits.MaxNodes,
+		Infinite:  limits.Infinite,
+		Stopped:   stopped,
+		Nodes:     nodes,
+	}
+
+	if limits.MoveTime > 0 {
+		dur := time.Duration(limits.MoveTime) * time.Millisecond
+		tm.OptTime = dur
+		tm.MaxTime = dur
+		return tm
+	}
+
+	if limits.Infinite {
+		return tm
+	}
+
+	var myTime, myInc int64
+	if side == types.White {
+		myTime = limits.WhiteTime
+		myInc = limits.WhiteInc
+	} else {
+		myTime = limits.BlackTime
+		myInc = limits.BlackInc
+	}
+
+	if myTime <= 0 {
+		// No time specified; default to infinite or depth limit
+		return tm
+	}
+
+	var optTimeMs, maxTimeMs int64
+	if limits.MovesToGo > 0 {
+		moves := int64(limits.MovesToGo)
+		if moves > 50 {
+			moves = 50
+		}
+		optTimeMs = (myTime / (moves + 2)) + (myInc * 3 / 4)
+		maxTimeMs = (myTime / (moves / 2 + 1)) + myInc
+	} else {
+		optTimeMs = (myTime / 25) + (myInc / 2)
+		maxTimeMs = (myTime / 8) + myInc
+	}
+
+	// Safety margins
+	if optTimeMs < 10 {
+		optTimeMs = 10
+	}
+	if maxTimeMs > myTime*8/10 {
+		maxTimeMs = myTime * 8 / 10
+	}
+	if maxTimeMs < optTimeMs {
+		maxTimeMs = optTimeMs
+	}
+
+	tm.OptTime = time.Duration(optTimeMs) * time.Millisecond
+	tm.MaxTime = time.Duration(maxTimeMs) * time.Millisecond
+
+	return tm
+}
+
+func (tm *TimeManager) CheckLimits() bool {
+	if tm.Stopped.Load() {
+		return true
+	}
+
+	if tm.MaxNodes > 0 && tm.Nodes.Load() >= tm.MaxNodes {
+		tm.Stopped.Store(true)
+		return true
+	}
+
+	if tm.Infinite {
+		return false
+	}
+
+	if tm.MaxTime > 0 && time.Since(tm.StartTime) >= tm.MaxTime {
+		tm.Stopped.Store(true)
+		return true
+	}
+
+	return false
+}
+
+func (tm *TimeManager) CanStartNewIteration() bool {
+	if tm.Stopped.Load() {
+		return false
+	}
+	if tm.Infinite {
+		return true
+	}
+	if tm.OptTime > 0 && time.Since(tm.StartTime) >= tm.OptTime {
+		return false
+	}
+	return true
+}

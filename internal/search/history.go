@@ -1,0 +1,69 @@
+package search
+
+import (
+	"devilfish/internal/types"
+)
+
+const MaxPly = 128
+
+type SearchHistory struct {
+	Killers      [MaxPly][2]types.Move
+	HistoryTable [2][64][64]int32
+	CounterMoves [64][64]types.Move
+}
+
+func NewSearchHistory() *SearchHistory {
+	return &SearchHistory{}
+}
+
+func (h *SearchHistory) Clear() {
+	h.Killers = [MaxPly][2]types.Move{}
+	h.HistoryTable = [2][64][64]int32{}
+	h.CounterMoves = [64][64]types.Move{}
+}
+
+func (h *SearchHistory) UpdateKillers(ply int, m types.Move) {
+	if ply >= MaxPly || m.IsCapture() {
+		return
+	}
+	if h.Killers[ply][0] != m {
+		h.Killers[ply][1] = h.Killers[ply][0]
+		h.Killers[ply][0] = m
+	}
+}
+
+func (h *SearchHistory) UpdateHistory(side types.Color, m types.Move, depth int8) {
+	if m.IsCapture() {
+		return
+	}
+	bonus := int32(depth) * int32(depth)
+	if bonus > 16384 {
+		bonus = 16384
+	}
+	from := m.From()
+	to := m.To()
+
+	cur := h.HistoryTable[side][from][to]
+	h.HistoryTable[side][from][to] = cur + bonus - (cur * bonus / 16384)
+}
+
+func (h *SearchHistory) PenalizeHistory(side types.Color, m types.Move, depth int8) {
+	if m.IsCapture() {
+		return
+	}
+	penalty := int32(depth) * int32(depth)
+	if penalty > 16384 {
+		penalty = 16384
+	}
+	from := m.From()
+	to := m.To()
+
+	cur := h.HistoryTable[side][from][to]
+	h.HistoryTable[side][from][to] = cur - penalty - (cur * penalty / 16384)
+}
+
+func (h *SearchHistory) UpdateCounterMove(prevMove, m types.Move) {
+	if prevMove != types.MoveNone && !m.IsCapture() {
+		h.CounterMoves[prevMove.From()][prevMove.To()] = m
+	}
+}
