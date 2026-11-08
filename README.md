@@ -68,8 +68,25 @@
 - The master thread drives iterative deepening and reports UCI `info` and `bestmove`.
 - Helper threads execute varied iterative deepening iterations, priming the shared TT with deep cutoffs and branch evaluations.
 
-### 6. Universal Chess Interface (UCI) Compatibility
+### 6. Universal Chess Interface (UCI) Compatibility & Configuration
 Fully compatible with modern chess GUIs (Cutechess, Arena, Banksia GUI, Fritz, LiChess bot frameworks).
+
+#### Configuration Methods:
+1. **JSON Configuration File**:
+   Devilfish automatically loads settings from `~/.devilfish/config.json` on startup if present:
+   ```json
+   {
+     "threads": 4,
+     "hash": 128
+   }
+   ```
+2. **Command-Line Arguments** (override config file):
+   - `-t`, `--threads <N>`: Set number of Lazy SMP search threads.
+   - `-hash`, `--hash <MB>`: Set Transposition Table size in MB.
+   - `-c`, `--config <path>`: Specify custom config file path.
+3. **Runtime UCI Option**:
+   - `setoption name Threads value <N>`
+   - `setoption name Hash value <MB>`
 
 Supports:
 - `uci`

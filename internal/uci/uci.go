@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"devilfish/internal/board"
+	"devilfish/internal/config"
 	"devilfish/internal/eval"
 	"devilfish/internal/movegen"
 	"devilfish/internal/search"
@@ -32,11 +33,19 @@ type UCI struct {
 	out       io.Writer
 }
 
-func New(in io.Reader, out io.Writer) *UCI {
+func New(in io.Reader, out io.Writer, cfg config.Config) *UCI {
 	b, _ := board.ParseFEN(board.StartFEN)
+	threads := cfg.Threads
+	if threads < 1 {
+		threads = 1
+	}
+	hash := cfg.Hash
+	if hash < 1 {
+		hash = 64
+	}
 	return &UCI{
 		board:  b,
-		engine: search.NewEngine(64, 1),
+		engine: search.NewEngine(hash, threads),
 		in:     bufio.NewReader(in),
 		out:    out,
 	}
@@ -91,8 +100,8 @@ func (u *UCI) Loop() {
 func (u *UCI) cmdUCI() {
 	fmt.Fprintf(u.out, "id name %s %s\n", EngineName, EngineVersion)
 	fmt.Fprintf(u.out, "id author %s\n", EngineAuthor)
-	fmt.Fprintf(u.out, "option name Hash type spin default 64 min 1 max 65536\n")
-	fmt.Fprintf(u.out, "option name Threads type spin default 1 min 1 max 512\n")
+	fmt.Fprintf(u.out, "option name Hash type spin default %d min 1 max 65536\n", u.engine.TT.SizeMB())
+	fmt.Fprintf(u.out, "option name Threads type spin default %d min 1 max 512\n", u.engine.NumThreads)
 	fmt.Fprintf(u.out, "uciok\n")
 }
 
@@ -355,7 +364,7 @@ func parseMove(b *board.Board, moveStr string) (types.Move, error) {
 	return types.MoveNone, fmt.Errorf("illegal move: %s", moveStr)
 }
 
-func Run() {
-	u := New(os.Stdin, os.Stdout)
+func Run(cfg config.Config) {
+	u := New(os.Stdin, os.Stdout, cfg)
 	u.Loop()
 }

@@ -3,37 +3,137 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
+	"devilfish/internal/config"
 	"devilfish/internal/uci"
 )
 
+func printHelp() {
+	fmt.Printf("%s - A Modern, High-Performance Chess Engine in Go\n\n", uci.EngineName)
+	fmt.Println("Usage:")
+	fmt.Println("  devilfish [flags]           Start UCI loop (standard mode for GUIs like Arena, Cutechess, Banksia)")
+	fmt.Println("  devilfish bench [depth]     Run benchmark suite")
+	fmt.Println("  devilfish --version         Show version information")
+	fmt.Println("  devilfish --help            Show this help message")
+	fmt.Println("\nConfiguration Flags:")
+	fmt.Println("  -t, --threads <N>           Number of Lazy SMP search threads (overrides config file)")
+	fmt.Println("  -hash <MB>, --hash <MB>     Transposition Table size in Megabytes")
+	fmt.Println("  -c, --config <path>         Path to JSON config file (default: ~/.devilfish/config.json)")
+	fmt.Println("\nConfiguration File:")
+	fmt.Printf("  If present, configuration is automatically loaded from:\n    %s\n", config.GetDefaultConfigPath())
+	fmt.Println("  Example format: {\"threads\": 4, \"hash\": 128}")
+}
+
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "bench":
-			u := uci.New(os.Stdin, os.Stdout)
-			depth := int8(7)
-			if len(os.Args) > 2 {
-				var d int
-				fmt.Sscanf(os.Args[2], "%d", &d)
-				if d > 0 {
-					depth = int8(d)
-				}
-			}
-			u.Bench(depth)
+	var customConfigPath string
+	var cliThreads int
+	var cliHash int
+	var isBench bool
+	var benchDepth int8 = 7
+
+	args := os.Args[1:]
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		if arg == "-h" || arg == "--help" || arg == "help" {
+			printHelp()
 			return
-		case "version", "-v", "--version":
+		}
+
+		if arg == "-v" || arg == "--version" || arg == "version" {
 			fmt.Printf("%s %s by %s\n", uci.EngineName, uci.EngineVersion, uci.EngineAuthor)
 			return
-		case "help", "-h", "--help":
-			fmt.Printf("%s - A Modern, High-Performance Chess Engine in Go\n\n", uci.EngineName)
-			fmt.Println("Usage:")
-			fmt.Println("  devilfish          Start UCI loop (standard mode for GUIs like Arena, Cutechess, Banksia)")
-			fmt.Println("  devilfish bench    Run benchmark suite")
-			fmt.Println("  devilfish --version Show version information")
-			return
+		}
+
+		if arg == "bench" {
+			isBench = true
+			if i+1 < len(args) {
+				d, err := strconv.Atoi(args[i+1])
+				if err == nil && d > 0 {
+					benchDepth = int8(d)
+					i++
+				}
+			}
+			continue
+		}
+
+		// Handle --threads / -threads / -t
+		if arg == "-t" || arg == "-threads" || arg == "--threads" {
+			if i+1 < len(args) {
+				n, err := strconv.Atoi(args[i+1])
+				if err == nil && n > 0 {
+					cliThreads = n
+					i++
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--threads=") || strings.HasPrefix(arg, "-threads=") || strings.HasPrefix(arg, "-t=") {
+			parts := strings.SplitN(arg, "=", 2)
+			n, err := strconv.Atoi(parts[1])
+			if err == nil && n > 0 {
+				cliThreads = n
+			}
+			continue
+		}
+
+		// Handle --hash / -hash
+		if arg == "-hash" || arg == "--hash" {
+			if i+1 < len(args) {
+				h, err := strconv.Atoi(args[i+1])
+				if err == nil && h > 0 {
+					cliHash = h
+					i++
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--hash=") || strings.HasPrefix(arg, "-hash=") {
+			parts := strings.SplitN(arg, "=", 2)
+			h, err := strconv.Atoi(parts[1])
+			if err == nil && h > 0 {
+				cliHash = h
+			}
+			continue
+		}
+
+		// Handle --config / -config / -c
+		if arg == "-c" || arg == "-config" || arg == "--config" {
+			if i+1 < len(args) {
+				customConfigPath = args[i+1]
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--config=") || strings.HasPrefix(arg, "-config=") || strings.HasPrefix(arg, "-c=") {
+			parts := strings.SplitN(arg, "=", 2)
+			customConfigPath = parts[1]
+			continue
 		}
 	}
 
-	uci.Run()
+	// 1. Load configuration from file (custom path or ~/.devilfish/config.json)
+	cfg, err := config.Load(customConfigPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to parse config file: %v\n", err)
+	}
+
+	// 2. Command line arguments override configuration file
+	if cliThreads > 0 {
+		cfg.Threads = cliThreads
+	}
+	if cliHash > 0 {
+		cfg.Hash = cliHash
+	}
+
+	// 3. Run benchmark or UCI loop
+	if isBench {
+		u := uci.New(os.Stdin, os.Stdout, cfg)
+		u.Bench(benchDepth)
+		return
+	}
+
+	uci.Run(cfg)
 }

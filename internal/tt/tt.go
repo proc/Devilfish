@@ -88,6 +88,10 @@ func New(sizeMB int) *TT {
 	}
 }
 
+func (tt *TT) SizeMB() int {
+	return int((uint64(len(tt.entries)) * 16) / (1024 * 1024))
+}
+
 func (tt *TT) Resize(sizeMB int) {
 	if sizeMB < 1 {
 		sizeMB = 1
