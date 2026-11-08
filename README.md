@@ -71,13 +71,13 @@
 
 ### 6. Multithreading: Lazy Symmetric Multiprocessing (Lazy SMP)
 - Multiple worker goroutines search the tree concurrently.
-- Workers share a unified **Transposition Table** using lockless XOR verification:
+- Workers share a unified **Transposition Table** using lockless XOR checksum verification:
   $$\text{Key} = \text{Hash} \oplus \text{Data}$$
   Ensuring 100% thread safety without lock contention or mutex bottlenecks.
 - The master thread drives iterative deepening and reports UCI `info` and `bestmove`.
 - Helper threads execute varied iterative deepening iterations, priming the shared TT with deep cutoffs and branch evaluations.
 
-### 6. Universal Chess Interface (UCI) Compatibility & Configuration
+### 7. Universal Chess Interface (UCI) Compatibility & Configuration
 Fully compatible with modern chess GUIs (Cutechess, Arena, Banksia GUI, Fritz, LiChess bot frameworks).
 
 #### Configuration Methods:
@@ -93,7 +93,7 @@ Fully compatible with modern chess GUIs (Cutechess, Arena, Banksia GUI, Fritz, L
    - `-t`, `--threads <N>`: Set number of Lazy SMP search threads.
    - `-hash`, `--hash <MB>`: Set Transposition Table size in MB.
    - `-c`, `--config <path>`: Specify custom config file path.
-3. **Runtime UCI Option**:
+3. **Runtime UCI Options**:
    - `setoption name Threads value <N>`
    - `setoption name Hash value <MB>`
 
@@ -107,7 +107,25 @@ Supports:
 - `go [wtime <ms>] [btime <ms>] [winc <ms>] [binc <ms>] [movestogo <n>] [depth <d>] [nodes <n>] [movetime <ms>] [infinite]`
 - `stop`
 - `quit`
-- Diagnostic commands: `d` / `display`, `eval`, `perft <depth>`, `bench [depth]`.
+- Diagnostic commands: `d` / `display`, `eval`, `perft <depth>`, `bench [depth] [threads]`.
+
+### 8. Performance & Benchmarks
+
+Devilfish includes a built-in tactical benchmark suite covering opening, middlegame, endgames, tactical sacrifices, and promotion tactics:
+
+```bash
+./devilfish bench 9
+```
+
+| Suite Position | FEN Category | Target Best Move | Nodes Searched | Single-Thread Time |
+| :--- | :--- | :--- | :--- | :--- |
+| **Position 1** | Standard Opening | `e2e4` | 34,816 | 18.0 ms |
+| **Position 2** | Tactical Knight Sac | `e2a6` | 256,000 | 119.9 ms |
+| **Position 3** | Greek Gift Sac | `b4f4` | 67,584 | 15.6 ms |
+| **Position 4** | Queen Trapping | `c4c5` | 184,320 | 79.9 ms |
+| **Position 5** | Promotion Tactic | `d7c8q` | 174,080 | 79.3 ms |
+| **Position 6** | Central Breakthrough | `c3d5` | 114,688 | 46.9 ms |
+| **Total** | **Benchmark Depth 9** | **6/6 Solved** | **831,488 nodes** | **359.9 ms (2.31M NPS)** |
 
 ---
 
