@@ -81,13 +81,8 @@ func init() {
 func generateDefaultNetwork() *Network {
 	net := &Network{}
 
-	// Baseline bias for feature transformer accumulators
-	for i := 0; i < HiddenSize; i++ {
-		net.Biases[i] = 32
-	}
-
-	pieceValsMG := [7]int32{0, 100, 320, 330, 500, 900, 0}
-	pieceValsEG := [7]int32{0, 140, 330, 340, 550, 1000, 0}
+	pieceValsMG := [7]int32{0, 100, 320, 330, 500, 950, 0}
+	pieceValsEG := [7]int32{0, 130, 335, 345, 530, 1020, 0}
 
 	for f := 0; f < NumFeatures; f++ {
 		ptIdx := f / 64
@@ -114,65 +109,36 @@ func generateDefaultNetwork() *Network {
 			sign = -1
 		}
 
-		// Channel projections:
-		// Channels 0..63: Midgame piece-square values
+		// Channels 0..63: Midgame evaluation terms
 		for i := 0; i < 64; i++ {
-			weight := int32(1)
-			if (i % 8) == int(sq.File()) || (i / 8) == int(sq.Rank()) {
-				weight = 2
-			}
-			val := sign * (scoreMG / 25) * weight
-			if val > 32767 {
-				val = 32767
-			} else if val < -32768 {
-				val = -32768
-			}
-			net.Weights[f][i] = int16(val)
+			net.Weights[f][i] = int16(sign * scoreMG)
 		}
 
-		// Channels 64..127: Endgame piece-square values & passed pawn bonuses
+		// Channels 64..127: Endgame evaluation terms
 		for i := 0; i < 64; i++ {
 			advBonus := int32(0)
 			if pt == types.Pawn {
-				advBonus = int32(sq.Rank()) * 10
+				advBonus = int32(sq.Rank()) * 15
 			}
-			val := sign * ((scoreEG + advBonus) / 25)
-			if val > 32767 {
-				val = 32767
-			} else if val < -32768 {
-				val = -32768
-			}
-			net.Weights[f][64+i] = int16(val)
+			net.Weights[f][64+i] = int16(sign * (scoreEG + advBonus))
 		}
 
 		// Channels 128..191: Center control & spatial mobility
-		centerDist := int32(absInt(3 - int(sq.File())) + absInt(3 - int(sq.Rank())))
-		spatialScore := (8 - centerDist) * 12
+		centerDist := int32(absInt(3-int(sq.File())) + absInt(3-int(sq.Rank())))
+		spatialScore := (8 - centerDist) * 10
 		for i := 0; i < 64; i++ {
-			val := sign * (spatialScore / 4)
-			net.Weights[f][128+i] = int16(val)
+			net.Weights[f][128+i] = int16(sign * (scoreMG + spatialScore))
 		}
 
 		// Channels 192..255: King safety & coordination
 		for i := 0; i < 64; i++ {
-			val := sign * (scoreMG / 40)
-			net.Weights[f][192+i] = int16(val)
+			net.Weights[f][192+i] = int16(sign * scoreMG)
 		}
 	}
 
-	// Layer 1 weights (32 neurons x 512 inputs)
+	// Layer 1 and Output weights
 	for j := 0; j < Layer1Size; j++ {
-		net.L1Biases[j] = 16
-		for i := 0; i < HiddenSize; i++ {
-			net.L1Weights[j][i] = 2
-			net.L1Weights[j][HiddenSize+i] = -2
-		}
-	}
-
-	// Output Layer weights (32 inputs -> 1 scalar)
-	net.OutBias = 0
-	for j := 0; j < Layer1Size; j++ {
-		net.OutWeights[j] = 16
+		net.OutWeights[j] = 1
 	}
 
 	return net

@@ -51,31 +51,32 @@ func Evaluate(acc *Accumulator, stm types.Color) int32 {
 		themAcc = &acc.White
 	}
 
-	// 1. CReLU Activation on Feature Transformer accumulators
-	var crelu [2 * HiddenSize]int8
-	for i := 0; i < HiddenSize; i++ {
-		crelu[i] = clamp8(usAcc[i])
-		crelu[HiddenSize+i] = clamp8(themAcc[i])
+	// Midgame average across channels 0..63
+	var mgSum int32
+	for i := 0; i < 64; i++ {
+		mgSum += int32(usAcc[i]) - int32(themAcc[i])
 	}
+	mgScore := mgSum / (64 * 2)
 
-	// 2. Layer 1 (512 -> 32)
-	var l1Out [Layer1Size]int8
-	for j := 0; j < Layer1Size; j++ {
-		sum := ActiveNetwork.L1Biases[j]
-		wRow := &ActiveNetwork.L1Weights[j]
-
-		for i := 0; i < 2*HiddenSize; i++ {
-			sum += int32(crelu[i]) * int32(wRow[i])
-		}
-
-		l1Out[j] = clamp32(sum / 128)
+	// Endgame average across channels 64..127
+	var egSum int32
+	for i := 64; i < 128; i++ {
+		egSum += int32(usAcc[i]) - int32(themAcc[i])
 	}
+	egScore := egSum / (64 * 2)
 
-	// 3. Output Layer (32 -> 1)
-	out := ActiveNetwork.OutBias
-	for j := 0; j < Layer1Size; j++ {
-		out += int32(l1Out[j]) * int32(ActiveNetwork.OutWeights[j])
+	// Mobility & Center control average across channels 128..191
+	var mobSum int32
+	for i := 128; i < 192; i++ {
+		mobSum += int32(usAcc[i]) - int32(themAcc[i])
 	}
+	mobScore := mobSum / (64 * 2)
 
-	return out / OutputScale
+	// Combine components: 50% MG, 30% EG, 20% Positional
+	finalScore := (mgScore*50 + egScore*30 + mobScore*20) / 100
+
+	// Tempo bonus (15 cp)
+	finalScore += 15
+
+	return finalScore
 }
