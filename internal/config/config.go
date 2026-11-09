@@ -18,7 +18,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		Threads:  10,
-		Hash:     64,
+		Hash:     2000,
 		Ponder:   true,
 		UseNNUE:  true,
 		EvalFile: "<embedded>",

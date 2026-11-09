@@ -105,7 +105,7 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
    ```json
    {
      "threads": 10,
-     "hash": 64,
+     "hash": 2000,
      "ponder": true,
      "use_nnue": true,
      "eval_file": "<embedded>"

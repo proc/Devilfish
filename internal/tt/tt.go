@@ -78,8 +78,11 @@ func New(sizeMB int) *TT {
 	entrySize := uint64(16) // 8 bytes Key + 8 bytes Data
 	numEntries := bytes / entrySize
 
-	// Round down to power of 2
+	// Round to nearest power of 2 (round up if within 25% of next power of 2)
 	pow2 := uint64(1) << (63 - bits.LeadingZeros64(numEntries))
+	if pow2*2 <= numEntries || float64(numEntries)/float64(pow2*2) >= 0.75 {
+		pow2 *= 2
+	}
 	return &TT{
 		entries: make([]Entry, pow2),
 		mask:    pow2 - 1,
@@ -100,6 +103,9 @@ func (tt *TT) Resize(sizeMB int) {
 	numEntries := bytes / entrySize
 
 	pow2 := uint64(1) << (63 - bits.LeadingZeros64(numEntries))
+	if pow2*2 <= numEntries || float64(numEntries)/float64(pow2*2) >= 0.75 {
+		pow2 *= 2
+	}
 	tt.entries = make([]Entry, pow2)
 	tt.mask = pow2 - 1
 	tt.age = 0

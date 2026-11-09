@@ -52,7 +52,7 @@ func New(in io.Reader, out io.Writer, cfg config.Config) *UCI {
 	}
 	hash := cfg.Hash
 	if hash < 1 {
-		hash = 64
+		hash = 2000
 	}
 	evalFile := cfg.EvalFile
 	if evalFile == "" {

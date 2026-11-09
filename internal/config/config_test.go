@@ -11,8 +11,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Threads != 10 {
 		t.Errorf("expected default threads 10, got %d", cfg.Threads)
 	}
-	if cfg.Hash != 64 {
-		t.Errorf("expected default hash 64, got %d", cfg.Hash)
+	if cfg.Hash != 2000 {
+		t.Errorf("expected default hash 2000, got %d", cfg.Hash)
 	}
 	if !cfg.Ponder {
 		t.Errorf("expected default ponder true, got %t", cfg.Ponder)
@@ -37,7 +37,7 @@ func TestLoadNonExistentCreatesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error for missing file, got %v", err)
 	}
-	if cfg.Threads != 10 || cfg.Hash != 64 || !cfg.Ponder || !cfg.UseNNUE || cfg.EvalFile != "<embedded>" {
+	if cfg.Threads != 10 || cfg.Hash != 2000 || !cfg.Ponder || !cfg.UseNNUE || cfg.EvalFile != "<embedded>" {
 		t.Errorf("expected default config, got %+v", cfg)
 	}
 
@@ -51,7 +51,7 @@ func TestLoadNonExistentCreatesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to reload created config: %v", err)
 	}
-	if reloaded.Threads != 10 || reloaded.Hash != 64 || !reloaded.Ponder || !reloaded.UseNNUE || reloaded.EvalFile != "<embedded>" {
+	if reloaded.Threads != 10 || reloaded.Hash != 2000 || !reloaded.Ponder || !reloaded.UseNNUE || reloaded.EvalFile != "<embedded>" {
 		t.Errorf("expected reloaded config matching default, got %+v", reloaded)
 	}
 }
