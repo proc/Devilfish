@@ -81,11 +81,14 @@ Fully compatible with modern chess GUIs (Cutechess, Arena, Banksia GUI, Fritz, L
 
 #### Configuration Methods:
 1. **JSON Configuration File**:
-   Devilfish automatically creates and loads settings from `~/.devilfish/config.json` on startup if it does not exist (defaulting to 10 threads):
+   Devilfish automatically creates and loads settings from `~/.devilfish/config.json` on startup if it does not exist. All UCI options are fully configurable:
    ```json
    {
      "threads": 10,
-     "hash": 64
+     "hash": 64,
+     "ponder": true,
+     "use_nnue": true,
+     "eval_file": "<embedded>"
    }
    ```
 2. **Command-Line Arguments** (override config file):

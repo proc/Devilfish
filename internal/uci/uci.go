@@ -33,6 +33,7 @@ type UCI struct {
 	isAutoPonder   bool
 	autoPonderHash uint64
 	ponderEnabled  bool
+	evalFile       string
 	manualStop     atomic.Bool
 	searchMu       sync.Mutex
 	in             *bufio.Reader
@@ -49,10 +50,15 @@ func New(in io.Reader, out io.Writer, cfg config.Config) *UCI {
 	if hash < 1 {
 		hash = 64
 	}
+	evalFile := cfg.EvalFile
+	if evalFile == "" {
+		evalFile = "<embedded>"
+	}
 	return &UCI{
 		board:         b,
 		engine:        search.NewEngine(hash, threads),
-		ponderEnabled: true,
+		ponderEnabled: cfg.Ponder,
+		evalFile:      evalFile,
 		in:            bufio.NewReader(in),
 		out:           out,
 	}
@@ -113,7 +119,11 @@ func (u *UCI) cmdUCI() {
 	fmt.Fprintf(u.out, "option name Threads type spin default %d min 1 max 512\n", u.engine.NumThreads)
 	fmt.Fprintf(u.out, "option name Ponder type check default %t\n", u.ponderEnabled)
 	fmt.Fprintf(u.out, "option name UseNNUE type check default %t\n", nnue.Enabled)
-	fmt.Fprintf(u.out, "option name EvalFile type string default <embedded>\n")
+	evalFile := u.evalFile
+	if evalFile == "" {
+		evalFile = "<embedded>"
+	}
+	fmt.Fprintf(u.out, "option name EvalFile type string default %s\n", evalFile)
 	fmt.Fprintf(u.out, "uciok\n")
 }
 
@@ -159,8 +169,13 @@ func (u *UCI) cmdSetOption(args []string) {
 						if err != nil {
 							fmt.Fprintf(u.out, "info string failed to load nnue file: %v\n", err)
 						} else {
+							u.evalFile = valStr
 							fmt.Fprintf(u.out, "info string loaded nnue file %s\n", valStr)
 						}
+					} else if valStr == "<embedded>" {
+						u.evalFile = "<embedded>"
+						nnue.ResetToDefault()
+						fmt.Fprintf(u.out, "info string reset to embedded nnue network\n")
 					}
 				}
 			}

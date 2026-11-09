@@ -14,6 +14,15 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Hash != 64 {
 		t.Errorf("expected default hash 64, got %d", cfg.Hash)
 	}
+	if !cfg.Ponder {
+		t.Errorf("expected default ponder true, got %t", cfg.Ponder)
+	}
+	if !cfg.UseNNUE {
+		t.Errorf("expected default use_nnue true, got %t", cfg.UseNNUE)
+	}
+	if cfg.EvalFile != "<embedded>" {
+		t.Errorf("expected default eval_file <embedded>, got %s", cfg.EvalFile)
+	}
 }
 
 func TestLoadNonExistentCreatesFile(t *testing.T) {
@@ -28,7 +37,7 @@ func TestLoadNonExistentCreatesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error for missing file, got %v", err)
 	}
-	if cfg.Threads != 10 || cfg.Hash != 64 {
+	if cfg.Threads != 10 || cfg.Hash != 64 || !cfg.Ponder || !cfg.UseNNUE || cfg.EvalFile != "<embedded>" {
 		t.Errorf("expected default config, got %+v", cfg)
 	}
 
@@ -42,8 +51,8 @@ func TestLoadNonExistentCreatesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to reload created config: %v", err)
 	}
-	if reloaded.Threads != 10 || reloaded.Hash != 64 {
-		t.Errorf("expected reloaded threads=10, hash=64, got %+v", reloaded)
+	if reloaded.Threads != 10 || reloaded.Hash != 64 || !reloaded.Ponder || !reloaded.UseNNUE || reloaded.EvalFile != "<embedded>" {
+		t.Errorf("expected reloaded config matching default, got %+v", reloaded)
 	}
 }
 
@@ -56,8 +65,11 @@ func TestSaveAndLoad(t *testing.T) {
 
 	configPath := filepath.Join(tmpDir, "config.json")
 	origCfg := Config{
-		Threads: 8,
-		Hash:    256,
+		Threads:  8,
+		Hash:     256,
+		Ponder:   false,
+		UseNNUE:  false,
+		EvalFile: "/path/to/custom.nnue",
 	}
 
 	if err := Save(configPath, origCfg); err != nil {
@@ -74,6 +86,15 @@ func TestSaveAndLoad(t *testing.T) {
 	}
 	if loadedCfg.Hash != origCfg.Hash {
 		t.Errorf("expected hash %d, got %d", origCfg.Hash, loadedCfg.Hash)
+	}
+	if loadedCfg.Ponder != origCfg.Ponder {
+		t.Errorf("expected ponder %t, got %t", origCfg.Ponder, loadedCfg.Ponder)
+	}
+	if loadedCfg.UseNNUE != origCfg.UseNNUE {
+		t.Errorf("expected use_nnue %t, got %t", origCfg.UseNNUE, loadedCfg.UseNNUE)
+	}
+	if loadedCfg.EvalFile != origCfg.EvalFile {
+		t.Errorf("expected eval_file %s, got %s", origCfg.EvalFile, loadedCfg.EvalFile)
 	}
 }
 

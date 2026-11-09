@@ -78,6 +78,10 @@ func init() {
 	ActiveNetwork = generateDefaultNetwork()
 }
 
+func ResetToDefault() {
+	ActiveNetwork = generateDefaultNetwork()
+}
+
 func generateDefaultNetwork() *Network {
 	net := &Network{}
 

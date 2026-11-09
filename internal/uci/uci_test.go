@@ -137,3 +137,30 @@ func TestAutoPonderPonderHit(t *testing.T) {
 		t.Errorf("expected bestmove output, got:\n%s", output)
 	}
 }
+
+func TestConfigUCIOptions(t *testing.T) {
+	out := &bytes.Buffer{}
+	cfg := config.Config{
+		Threads:  4,
+		Hash:     128,
+		Ponder:   false,
+		UseNNUE:  false,
+		EvalFile: "my_custom.nnue",
+	}
+	u := New(bytes.NewBuffer(nil), out, cfg)
+	u.cmdUCI()
+
+	output := out.String()
+	if !strings.Contains(output, "option name Hash type spin default 128") {
+		t.Errorf("expected Hash default 128 in output:\n%s", output)
+	}
+	if !strings.Contains(output, "option name Threads type spin default 4") {
+		t.Errorf("expected Threads default 4 in output:\n%s", output)
+	}
+	if !strings.Contains(output, "option name Ponder type check default false") {
+		t.Errorf("expected Ponder default false in output:\n%s", output)
+	}
+	if !strings.Contains(output, "option name EvalFile type string default my_custom.nnue") {
+		t.Errorf("expected EvalFile default my_custom.nnue in output:\n%s", output)
+	}
+}

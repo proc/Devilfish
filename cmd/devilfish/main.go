@@ -9,6 +9,9 @@ import (
 	"devilfish/internal/config"
 	"devilfish/internal/nnue"
 	"devilfish/internal/uci"
+
+	"net/http"
+	_ "net/http/pprof" // Import for profiling, but not used directly
 )
 
 func printHelp() {
@@ -26,7 +29,7 @@ func printHelp() {
 	fmt.Println("  --no-nnue                   Disable NNUE evaluation (use classical HCE)")
 	fmt.Println("\nConfiguration File:")
 	fmt.Printf("  If present, configuration is automatically loaded from:\n    %s\n", config.GetDefaultConfigPath())
-	fmt.Println("  Example format: {\"threads\": 10, \"hash\": 64}")
+	fmt.Println("  Example format: {\"threads\": 10, \"hash\": 64, \"ponder\": true, \"use_nnue\": true, \"eval_file\": \"<embedded>\"}")
 }
 
 func main() {
@@ -34,6 +37,7 @@ func main() {
 	var evalFilePath string
 	var cliThreads int
 	var cliHash int
+	var cliNoNNUE bool
 	var isBench bool
 	var benchDepth int8 = 7
 
@@ -133,15 +137,8 @@ func main() {
 
 		// Handle --no-nnue
 		if arg == "--no-nnue" || arg == "-no-nnue" {
-			nnue.Enabled = false
+			cliNoNNUE = true
 			continue
-		}
-	}
-
-	if evalFilePath != "" {
-		if err := nnue.LoadFile(evalFilePath); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
 		}
 	}
 
@@ -158,6 +155,21 @@ func main() {
 	if cliHash > 0 {
 		cfg.Hash = cliHash
 	}
+	if evalFilePath != "" {
+		cfg.EvalFile = evalFilePath
+	}
+	if cliNoNNUE {
+		cfg.UseNNUE = false
+	}
+
+	// Apply NNUE settings from config (and CLI overrides)
+	nnue.Enabled = cfg.UseNNUE
+	if cfg.EvalFile != "" && cfg.EvalFile != "<embedded>" {
+		if err := nnue.LoadFile(cfg.EvalFile); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	}
 
 	// 3. Run benchmark or UCI loop
 	if isBench {
@@ -165,6 +177,9 @@ func main() {
 		u.Bench(benchDepth)
 		return
 	}
+	go func() {
+		http.ListenAndServe("localhost:6060", nil)
+	}()
 
 	uci.Run(cfg)
 }

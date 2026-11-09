@@ -1,20 +1,27 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 )
 
 type Config struct {
-	Threads int `json:"threads"`
-	Hash    int `json:"hash,omitempty"`
+	Threads  int    `json:"threads"`
+	Hash     int    `json:"hash"`
+	Ponder   bool   `json:"ponder"`
+	UseNNUE  bool   `json:"use_nnue"`
+	EvalFile string `json:"eval_file"`
 }
 
 func DefaultConfig() Config {
 	return Config{
-		Threads: 10,
-		Hash:    64,
+		Threads:  10,
+		Hash:     64,
+		Ponder:   true,
+		UseNNUE:  true,
+		EvalFile: "<embedded>",
 	}
 }
 
@@ -24,6 +31,16 @@ func GetDefaultConfigPath() string {
 		return ""
 	}
 	return filepath.Join(home, ".devilfish", "config.json")
+}
+
+type rawConfig struct {
+	Threads     *int    `json:"threads"`
+	Hash        *int    `json:"hash"`
+	Ponder      *bool   `json:"ponder"`
+	UseNNUE     *bool   `json:"use_nnue"`
+	AltUseNNUE  *bool   `json:"usennue"`
+	EvalFile    *string `json:"eval_file"`
+	AltEvalFile *string `json:"evalfile"`
 }
 
 // Load reads the config file from path (or ~/.devilfish/config.json if path is empty).
@@ -48,16 +65,29 @@ func Load(path string) (Config, error) {
 		return cfg, err
 	}
 
-	var fileCfg Config
-	if err := json.Unmarshal(data, &fileCfg); err != nil {
+	var raw rawConfig
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return cfg, err
 	}
 
-	if fileCfg.Threads > 0 {
-		cfg.Threads = fileCfg.Threads
+	if raw.Threads != nil && *raw.Threads > 0 {
+		cfg.Threads = *raw.Threads
 	}
-	if fileCfg.Hash > 0 {
-		cfg.Hash = fileCfg.Hash
+	if raw.Hash != nil && *raw.Hash > 0 {
+		cfg.Hash = *raw.Hash
+	}
+	if raw.Ponder != nil {
+		cfg.Ponder = *raw.Ponder
+	}
+	if raw.UseNNUE != nil {
+		cfg.UseNNUE = *raw.UseNNUE
+	} else if raw.AltUseNNUE != nil {
+		cfg.UseNNUE = *raw.AltUseNNUE
+	}
+	if raw.EvalFile != nil {
+		cfg.EvalFile = *raw.EvalFile
+	} else if raw.AltEvalFile != nil {
+		cfg.EvalFile = *raw.AltEvalFile
 	}
 
 	return cfg, nil
@@ -74,10 +104,13 @@ func Save(path string, cfg Config) error {
 		return err
 	}
 
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(cfg); err != nil {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, buf.Bytes(), 0644)
 }
