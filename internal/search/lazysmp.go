@@ -108,7 +108,7 @@ func (e *Engine) Search(
 				if e.Stopped.Load() {
 					break
 				}
-				helper.Search(d, -Infinity, Infinity, 0, false, true, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+				helper.Search(d, -Infinity, Infinity, 0, true, true, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
 			}
 		}(id)
 	}

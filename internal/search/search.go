@@ -178,7 +178,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	}
 
 	// 4. Reverse Futility Pruning (Static Null Move Pruning)
-	if !isPVNode && !inCheck && depth <= 6 && abs(beta) < MateThreshold {
+	if ply > 0 && !isPVNode && !inCheck && depth <= 6 && abs(beta) < MateThreshold {
 		margin := int32(depth) * 80
 		if !improving {
 			margin = int32(depth) * 60
@@ -189,7 +189,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	}
 
 	// 5. Razoring
-	if !isPVNode && !inCheck && depth <= 3 {
+	if ply > 0 && !isPVNode && !inCheck && depth <= 3 {
 		razorMargin := int32(150 + int(depth)*125)
 		if !improving {
 			razorMargin -= 50
@@ -209,7 +209,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		w.Board.PieceBB[types.MakePiece(us, types.Rook)] |
 		w.Board.PieceBB[types.MakePiece(us, types.Queen)]) != 0
 
-	if !isPVNode && !inCheck && depth >= 3 && staticEval >= beta && hasNonPawns {
+	if ply > 0 && !isPVNode && !inCheck && depth >= 3 && staticEval >= beta && hasNonPawns {
 		r := int8(3 + depth/4)
 		if !improving {
 			r++
@@ -225,10 +225,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			return 0
 		}
 		if nullScore >= beta {
-			if nullScore > MateThreshold {
-				nullScore = beta
-			}
-			return nullScore
+			return beta
 		}
 	}
 
@@ -267,7 +264,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			}
 		} else if singularBeta >= beta {
 			// Multi-cut fail high: an alternative move beats beta at reduced depth
-			return singularBeta
+			return beta
 		}
 	}
 
@@ -355,7 +352,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 	// 7. ProbCut (Probability Cut)
 	// If a shallow capture search with elevated beta fails high, the node is almost certainly a CUT node.
-	if canMultiCut && !isPVNode && !inCheck && depth >= 5 && abs(beta) < MateThreshold {
+	if ply > 0 && canMultiCut && !isPVNode && !inCheck && depth >= 5 && abs(beta) < MateThreshold {
 		probBeta := beta + 200
 		probDepth := depth - 4
 		if probDepth < 1 {
@@ -388,8 +385,8 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			}
 
 			if probScore >= probBeta {
-				w.TT.Store(w.Board.Hash, m, tt.ScoreToTT(probScore, ply), depth, tt.LowerBound)
-				return probScore
+				w.TT.Store(w.Board.Hash, m, tt.ScoreToTT(beta, ply), probDepth, tt.LowerBound)
+				return beta
 			}
 		}
 	}
@@ -397,7 +394,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	// 8. Multi-Cut Pruning (MPC)
 	// If at least M=3 out of the first C=8 candidate moves produce a beta cutoff
 	// at reduced depth (depth - 1 - R, R=3), the position is almost certainly a CUT node.
-	if canMultiCut && !isPVNode && !inCheck && depth >= 6 && hasNonPawns && staticEval >= beta-100 {
+	if ply > 0 && canMultiCut && !isPVNode && !inCheck && depth >= 6 && hasNonPawns && staticEval >= beta-100 {
 		var mcList movegen.MoveList
 		movegen.GenerateMoves(w.Board, false, &mcList)
 
@@ -435,7 +432,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			if mcScore >= beta {
 				cutoffs++
 				if cutoffs >= 3 {
-					w.TT.Store(w.Board.Hash, m, tt.ScoreToTT(beta, ply), depth, tt.LowerBound)
+					w.TT.Store(w.Board.Hash, m, tt.ScoreToTT(beta, ply), mcDepth, tt.LowerBound)
 					return beta
 				}
 			}
@@ -639,7 +636,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			}
 
 			// If null-window fails high and in PV node, re-search with full PV window
-			if isPVNode && score > alpha && score < beta && !w.TimeMan.Stopped.Load() {
+			if isPVNode && score > alpha && !w.TimeMan.Stopped.Load() {
 				score = -w.Search(depth-1, -beta, -alpha, ply+1, true, true, types.MoveNone, m, prevMove, prevMove2)
 			}
 		}
@@ -790,12 +787,12 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 		if standPat >= beta {
 			return beta
 		}
-		if standPat > alpha {
-			alpha = standPat
-		}
 		// Delta pruning
 		if standPat < alpha-950 {
 			return alpha
+		}
+		if standPat > alpha {
+			alpha = standPat
 		}
 	}
 

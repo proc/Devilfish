@@ -181,17 +181,20 @@ func (tt *TT) HashFull() int {
 	if len(tt.entries) < sampleCount {
 		sampleCount = len(tt.entries)
 	}
-	step := len(tt.entries) / sampleCount
-	if step < 1 {
-		step = 1
-	}
 
 	used := 0
 	for i := 0; i < sampleCount; i++ {
-		idx := i * step
-		if tt.entries[idx].Data != 0 {
-			used++
+		data := tt.entries[i].Data
+		if data != 0 {
+			age := uint8((data >> 60) & 0x0F)
+			if age == tt.age {
+				used++
+			}
 		}
 	}
-	return (used * 1000) / sampleCount
+	hf := (used * 1000) / sampleCount
+	if used > 0 && hf == 0 {
+		hf = 1
+	}
+	return hf
 }

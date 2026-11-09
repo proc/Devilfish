@@ -196,25 +196,32 @@ func (h *SearchHistory) GetCorrection(side types.Color, pawnHash uint64) int32 {
 	if side >= 2 {
 		return 0
 	}
-	return int32(h.CorrHist[side][pawnHash%16384]) / 128
+	corr := int32(h.CorrHist[side][pawnHash%16384]) / 128
+	if corr > 64 {
+		return 64
+	}
+	if corr < -64 {
+		return -64
+	}
+	return corr
 }
 
 func (h *SearchHistory) UpdateCorrHist(side types.Color, pawnHash uint64, diff int32, depth int8) {
 	if side >= 2 {
 		return
 	}
-	if diff > 1024 {
-		diff = 1024
-	} else if diff < -1024 {
-		diff = -1024
+	if diff > 400 {
+		diff = 400
+	} else if diff < -400 {
+		diff = -400
 	}
-	weight := int32(depth) * int32(depth)
-	if weight > 128 {
-		weight = 128
+	weight := int32(depth)
+	if weight > 16 {
+		weight = 16
 	}
 	idx := pawnHash % 16384
 	cur := int32(h.CorrHist[side][idx])
-	newVal := cur + (diff*128*weight-cur*weight)/256
+	newVal := cur + (diff*128-cur)*weight/256
 	if newVal > 16384 {
 		newVal = 16384
 	} else if newVal < -16384 {
