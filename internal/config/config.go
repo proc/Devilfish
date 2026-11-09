@@ -8,20 +8,28 @@ import (
 )
 
 type Config struct {
-	Threads  int    `json:"threads"`
-	Hash     int    `json:"hash"`
-	Ponder   bool   `json:"ponder"`
-	UseNNUE  bool   `json:"use_nnue"`
-	EvalFile string `json:"eval_file"`
+	Threads          int    `json:"threads"`
+	Hash             int    `json:"hash"`
+	Ponder           bool   `json:"ponder"`
+	UseNNUE          bool   `json:"use_nnue"`
+	EvalFile         string `json:"eval_file"`
+	SyzygyPath       string `json:"syzygy_path"`
+	SyzygyProbeDepth int    `json:"syzygy_probe_depth"`
+	Syzygy50MoveRule bool   `json:"syzygy_50_move_rule"`
+	SyzygyProbeLimit int    `json:"syzygy_probe_limit"`
 }
 
 func DefaultConfig() Config {
 	return Config{
-		Threads:  10,
-		Hash:     2000,
-		Ponder:   true,
-		UseNNUE:  true,
-		EvalFile: "<embedded>",
+		Threads:          10,
+		Hash:             2000,
+		Ponder:           true,
+		UseNNUE:          true,
+		EvalFile:         "<embedded>",
+		SyzygyPath:       "",
+		SyzygyProbeDepth: 1,
+		Syzygy50MoveRule: true,
+		SyzygyProbeLimit: 6,
 	}
 }
 
@@ -34,13 +42,18 @@ func GetDefaultConfigPath() string {
 }
 
 type rawConfig struct {
-	Threads     *int    `json:"threads"`
-	Hash        *int    `json:"hash"`
-	Ponder      *bool   `json:"ponder"`
-	UseNNUE     *bool   `json:"use_nnue"`
-	AltUseNNUE  *bool   `json:"usennue"`
-	EvalFile    *string `json:"eval_file"`
-	AltEvalFile *string `json:"evalfile"`
+	Threads          *int    `json:"threads"`
+	Hash             *int    `json:"hash"`
+	Ponder           *bool   `json:"ponder"`
+	UseNNUE          *bool   `json:"use_nnue"`
+	AltUseNNUE       *bool   `json:"usennue"`
+	EvalFile         *string `json:"eval_file"`
+	AltEvalFile      *string `json:"evalfile"`
+	SyzygyPath       *string `json:"syzygy_path"`
+	AltSyzygyPath    *string `json:"syzygypath"`
+	SyzygyProbeDepth *int    `json:"syzygy_probe_depth"`
+	Syzygy50MoveRule *bool   `json:"syzygy_50_move_rule"`
+	SyzygyProbeLimit *int    `json:"syzygy_probe_limit"`
 }
 
 // Load reads the config file from path (or ~/.devilfish/config.json if path is empty).
@@ -88,6 +101,20 @@ func Load(path string) (Config, error) {
 		cfg.EvalFile = *raw.EvalFile
 	} else if raw.AltEvalFile != nil {
 		cfg.EvalFile = *raw.AltEvalFile
+	}
+	if raw.SyzygyPath != nil {
+		cfg.SyzygyPath = *raw.SyzygyPath
+	} else if raw.AltSyzygyPath != nil {
+		cfg.SyzygyPath = *raw.AltSyzygyPath
+	}
+	if raw.SyzygyProbeDepth != nil && *raw.SyzygyProbeDepth >= 1 {
+		cfg.SyzygyProbeDepth = *raw.SyzygyProbeDepth
+	}
+	if raw.Syzygy50MoveRule != nil {
+		cfg.Syzygy50MoveRule = *raw.Syzygy50MoveRule
+	}
+	if raw.SyzygyProbeLimit != nil && *raw.SyzygyProbeLimit >= 0 {
+		cfg.SyzygyProbeLimit = *raw.SyzygyProbeLimit
 	}
 
 	return cfg, nil

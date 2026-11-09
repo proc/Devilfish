@@ -4,10 +4,12 @@ import (
 	"math"
 	"sync/atomic"
 
+	"devilfish/internal/bitboard"
 	"devilfish/internal/board"
 	"devilfish/internal/eval"
 	"devilfish/internal/movegen"
 	"devilfish/internal/nnue"
+	"devilfish/internal/syzygy"
 	"devilfish/internal/tt"
 	"devilfish/internal/types"
 )
@@ -39,6 +41,7 @@ type SearchWorker struct {
 	TimeMan           *TimeManager
 	History           *SearchHistory
 	Nodes             *atomic.Uint64
+	TBHits            *atomic.Uint64
 	LocalNodes        uint64
 	SelDepth          int8
 	PVArray           [MaxPly][MaxPly]types.Move
@@ -61,7 +64,7 @@ func (w *SearchWorker) Evaluate(ply int) int32 {
 	return staticEval + corr
 }
 
-func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *atomic.Uint64) *SearchWorker {
+func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *atomic.Uint64, tbHits *atomic.Uint64) *SearchWorker {
 	w := &SearchWorker{
 		ID:      id,
 		Board:   b.Clone(),
@@ -69,6 +72,7 @@ func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *a
 		TimeMan: tm,
 		History: NewSearchHistory(),
 		Nodes:   nodes,
+		TBHits:  tbHits,
 	}
 	nnue.Refresh(w.Board, &w.Accumulators[0])
 	return w
@@ -152,6 +156,63 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				if ttScore <= alpha {
 					return ttScore
 				}
+			}
+		}
+	}
+
+	// 3.5. Syzygy Tablebase WDL probe
+	if ply > 0 && depth >= int8(syzygy.ProbeDepth) &&
+		syzygy.IsAvailable() &&
+		w.Board.Castling == 0 &&
+		bitboard.Count(w.Board.Occupied()) <= syzygy.MaxPieces() {
+
+		wdl, ok := syzygy.ProbeWDL(w.Board)
+		if ok {
+			if w.TBHits != nil {
+				w.TBHits.Add(1)
+			}
+
+			var tbScore int32
+			var boundType uint8
+
+			switch wdl {
+			case syzygy.Win:
+				tbScore = MateScore - 100 - int32(ply)
+				boundType = tt.LowerBound
+			case syzygy.CursedWin:
+				if syzygy.Use50MoveRule {
+					tbScore = 0
+					boundType = tt.Exact
+				} else {
+					tbScore = MateScore - 100 - int32(ply)
+					boundType = tt.LowerBound
+				}
+			case syzygy.Draw:
+				tbScore = 0
+				boundType = tt.Exact
+			case syzygy.BlessedLoss:
+				if syzygy.Use50MoveRule {
+					tbScore = 0
+					boundType = tt.Exact
+				} else {
+					tbScore = -MateScore + 100 + int32(ply)
+					boundType = tt.UpperBound
+				}
+			case syzygy.Loss:
+				tbScore = -MateScore + 100 + int32(ply)
+				boundType = tt.UpperBound
+			}
+
+			w.TT.Store(w.Board.Hash, types.MoveNone, tt.ScoreToTT(tbScore, ply), depth, boundType)
+
+			if boundType == tt.Exact {
+				return tbScore
+			}
+			if boundType == tt.LowerBound && tbScore >= beta {
+				return tbScore
+			}
+			if boundType == tt.UpperBound && tbScore <= alpha {
+				return tbScore
 			}
 		}
 	}

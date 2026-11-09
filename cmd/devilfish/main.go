@@ -27,14 +27,16 @@ func printHelp() {
 	fmt.Println("  -c, --config <path>         Path to JSON config file (default: ~/.devilfish/config.json)")
 	fmt.Println("  --eval-file <path>          Path to custom NNUE network file (default: embedded)")
 	fmt.Println("  --no-nnue                   Disable NNUE evaluation (use classical HCE)")
+	fmt.Println("  --syzygy-path <path>        Path to directory containing Syzygy tablebase files (.rtbw / .rtbz)")
 	fmt.Println("\nConfiguration File:")
 	fmt.Printf("  If present, configuration is automatically loaded from:\n    %s\n", config.GetDefaultConfigPath())
-	fmt.Println("  Example format: {\"threads\": 10, \"hash\": 2000, \"ponder\": true, \"use_nnue\": true, \"eval_file\": \"<embedded>\"}")
+	fmt.Println("  Example format: {\"threads\": 10, \"hash\": 2000, \"ponder\": true, \"use_nnue\": true, \"eval_file\": \"<embedded>\", \"syzygy_path\": \"/path/to/syzygy\"}")
 }
 
 func main() {
 	var customConfigPath string
 	var evalFilePath string
+	var syzygyPath string
 	var cliThreads int
 	var cliHash int
 	var cliNoNNUE bool
@@ -140,6 +142,20 @@ func main() {
 			cliNoNNUE = true
 			continue
 		}
+
+		// Handle --syzygy-path
+		if arg == "-syzygy-path" || arg == "--syzygy-path" {
+			if i+1 < len(args) {
+				syzygyPath = args[i+1]
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--syzygy-path=") || strings.HasPrefix(arg, "-syzygy-path=") {
+			parts := strings.SplitN(arg, "=", 2)
+			syzygyPath = parts[1]
+			continue
+		}
 	}
 
 	// 1. Load configuration from file (custom path or ~/.devilfish/config.json)
@@ -157,6 +173,9 @@ func main() {
 	}
 	if evalFilePath != "" {
 		cfg.EvalFile = evalFilePath
+	}
+	if syzygyPath != "" {
+		cfg.SyzygyPath = syzygyPath
 	}
 	if cliNoNNUE {
 		cfg.UseNNUE = false

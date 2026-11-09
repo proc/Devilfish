@@ -96,7 +96,14 @@ Devilfish uses a staged (lazy) move picker that yields moves on-demand phase-by-
 - The master thread drives iterative deepening and reports UCI `info` and `bestmove`.
 - Helper threads execute varied iterative deepening iterations, priming the shared TT with deep cutoffs and branch evaluations.
 
-### 7. Universal Chess Interface (UCI) Compatibility & Configuration
+### 7. Syzygy Endgame Tablebases (WDL & DTZ)
+Devilfish includes native support for **Syzygy endgame tablebases** (up to 7 pieces) powered by an integrated Fathom probing library:
+- **Root Probing (`tb_probe_root`)**: Directly accesses Distance-to-Zero (DTZ) tables at the root position. When tablebase positions are reached at the root, the engine plays the mathematically optimal winning or drawing move instantly with exact mate-distance metrics.
+- **Interior Search Probing (`tb_probe_wdl`)**: Probes Win-Draw-Loss (WDL) tables during alpha-beta search at depths $\ge \text{SyzygyProbeDepth}$. Prunes entire game trees immediately upon resolving to tablebase positions, storing exact cutoff scores into the Transposition Table.
+- **50-Move Rule Compliance (`Syzygy50MoveRule`)**: Correctly differentiates between unconditional wins/losses and cursed wins / blessed losses drawn by the 50-move rule.
+- **UCI Reporting (`tbhits`)**: Tracks tablebase lookups across all worker threads and reports `tbhits <count>` in standard UCI `info` strings.
+
+### 8. Universal Chess Interface (UCI) Compatibility & Configuration
 Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena, Banksia GUI, Fritz, LiChess bot frameworks).
 
 #### Configuration Methods:
@@ -108,7 +115,11 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
      "hash": 2000,
      "ponder": true,
      "use_nnue": true,
-     "eval_file": "<embedded>"
+     "eval_file": "<embedded>",
+     "syzygy_path": "/path/to/syzygy",
+     "syzygy_probe_depth": 1,
+     "syzygy_50_move_rule": true,
+     "syzygy_probe_limit": 6
    }
    ```
 2. **Command-Line Arguments** (override config file):
@@ -117,12 +128,17 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
    - `-c`, `--config <path>`: Specify custom config file path.
    - `--eval-file <path>`: Specify external `.nnue` network file.
    - `--no-nnue`: Disable NNUE evaluation and use classical HCE.
+   - `--syzygy-path <path>`: Specify directory containing Syzygy `.rtbw` and `.rtbz` files.
 3. **Runtime UCI Options**:
    - `setoption name Threads value <N>`
    - `setoption name Hash value <MB>`
    - `setoption name Ponder value <true|false>`
    - `setoption name UseNNUE value <true|false>`
    - `setoption name EvalFile value <path>`
+   - `setoption name SyzygyPath value <path>`
+   - `setoption name SyzygyProbeDepth value <depth>`
+   - `setoption name Syzygy50MoveRule value <true|false>`
+   - `setoption name SyzygyProbeLimit value <limit>`
 
 #### Protocol Support & Robustness:
 - Standard UCI Commands: `uci`, `isready`, `ucinewgame`, `position`, `go`, `stop`, `ponderhit`, `quit`, `ping`.
@@ -132,7 +148,7 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
 - **Continuous Background Auto-Pondering**: When not explicitly commanded by a GUI, the engine calculates the predicted opponent continuation silently in the background, pre-warming the transposition table for instant tactical responses.
 - Diagnostic commands: `d` / `display`, `eval`, `perft <depth>`, `bench [depth] [threads]`.
 
-### 8. Performance & Benchmarks
+### 9. Performance & Benchmarks
 
 Devilfish includes a built-in tactical benchmark suite covering openings, middlegames, endgames, tactical sacrifices, and promotion tactics:
 

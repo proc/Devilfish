@@ -7,8 +7,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"devilfish/internal/bitboard"
 	"devilfish/internal/board"
 	"devilfish/internal/movegen"
+	"devilfish/internal/syzygy"
 	"devilfish/internal/tt"
 	"devilfish/internal/types"
 )
@@ -23,6 +25,7 @@ type SearchInfo struct {
 	NPS      uint64
 	TimeMs   int64
 	HashFull int
+	TBHits   uint64
 	PV       []types.Move
 }
 
@@ -31,6 +34,7 @@ type Engine struct {
 	NumThreads int
 	Stopped    atomic.Bool
 	Nodes      atomic.Uint64
+	TBHits     atomic.Uint64
 	currentTM  atomic.Pointer[TimeManager]
 	searchMu   sync.Mutex
 }
@@ -76,7 +80,54 @@ func (e *Engine) Search(
 
 	e.Stopped.Store(false)
 	e.Nodes.Store(0)
+	e.TBHits.Store(0)
 	e.TT.IncrementAge()
+
+	// Syzygy root probe
+	if syzygy.IsAvailable() && b.Castling == 0 && bitboard.Count(b.Occupied()) <= syzygy.MaxPieces() {
+		rootMove, wdl, dtz, ok := syzygy.ProbeRoot(b)
+		if ok && rootMove != types.MoveNone {
+			e.TBHits.Add(1)
+			var rootScore int32
+			switch wdl {
+			case syzygy.Win:
+				rootScore = MateScore - 100 - int32(dtz)
+			case syzygy.CursedWin:
+				if syzygy.Use50MoveRule {
+					rootScore = 0
+				} else {
+					rootScore = MateScore - 100 - int32(dtz)
+				}
+			case syzygy.Draw:
+				rootScore = 0
+			case syzygy.BlessedLoss:
+				if syzygy.Use50MoveRule {
+					rootScore = 0
+				} else {
+					rootScore = -MateScore + 100 + int32(dtz)
+				}
+			case syzygy.Loss:
+				rootScore = -MateScore + 100 + int32(dtz)
+			}
+
+			if infoCallback != nil {
+				infoCallback(SearchInfo{
+					Depth:    1,
+					SelDepth: 1,
+					Score:    rootScore,
+					Nodes:    1,
+					NPS:      0,
+					TimeMs:   0,
+					HashFull: e.TT.HashFull(),
+					TBHits:   1,
+					PV:       []types.Move{rootMove},
+				})
+			}
+
+			e.TT.Store(b.Hash, rootMove, tt.ScoreToTT(rootScore, 0), 127, tt.Exact)
+			return rootMove, types.MoveNone
+		}
+	}
 
 	tm := NewTimeManager(limits, b.SideToMove, &e.Stopped, &e.Nodes)
 	e.currentTM.Store(tm)
@@ -92,7 +143,7 @@ func (e *Engine) Search(
 	var rootScore int32
 
 	// Master worker
-	master := NewWorker(0, b, e.TT, tm, &e.Nodes)
+	master := NewWorker(0, b, e.TT, tm, &e.Nodes, &e.TBHits)
 
 	// WaitGroup for helper threads
 	var wg sync.WaitGroup
@@ -102,7 +153,7 @@ func (e *Engine) Search(
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			helper := NewWorker(workerID, b, e.TT, tm, &e.Nodes)
+			helper := NewWorker(workerID, b, e.TT, tm, &e.Nodes, &e.TBHits)
 			// Helper searches with depth variation
 			for d := int8(1 + (workerID % 2)); d <= maxDepth; d++ {
 				if e.Stopped.Load() {
@@ -233,6 +284,7 @@ func (e *Engine) Search(
 				NPS:      nps,
 				TimeMs:   elapsedMs,
 				HashFull: e.TT.HashFull(),
+				TBHits:   e.TBHits.Load(),
 				PV:       pv,
 			})
 		}
@@ -367,8 +419,12 @@ func FormatInfo(info SearchInfo) string {
 		sb.WriteString(fmt.Sprintf("score cp %d ", info.Score))
 	}
 
-	sb.WriteString(fmt.Sprintf("nodes %d nps %d time %d hashfull %d pv",
-		info.Nodes, info.NPS, info.TimeMs, info.HashFull))
+	sb.WriteString(fmt.Sprintf("nodes %d nps %d time %d",
+		info.Nodes, info.NPS, info.TimeMs))
+	if info.TBHits > 0 {
+		sb.WriteString(fmt.Sprintf(" tbhits %d", info.TBHits))
+	}
+	sb.WriteString(fmt.Sprintf(" hashfull %d pv", info.HashFull))
 
 	for _, m := range info.PV {
 		sb.WriteString(" ")

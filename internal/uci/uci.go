@@ -17,6 +17,7 @@ import (
 	"devilfish/internal/movegen"
 	"devilfish/internal/nnue"
 	"devilfish/internal/search"
+	"devilfish/internal/syzygy"
 	"devilfish/internal/types"
 )
 
@@ -57,6 +58,12 @@ func New(in io.Reader, out io.Writer, cfg config.Config) *UCI {
 	evalFile := cfg.EvalFile
 	if evalFile == "" {
 		evalFile = "<embedded>"
+	}
+	if cfg.SyzygyPath != "" {
+		syzygy.Init(cfg.SyzygyPath)
+		syzygy.ProbeDepth = cfg.SyzygyProbeDepth
+		syzygy.Use50MoveRule = cfg.Syzygy50MoveRule
+		syzygy.ProbeLimit = cfg.SyzygyProbeLimit
 	}
 	return &UCI{
 		board:         b,
@@ -113,6 +120,7 @@ func (u *UCI) Loop() {
 			u.cmdPonderHit()
 		case "quit":
 			u.stopSearch(false)
+			syzygy.Free()
 			return
 		case "perft":
 			u.cmdPerft(parts[1:])
@@ -140,6 +148,10 @@ func (u *UCI) cmdUCI() {
 		evalFile = "<embedded>"
 	}
 	u.sendLine(fmt.Sprintf("option name EvalFile type string default %s", evalFile))
+	u.sendLine(fmt.Sprintf("option name SyzygyPath type string default %s", syzygy.Path))
+	u.sendLine(fmt.Sprintf("option name SyzygyProbeDepth type spin default %d min 1 max 64", syzygy.ProbeDepth))
+	u.sendLine(fmt.Sprintf("option name Syzygy50MoveRule type check default %t", syzygy.Use50MoveRule))
+	u.sendLine(fmt.Sprintf("option name SyzygyProbeLimit type spin default %d min 0 max 7", syzygy.ProbeLimit))
 	u.sendLine("uciok")
 }
 
@@ -192,6 +204,29 @@ func (u *UCI) cmdSetOption(args []string) {
 						u.evalFile = "<embedded>"
 						nnue.ResetToDefault()
 						u.sendLine("info string reset to embedded nnue network")
+					}
+				case "syzygypath":
+					valPath := strings.TrimSpace(strings.Join(args[i+3:], " "))
+					syzygy.Init(valPath)
+					if syzygy.IsAvailable() {
+						u.sendLine(fmt.Sprintf("info string found %d-piece Syzygy tablebases", syzygy.MaxPieces()))
+					}
+				case "syzygyprobedepth":
+					d, err := strconv.Atoi(valStr)
+					if err == nil && d >= 1 && d <= 64 {
+						syzygy.ProbeDepth = d
+					}
+				case "syzygy50moverule":
+					valLower := strings.ToLower(valStr)
+					if valLower == "true" || valLower == "1" {
+						syzygy.Use50MoveRule = true
+					} else if valLower == "false" || valLower == "0" {
+						syzygy.Use50MoveRule = false
+					}
+				case "syzygyprobelimit":
+					lim, err := strconv.Atoi(valStr)
+					if err == nil && lim >= 0 && lim <= 7 {
+						syzygy.ProbeLimit = lim
 					}
 				}
 			}

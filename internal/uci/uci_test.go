@@ -140,4 +140,27 @@ func TestConfigUCIOptions(t *testing.T) {
 	if !strings.Contains(output, "option name EvalFile type string default my_custom.nnue") {
 		t.Errorf("expected EvalFile default my_custom.nnue in output:\n%s", output)
 	}
+	if !strings.Contains(output, "option name SyzygyPath type string") {
+		t.Errorf("expected SyzygyPath option in output:\n%s", output)
+	}
+	if !strings.Contains(output, "option name SyzygyProbeDepth type spin default 1") {
+		t.Errorf("expected SyzygyProbeDepth option in output:\n%s", output)
+	}
+	if !strings.Contains(output, "option name Syzygy50MoveRule type check default true") {
+		t.Errorf("expected Syzygy50MoveRule option in output:\n%s", output)
+	}
+	if !strings.Contains(output, "option name SyzygyProbeLimit type spin default 6") {
+		t.Errorf("expected SyzygyProbeLimit option in output:\n%s", output)
+	}
+}
+
+func TestSyzygySetOptions(t *testing.T) {
+	out := &bytes.Buffer{}
+	cfg := config.DefaultConfig()
+	u := New(bytes.NewBuffer(nil), out, cfg)
+
+	u.cmdSetOption([]string{"name", "SyzygyProbeDepth", "value", "3"})
+	u.cmdSetOption([]string{"name", "Syzygy50MoveRule", "value", "false"})
+	u.cmdSetOption([]string{"name", "SyzygyProbeLimit", "value", "5"})
+	u.cmdSetOption([]string{"name", "SyzygyPath", "value", "/tmp/nonexistent/tb"})
 }
