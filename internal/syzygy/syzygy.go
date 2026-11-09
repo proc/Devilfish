@@ -9,12 +9,16 @@ package syzygy
 */
 import "C"
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"unsafe"
 
 	"devilfish/internal/bitboard"
 	"devilfish/internal/board"
+	"devilfish/internal/logger"
 	"devilfish/internal/movegen"
 	"devilfish/internal/types"
 )
@@ -36,6 +40,96 @@ var (
 	maxPiecesCount int    = 0
 )
 
+// NormalizePath resolves path elements, automatically expanding directories that contain
+// subdirectories of tablebases (such as Syzygy345WDL and Syzygy345DTZ), and formats them
+// with the platform separator expected by Fathom.
+func NormalizePath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+
+	rawDirs := strings.FieldsFunc(trimmed, func(r rune) bool {
+		return r == ':' || r == ';'
+	})
+
+	var validDirs []string
+	seen := make(map[string]bool)
+
+	addDir := func(d string) {
+		abs, err := filepath.Abs(d)
+		if err == nil {
+			d = abs
+		}
+		if !seen[d] {
+			seen[d] = true
+			validDirs = append(validDirs, d)
+		}
+	}
+
+	hasTBFiles := func(dir string) bool {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return false
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				name := strings.ToLower(e.Name())
+				if strings.HasSuffix(name, ".rtbw") || strings.HasSuffix(name, ".rtbz") {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	for _, d := range rawDirs {
+		d = strings.TrimSpace(d)
+		if d == "" {
+			continue
+		}
+
+		fi, err := os.Stat(d)
+		if err != nil || !fi.IsDir() {
+			continue
+		}
+
+		foundAny := false
+		if hasTBFiles(d) {
+			addDir(d)
+			foundAny = true
+		}
+
+		// Also check immediate subdirectories (e.g. Syzygy345WDL, Syzygy345DTZ, etc.)
+		entries, err := os.ReadDir(d)
+		if err == nil {
+			for _, e := range entries {
+				if e.IsDir() {
+					subDir := filepath.Join(d, e.Name())
+					if hasTBFiles(subDir) {
+						addDir(subDir)
+						foundAny = true
+					}
+				}
+			}
+		}
+
+		if !foundAny {
+			addDir(d)
+		}
+	}
+
+	if len(validDirs) == 0 {
+		return trimmed
+	}
+
+	sep := ":"
+	if runtime.GOOS == "windows" {
+		sep = ";"
+	}
+	return strings.Join(validDirs, sep)
+}
+
 func Init(path string) bool {
 	mu.Lock()
 	defer mu.Unlock()
@@ -45,14 +139,22 @@ func Init(path string) bool {
 	if trimmed == "" {
 		C.tb_free()
 		maxPiecesCount = 0
+		logger.Infof("Syzygy tablebases disabled: no path configured")
 		return true
 	}
 
-	cPath := C.CString(trimmed)
+	normalized := NormalizePath(trimmed)
+
+	cPath := C.CString(normalized)
 	defer C.free(unsafe.Pointer(cPath))
 
 	success := bool(C.tb_init(cPath))
 	maxPiecesCount = int(C.TB_LARGEST)
+	if maxPiecesCount > 0 {
+		logger.Infof("Syzygy tablebases loaded successfully: %d-piece tablebases detected (configured: %q, normalized: %q)", maxPiecesCount, Path, normalized)
+	} else {
+		logger.Warnf("Syzygy tablebases failed to load: 0 tablebases detected (configured: %q, normalized: %q)", Path, normalized)
+	}
 	return success
 }
 
@@ -62,6 +164,7 @@ func Free() {
 	C.tb_free()
 	maxPiecesCount = 0
 	Path = ""
+	logger.Infof("Syzygy tablebases unloaded / freed")
 }
 
 func maxPiecesLocked() int {

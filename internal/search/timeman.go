@@ -21,15 +21,19 @@ type SearchLimits struct {
 }
 
 type TimeManager struct {
-	StartTime   time.Time
-	OptTime     time.Duration
-	MaxTime     time.Duration
-	MaxDepth    int8
-	MaxNodes    uint64
-	Infinite    bool
-	Ponder      atomic.Bool
-	Stopped     *atomic.Bool
-	Nodes       *atomic.Uint64
+	StartTime     time.Time
+	OptTime       time.Duration
+	MaxTime       time.Duration
+	MaxDepth      int8
+	MaxNodes      uint64
+	Infinite      bool
+	Ponder        atomic.Bool
+	Stopped       *atomic.Bool
+	Nodes         *atomic.Uint64
+	RemainingTime int64
+	Increment     int64
+	IsTimeTrouble bool
+	IsEmergency   bool
 }
 
 func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool, nodes *atomic.Uint64) *TimeManager {
@@ -63,9 +67,33 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 		myInc = limits.BlackInc
 	}
 
+	tm.RemainingTime = myTime
+	tm.Increment = myInc
+	tm.IsTimeTrouble = myTime > 0 && myTime < 4000
+	tm.IsEmergency = myTime > 0 && myTime < 1200
+
 	if myTime <= 0 {
 		// No time specified; default to infinite or depth limit
 		return tm
+	}
+
+	// Non-linear scaling based on remaining time on clock:
+	// Move faster when time is running low to avoid flagging.
+	var divisor int64 = 25
+	var maxMultiplier float64 = 3.0
+
+	if myTime < 1000 {
+		divisor = 55
+		maxMultiplier = 1.4
+	} else if myTime < 2500 {
+		divisor = 42
+		maxMultiplier = 1.6
+	} else if myTime < 5000 {
+		divisor = 35
+		maxMultiplier = 2.0
+	} else if myTime < 10000 {
+		divisor = 30
+		maxMultiplier = 2.4
 	}
 
 	var optTimeMs, maxTimeMs int64
@@ -74,21 +102,27 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 		if moves > 50 {
 			moves = 50
 		}
+		if tm.IsTimeTrouble && moves < 10 {
+			moves = 12
+		}
 		optTimeMs = (myTime / (moves + 2)) + (myInc * 3 / 4)
-		maxTimeMs = (myTime / (moves / 2 + 1)) + myInc
+		maxTimeMs = int64(float64(optTimeMs) * maxMultiplier)
 	} else {
-		optTimeMs = (myTime / 25) + (myInc / 2)
-		maxTimeMs = (myTime / 8) + myInc
+		optTimeMs = (myTime / divisor) + (myInc / 2)
+		maxTimeMs = int64(float64(optTimeMs) * maxMultiplier)
 	}
 
-	// Safety margins & Move Overhead
-	moveOverhead := int64(25) // 25ms buffer for GUI / pipe latency
+	// Dynamic safety margins & move overhead to prevent latency loss
+	moveOverhead := int64(25)
+	if myTime < 1500 {
+		moveOverhead = 40
+	}
 	if myTime > moveOverhead*2 {
 		if maxTimeMs > myTime-moveOverhead {
 			maxTimeMs = myTime - moveOverhead
 		}
 	} else {
-		maxTimeMs = myTime / 2
+		maxTimeMs = myTime / 3
 		if maxTimeMs < 5 {
 			maxTimeMs = 5
 		}
@@ -138,18 +172,31 @@ func (tm *TimeManager) CheckLimits() bool {
 	return false
 }
 
-func (tm *TimeManager) CanStartNewIteration() bool {
+func (tm *TimeManager) CanStartNewIteration(lastIterDuration time.Duration) bool {
 	if tm.Stopped.Load() {
 		return false
 	}
-	if tm.Ponder.Load() {
+	if tm.Ponder.Load() || tm.Infinite {
 		return true
 	}
-	if tm.Infinite {
+	if tm.OptTime <= 0 {
 		return true
 	}
-	if tm.OptTime > 0 && time.Since(tm.StartTime) >= tm.OptTime {
+
+	elapsed := time.Since(tm.StartTime)
+	if elapsed >= tm.OptTime {
 		return false
+	}
+
+	// Project next iteration time (~2.2x previous iteration)
+	if lastIterDuration > 0 {
+		projected := elapsed + time.Duration(float64(lastIterDuration)*2.2)
+		if tm.IsTimeTrouble && projected > tm.OptTime {
+			return false
+		}
+		if projected > tm.MaxTime {
+			return false
+		}
 	}
 	return true
 }

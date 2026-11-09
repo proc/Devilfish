@@ -386,7 +386,7 @@ func GenerateLegalMoves(b *board.Board) []types.Move {
 }
 
 func IsPseudoLegal(b *board.Board, m types.Move) bool {
-	if m == types.MoveNone {
+	if m == types.MoveNone || m.IsCastle() {
 		return false
 	}
 	from := m.From()
@@ -417,9 +417,6 @@ func IsPseudoLegal(b *board.Board, m types.Move) bool {
 	case types.Queen:
 		return bitboard.QueenAttacks(from, b.Occupied())&bitboard.SquareBB[to] != 0
 	case types.King:
-		if m.IsCastle() {
-			return false
-		}
 		return bitboard.KingAttacks(from)&bitboard.SquareBB[to] != 0
 	case types.Pawn:
 		if us == types.White {

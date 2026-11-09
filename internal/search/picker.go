@@ -109,10 +109,22 @@ func (mp *MovePicker) Next() types.Move {
 					capHist = mp.history.CaptureHistory[attacker][m.To()][victim]
 				}
 				see := eval.SEE(mp.board, m)
+				givesCheck := mp.board.GivesCheck(m)
 				if m.IsPromotion() && m.PromotionType() == types.Queen {
 					mp.capScores[i] = ScoreQueenPromotion + see
-				} else if see >= 0 {
-					mp.capScores[i] = ScoreGoodCapture + see*100 + mvvLva*10 + capHist
+				} else if givesCheck {
+					if see >= 0 {
+						mp.capScores[i] = ScoreGoodCapture + 20_000_000 + see*100 + mvvLva*10 + capHist
+					} else {
+						mp.capScores[i] = ScoreGoodCapture + 10_000_000 + see*100 + mvvLva*10 + capHist
+					}
+				} else if see >= 0 || victim >= types.Knight {
+					if see >= 0 {
+						mp.capScores[i] = ScoreGoodCapture + see*100 + mvvLva*10 + capHist
+					} else {
+						// Piece sacrifice / deflection (e.g. Qxd7): search before quiets
+						mp.capScores[i] = ScoreGoodCapture + 5_000_000 + see*100 + mvvLva*10 + capHist
+					}
 				} else {
 					mp.capScores[i] = ScoreBadCapture + see*100 + mvvLva*10 + capHist
 				}
@@ -145,7 +157,7 @@ func (mp *MovePicker) Next() types.Move {
 		case StageKiller1:
 			mp.stage = StageKiller2
 			if mp.killer1 != types.MoveNone && mp.killer1 != mp.ttMove && mp.killer1 != mp.excludedMove &&
-				!mp.killer1.IsCapture() && !mp.killer1.IsPromotion() &&
+				!mp.killer1.IsCapture() && !mp.killer1.IsPromotion() && !mp.killer1.IsCastle() &&
 				movegen.IsPseudoLegal(mp.board, mp.killer1) {
 				return mp.killer1
 			}
@@ -154,7 +166,7 @@ func (mp *MovePicker) Next() types.Move {
 			mp.stage = StageCounterMove
 			if mp.killer2 != types.MoveNone && mp.killer2 != mp.ttMove && mp.killer2 != mp.excludedMove &&
 				mp.killer2 != mp.killer1 &&
-				!mp.killer2.IsCapture() && !mp.killer2.IsPromotion() &&
+				!mp.killer2.IsCapture() && !mp.killer2.IsPromotion() && !mp.killer2.IsCastle() &&
 				movegen.IsPseudoLegal(mp.board, mp.killer2) {
 				return mp.killer2
 			}
@@ -163,7 +175,7 @@ func (mp *MovePicker) Next() types.Move {
 			mp.stage = StageGenQuiets
 			if mp.counterMove != types.MoveNone && mp.counterMove != mp.ttMove && mp.counterMove != mp.excludedMove &&
 				mp.counterMove != mp.killer1 && mp.counterMove != mp.killer2 &&
-				!mp.counterMove.IsCapture() && !mp.counterMove.IsPromotion() &&
+				!mp.counterMove.IsCapture() && !mp.counterMove.IsPromotion() && !mp.counterMove.IsCastle() &&
 				movegen.IsPseudoLegal(mp.board, mp.counterMove) {
 				return mp.counterMove
 			}
@@ -185,8 +197,14 @@ func (mp *MovePicker) Next() types.Move {
 				if mp.prevMove4 != types.MoveNone && mp.prevMove4.To() < 64 && m.To() < 64 {
 					histScore += mp.history.ContHistory4[mp.prevMove4.To()][m.To()]
 				}
+				isPawnPush := mp.board.Pieces[m.From()].Type() == types.Pawn
+				toSq := m.To()
+				isAdvancedPawn := isPawnPush && ((side == types.White && toSq >= types.A6) || (side == types.Black && toSq <= types.H3))
+
 				if mp.board.GivesCheck(m) {
 					mp.quietScores[i] = ScoreQuietCheck + histScore/10
+				} else if isAdvancedPawn {
+					mp.quietScores[i] = ScorePassedPawnPush + histScore/10
 				} else {
 					mp.quietScores[i] = histScore
 				}

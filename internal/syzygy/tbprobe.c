@@ -360,7 +360,7 @@ static void *map_file(FD fd, map_t *mapping)
 static void unmap_file(void *data, map_t size)
 {
   if (!data) return;
-  if (!munmap(data, size)) {
+  if (munmap(data, size) != 0) {
 	  perror("munmap");
   }
 }
@@ -391,6 +391,22 @@ enum { PIECE_ENC, FILE_ENC, RANK_ENC };
 
 // Attack and move generation code
 #include "tbchess.inc"
+
+static bool is_stalemate(const Pos *pos)
+{
+    if (is_check(pos))
+        return false;
+    uint16_t moves0[MAX_MOVES];
+    uint16_t *moves = moves0;
+    uint16_t *end = gen_moves(pos, moves);
+    for (; moves < end; moves++)
+    {
+        Pos pos1;
+        if (do_move(&pos1, pos, *moves))
+            return false;
+    }
+    return true;
+}
 
 struct PairsData {
   uint8_t *indexTable;
@@ -976,6 +992,8 @@ void tb_free(void)
   tb_init("");
   free(pieceEntry);
   free(pawnEntry);
+  pieceEntry = NULL;
+  pawnEntry = NULL;
 }
 
 static const int8_t OffDiag[] = {
@@ -2291,6 +2309,8 @@ static int root_probe_dtz(const Pos *pos, bool hasRepeated, bool useRule50, stru
     // Make sure that a mating move gets value 1.
     if (v == 2 && is_mate(&pos1)) {
       v = 1;
+    } else if (is_stalemate(&pos1)) {
+      v = 0;
     }
 
     if (!success) return 0;
@@ -2478,6 +2498,8 @@ static uint16_t probe_root(Pos *pos, int *score, unsigned *results)
         //        print_move(pos,moves[i]);
         if (dtz > 0 && is_mate(&pos1))
             v = 1;
+        else if (is_stalemate(&pos1))
+            v = 0;
         else
         {
             if (pos1.rule50 != 0)

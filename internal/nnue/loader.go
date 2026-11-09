@@ -49,6 +49,7 @@ func LoadFile(path string) error {
 
 	ActiveNetwork = net
 	Enabled = true
+	CurrentFilePath = path
 	return nil
 }
 

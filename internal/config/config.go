@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type Config struct {
@@ -17,12 +18,13 @@ type Config struct {
 	SyzygyProbeDepth int    `json:"syzygy_probe_depth"`
 	Syzygy50MoveRule bool   `json:"syzygy_50_move_rule"`
 	SyzygyProbeLimit int    `json:"syzygy_probe_limit"`
+	LogFile          string `json:"log_file"`
 }
 
 func DefaultConfig() Config {
 	return Config{
 		Threads:          10,
-		Hash:             2000,
+		Hash:             128,
 		Ponder:           true,
 		UseNNUE:          true,
 		EvalFile:         "<embedded>",
@@ -30,6 +32,7 @@ func DefaultConfig() Config {
 		SyzygyProbeDepth: 1,
 		Syzygy50MoveRule: true,
 		SyzygyProbeLimit: 6,
+		LogFile:          "",
 	}
 }
 
@@ -41,38 +44,88 @@ func GetDefaultConfigPath() string {
 	return filepath.Join(home, ".devilfish", "config.json")
 }
 
-type rawConfig struct {
-	Threads          *int    `json:"threads"`
-	Hash             *int    `json:"hash"`
-	Ponder           *bool   `json:"ponder"`
-	UseNNUE          *bool   `json:"use_nnue"`
-	AltUseNNUE       *bool   `json:"usennue"`
-	EvalFile         *string `json:"eval_file"`
-	AltEvalFile      *string `json:"evalfile"`
-	SyzygyPath       *string `json:"syzygy_path"`
-	AltSyzygyPath    *string `json:"syzygypath"`
-	SyzygyProbeDepth *int    `json:"syzygy_probe_depth"`
-	Syzygy50MoveRule *bool   `json:"syzygy_50_move_rule"`
-	SyzygyProbeLimit *int    `json:"syzygy_probe_limit"`
+// FindConfigFile resolves the config file path:
+// 1. If explicitPath is non-empty, use it directly.
+// 2. If ./config.json exists in the current working directory, use it.
+// 3. If config.json exists in the executable's directory, use it.
+// 4. Otherwise, use ~/.devilfish/config.json.
+func FindConfigFile(explicitPath string) string {
+	if explicitPath != "" {
+		return explicitPath
+	}
+
+	// Check current working directory
+	if fi, err := os.Stat("config.json"); err == nil && !fi.IsDir() {
+		return "config.json"
+	}
+
+	// Check executable directory
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidate := filepath.Join(exeDir, "config.json")
+		if fi, err := os.Stat(candidate); err == nil && !fi.IsDir() {
+			return candidate
+		}
+	}
+
+	return GetDefaultConfigPath()
 }
 
-// Load reads the config file from path (or ~/.devilfish/config.json if path is empty).
+type rawConfig struct {
+	Threads          *int        `json:"threads"`
+	Hash             *int        `json:"hash"`
+	Ponder           *bool       `json:"ponder"`
+	UseNNUE          *bool       `json:"use_nnue"`
+	AltUseNNUE       *bool       `json:"usennue"`
+	EvalFile         *string     `json:"eval_file"`
+	AltEvalFile      *string     `json:"evalfile"`
+	SyzygyPath       interface{} `json:"syzygy_path"`
+	AltSyzygyPath    interface{} `json:"syzygypath"`
+	SyzygyProbeDepth *int        `json:"syzygy_probe_depth"`
+	Syzygy50MoveRule *bool       `json:"syzygy_50_move_rule"`
+	SyzygyProbeLimit *int        `json:"syzygy_probe_limit"`
+	LogFile          *string     `json:"log_file"`
+	AltLogFile       *string     `json:"logfile"`
+	LogPath          *string     `json:"log_path"`
+	AltLogPath       *string     `json:"logpath"`
+}
+
+func parseSyzygyPath(val interface{}) string {
+	if val == nil {
+		return ""
+	}
+	switch v := val.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []interface{}:
+		var parts []string
+		for _, item := range v {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+				parts = append(parts, strings.TrimSpace(s))
+			}
+		}
+		return strings.Join(parts, ":")
+	case []string:
+		return strings.Join(v, ":")
+	default:
+		return ""
+	}
+}
+
+// Load reads the config file from path (or resolves via FindConfigFile if path is empty).
 // If the file does not exist, it creates the file with default settings and returns it.
 func Load(path string) (Config, error) {
 	cfg := DefaultConfig()
 
-	if path == "" {
-		path = GetDefaultConfigPath()
-	}
-
-	if path == "" {
+	resolvedPath := FindConfigFile(path)
+	if resolvedPath == "" {
 		return cfg, nil
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(resolvedPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			_ = Save(path, cfg)
+			_ = Save(resolvedPath, cfg)
 			return cfg, nil
 		}
 		return cfg, err
@@ -102,11 +155,54 @@ func Load(path string) (Config, error) {
 	} else if raw.AltEvalFile != nil {
 		cfg.EvalFile = *raw.AltEvalFile
 	}
-	if raw.SyzygyPath != nil {
-		cfg.SyzygyPath = *raw.SyzygyPath
-	} else if raw.AltSyzygyPath != nil {
-		cfg.SyzygyPath = *raw.AltSyzygyPath
+
+	// Handle SyzygyPath with various casing/keys and types (string or array)
+	if p := parseSyzygyPath(raw.SyzygyPath); p != "" {
+		cfg.SyzygyPath = p
+	} else if p := parseSyzygyPath(raw.AltSyzygyPath); p != "" {
+		cfg.SyzygyPath = p
 	}
+
+	// Also check flexible map to accept any casing like syzygyPath, SyzygyPath, tb_path, tablebases, etc.
+	var genericMap map[string]interface{}
+	if err := json.Unmarshal(data, &genericMap); err == nil {
+		for k, v := range genericMap {
+			normKey := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(k, "_", ""), "-", ""))
+			switch normKey {
+			case "syzygypath", "syzygy", "tbpath", "tablebases", "tablebasepath":
+				if cfg.SyzygyPath == "" {
+					cfg.SyzygyPath = parseSyzygyPath(v)
+				}
+			case "syzygyprobedepth":
+				if n, ok := v.(float64); ok && int(n) >= 1 {
+					cfg.SyzygyProbeDepth = int(n)
+				}
+			case "syzygy50moverule":
+				if b, ok := v.(bool); ok {
+					cfg.Syzygy50MoveRule = b
+				}
+			case "syzygyprobelimit":
+				if n, ok := v.(float64); ok && int(n) >= 0 {
+					cfg.SyzygyProbeLimit = int(n)
+				}
+			case "logfile", "log", "logpath", "logfilepath", "logfilelocation":
+				if s, ok := v.(string); ok && cfg.LogFile == "" {
+					cfg.LogFile = strings.TrimSpace(s)
+				}
+			}
+		}
+	}
+
+	if raw.LogFile != nil && *raw.LogFile != "" {
+		cfg.LogFile = strings.TrimSpace(*raw.LogFile)
+	} else if raw.AltLogFile != nil && *raw.AltLogFile != "" {
+		cfg.LogFile = strings.TrimSpace(*raw.AltLogFile)
+	} else if raw.LogPath != nil && *raw.LogPath != "" {
+		cfg.LogFile = strings.TrimSpace(*raw.LogPath)
+	} else if raw.AltLogPath != nil && *raw.AltLogPath != "" {
+		cfg.LogFile = strings.TrimSpace(*raw.AltLogPath)
+	}
+
 	if raw.SyzygyProbeDepth != nil && *raw.SyzygyProbeDepth >= 1 {
 		cfg.SyzygyProbeDepth = *raw.SyzygyProbeDepth
 	}
@@ -127,8 +223,10 @@ func Save(path string, cfg Config) error {
 	}
 
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
 	}
 
 	var buf bytes.Buffer

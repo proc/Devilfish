@@ -3,11 +3,14 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 
 	"devilfish/internal/config"
+	"devilfish/internal/logger"
 	"devilfish/internal/nnue"
+	"devilfish/internal/syzygy"
 	"devilfish/internal/uci"
 
 	"net/http"
@@ -24,19 +27,24 @@ func printHelp() {
 	fmt.Println("\nConfiguration Flags:")
 	fmt.Println("  -t, --threads <N>           Number of Lazy SMP search threads (overrides config file)")
 	fmt.Println("  -hash <MB>, --hash <MB>     Transposition Table size in Megabytes")
-	fmt.Println("  -c, --config <path>         Path to JSON config file (default: ~/.devilfish/config.json)")
+	fmt.Println("  -c, --config <path>         Path to JSON config file (default: ./config.json or ~/.devilfish/config.json)")
+	fmt.Println("  -l, --log <path>            Path to log file for engine internal details, profiling, and Syzygy status")
 	fmt.Println("  --eval-file <path>          Path to custom NNUE network file (default: embedded)")
 	fmt.Println("  --no-nnue                   Disable NNUE evaluation (use classical HCE)")
 	fmt.Println("  --syzygy-path <path>        Path to directory containing Syzygy tablebase files (.rtbw / .rtbz)")
 	fmt.Println("\nConfiguration File:")
-	fmt.Printf("  If present, configuration is automatically loaded from:\n    %s\n", config.GetDefaultConfigPath())
-	fmt.Println("  Example format: {\"threads\": 10, \"hash\": 2000, \"ponder\": true, \"use_nnue\": true, \"eval_file\": \"<embedded>\", \"syzygy_path\": \"/path/to/syzygy\"}")
+	fmt.Println("  If present, configuration is automatically loaded from:")
+	fmt.Println("    1. ./config.json (current working directory)")
+	fmt.Printf("    2. %s (user home)\n", config.GetDefaultConfigPath())
+	fmt.Println("  Example format: {\"threads\": 10, \"hash\": 128, \"ponder\": true, \"use_nnue\": true, \"eval_file\": \"<embedded>\", \"syzygy_path\": \"syzygy\"}")
 }
 
 func main() {
 	var customConfigPath string
 	var evalFilePath string
 	var syzygyPath string
+	var syzygyPathSet bool
+	var cliLogPath string
 	var cliThreads int
 	var cliHash int
 	var cliNoNNUE bool
@@ -143,10 +151,25 @@ func main() {
 			continue
 		}
 
+		// Handle --log / -log / -l
+		if arg == "-l" || arg == "-log" || arg == "--log" {
+			if i+1 < len(args) {
+				cliLogPath = args[i+1]
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--log=") || strings.HasPrefix(arg, "-log=") || strings.HasPrefix(arg, "-l=") {
+			parts := strings.SplitN(arg, "=", 2)
+			cliLogPath = parts[1]
+			continue
+		}
+
 		// Handle --syzygy-path
 		if arg == "-syzygy-path" || arg == "--syzygy-path" {
 			if i+1 < len(args) {
 				syzygyPath = args[i+1]
+				syzygyPathSet = true
 				i++
 			}
 			continue
@@ -154,6 +177,7 @@ func main() {
 		if strings.HasPrefix(arg, "--syzygy-path=") || strings.HasPrefix(arg, "-syzygy-path=") {
 			parts := strings.SplitN(arg, "=", 2)
 			syzygyPath = parts[1]
+			syzygyPathSet = true
 			continue
 		}
 	}
@@ -174,23 +198,63 @@ func main() {
 	if evalFilePath != "" {
 		cfg.EvalFile = evalFilePath
 	}
-	if syzygyPath != "" {
+	if syzygyPathSet {
 		cfg.SyzygyPath = syzygyPath
 	}
 	if cliNoNNUE {
 		cfg.UseNNUE = false
+	}
+	if cliLogPath != "" {
+		cfg.LogFile = cliLogPath
+	}
+
+	// 3. Initialize Logger if requested via CLI (--log) or config
+	if cfg.LogFile != "" {
+		if err := logger.Init(cfg.LogFile); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to initialize log file %s: %v\n", cfg.LogFile, err)
+		} else {
+			defer logger.Close()
+			logger.Infof("Engine: %s %s by %s", uci.EngineName, uci.EngineVersion, uci.EngineAuthor)
+			logger.Infof("System: OS=%s Arch=%s CPUs=%d Go=%s PID=%d", runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), runtime.Version(), os.Getpid())
+			logger.Infof("Configuration: Threads=%d, Hash=%dMB, Ponder=%t, UseNNUE=%t, EvalFile=%s", cfg.Threads, cfg.Hash, cfg.Ponder, cfg.UseNNUE, cfg.EvalFile)
+			logger.Infof("Syzygy Settings: ConfiguredPath=%q, ProbeDepth=%d, 50MoveRule=%t, ProbeLimit=%d", cfg.SyzygyPath, cfg.SyzygyProbeDepth, cfg.Syzygy50MoveRule, cfg.SyzygyProbeLimit)
+		}
+	}
+
+	// 4. Initialize Syzygy tablebases and log startup status
+	if cfg.SyzygyPath != "" {
+		syzygy.Init(cfg.SyzygyPath)
+		syzygy.ProbeDepth = cfg.SyzygyProbeDepth
+		syzygy.Use50MoveRule = cfg.Syzygy50MoveRule
+		syzygy.ProbeLimit = cfg.SyzygyProbeLimit
+
+		if syzygy.IsAvailable() {
+			logger.Infof("Syzygy Startup Status: LOADED successfully (%d-piece tablebases available)", syzygy.MaxPieces())
+		} else {
+			logger.Warnf("Syzygy Startup Status: FAILED to load tablebases from path %q", cfg.SyzygyPath)
+		}
+	} else {
+		logger.Infof("Syzygy Startup Status: NOT LOADED on startup (no syzygy path configured)")
 	}
 
 	// Apply NNUE settings from config (and CLI overrides)
 	nnue.Enabled = cfg.UseNNUE
 	if cfg.EvalFile != "" && cfg.EvalFile != "<embedded>" {
 		if err := nnue.LoadFile(cfg.EvalFile); err != nil {
+			logger.Warnf("NNUE Load Failed: file %q: %v", cfg.EvalFile, err)
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
 	}
+	netInfo := nnue.GetNetworkInfo()
+	statusStr := "ENABLED"
+	if !netInfo.Enabled {
+		statusStr = "DISABLED"
+	}
+	logger.Infof("NNUE Startup Status: %s | Network=%s | Arch=%s | SIMD=%s | Params=%d (%.1f KB)",
+		statusStr, netInfo.FilePath, netInfo.Architecture, netInfo.SIMD, netInfo.NumParameters, float64(netInfo.SizeBytes)/1024.0)
 
-	// 3. Run benchmark or UCI loop
+	// 5. Run benchmark or UCI loop
 	if isBench {
 		u := uci.New(os.Stdin, os.Stdout, cfg)
 		u.Bench(benchDepth)

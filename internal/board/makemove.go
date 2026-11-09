@@ -24,6 +24,9 @@ func (b *Board) MakeMove(m types.Move) bool {
 	them := us.Other()
 
 	capturedPiece := b.Pieces[to]
+	if capturedPiece != types.PieceNone && capturedPiece.Color() == us {
+		return false
+	}
 	if m.IsEnPassant() {
 		if us == types.White {
 			if to < 8 {
@@ -85,17 +88,37 @@ func (b *Board) MakeMove(m types.Move) bool {
 
 	// Handle Castling
 	if m.IsCastle() {
+		if movingPiece.Type() != types.King {
+			b.UnmakeMove(m)
+			return false
+		}
 		switch flags {
 		case types.FlagKingCastle:
 			if us == types.White {
+				if b.Pieces[types.H1] != types.WhiteRook || b.Castling&types.CastlingWhiteKing == 0 {
+					b.UnmakeMove(m)
+					return false
+				}
 				b.MovePiece(types.WhiteRook, types.H1, types.F1)
 			} else {
+				if b.Pieces[types.H8] != types.BlackRook || b.Castling&types.CastlingBlackKing == 0 {
+					b.UnmakeMove(m)
+					return false
+				}
 				b.MovePiece(types.BlackRook, types.H8, types.F8)
 			}
 		case types.FlagQueenCastle:
 			if us == types.White {
+				if b.Pieces[types.A1] != types.WhiteRook || b.Castling&types.CastlingWhiteQueen == 0 {
+					b.UnmakeMove(m)
+					return false
+				}
 				b.MovePiece(types.WhiteRook, types.A1, types.D1)
 			} else {
+				if b.Pieces[types.A8] != types.BlackRook || b.Castling&types.CastlingBlackQueen == 0 {
+					b.UnmakeMove(m)
+					return false
+				}
 				b.MovePiece(types.BlackRook, types.A8, types.D8)
 			}
 		}

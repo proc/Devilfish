@@ -90,6 +90,43 @@ func TestIncrementalUpdateConsistency(t *testing.T) {
 	}
 }
 
+func TestSequenceUpdate(t *testing.T) {
+	b, _ := board.ParseFEN(board.StartFEN)
+	moveStrs := []string{
+		"e2e4", "e7e6", "g1f3", "b8c6", "f1b5", "f8b4", "b1c3", "g8e7",
+		"e4e5", "e7g6", "b5c6", "d7c6", "e1e2", "c8d7", "h1e1", "g6f4", "e2e3",
+	}
+	var acc [25]Accumulator
+	Refresh(b, &acc[0])
+
+	for ply, mStr := range moveStrs {
+		legalMoves := movegen.GenerateLegalMoves(b)
+		var targetMove types.Move
+		for _, m := range legalMoves {
+			if m.String() == mStr {
+				targetMove = m
+				break
+			}
+		}
+		if targetMove == types.MoveNone {
+			t.Fatalf("illegal move %s", mStr)
+		}
+
+		Update(&acc[ply], &acc[ply+1], targetMove, b)
+		b.MakeMove(targetMove)
+
+		var fresh Accumulator
+		Refresh(b, &fresh)
+
+		incEval := Evaluate(&acc[ply+1], b.SideToMove)
+		freshEval := Evaluate(&fresh, b.SideToMove)
+		t.Logf("ply %d move %s: incEval %d freshEval %d FEN %s", ply+1, mStr, incEval, freshEval, b.ToFEN())
+		if incEval != freshEval {
+			t.Errorf("mismatch at ply %d move %s: inc %d vs fresh %d", ply+1, mStr, incEval, freshEval)
+		}
+	}
+}
+
 func TestSaveAndLoad(t *testing.T) {
 	tmpFile := "test_network.nnue"
 	defer os.Remove(tmpFile)

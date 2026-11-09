@@ -14,6 +14,7 @@ import (
 	"devilfish/internal/board"
 	"devilfish/internal/config"
 	"devilfish/internal/eval"
+	"devilfish/internal/logger"
 	"devilfish/internal/movegen"
 	"devilfish/internal/nnue"
 	"devilfish/internal/search"
@@ -23,26 +24,26 @@ import (
 
 const (
 	EngineName    = "Devilfish"
-	EngineVersion = "1.0.0"
-	EngineAuthor  = "Antigravity Team"
+	EngineVersion = "0.0.2"
+	EngineAuthor  = "Peter Tran"
 )
 
 type UCI struct {
-	board             *board.Board
-	engine            *search.Engine
-	searching         atomic.Bool
-	isPonder          atomic.Bool
-	isAutoPonder      atomic.Bool
-	autoPonderCancel  atomic.Bool
-	autoPonderHash    atomic.Uint64
-	guiStop           atomic.Bool
-	abortSearch       atomic.Bool
-	bestMoveSent      atomic.Bool
-	ponderEnabled     bool
-	evalFile          string
-	outMu             sync.Mutex
-	in                *bufio.Reader
-	out               io.Writer
+	board            *board.Board
+	engine           *search.Engine
+	searching        atomic.Bool
+	isPonder         atomic.Bool
+	isAutoPonder     atomic.Bool
+	autoPonderCancel atomic.Bool
+	autoPonderHash   atomic.Uint64
+	guiStop          atomic.Bool
+	abortSearch      atomic.Bool
+	bestMoveSent     atomic.Bool
+	ponderEnabled    bool
+	evalFile         string
+	outMu            sync.Mutex
+	in               *bufio.Reader
+	out              io.Writer
 }
 
 func New(in io.Reader, out io.Writer, cfg config.Config) *UCI {
@@ -53,7 +54,7 @@ func New(in io.Reader, out io.Writer, cfg config.Config) *UCI {
 	}
 	hash := cfg.Hash
 	if hash < 1 {
-		hash = 2000
+		hash = 128
 	}
 	evalFile := cfg.EvalFile
 	if evalFile == "" {
@@ -78,6 +79,7 @@ func New(in io.Reader, out io.Writer, cfg config.Config) *UCI {
 func (u *UCI) sendLine(line string) {
 	u.outMu.Lock()
 	defer u.outMu.Unlock()
+	logger.LogUCIOut(line)
 	fmt.Fprintln(u.out, line)
 }
 
@@ -92,6 +94,7 @@ func (u *UCI) Loop() {
 			continue
 		}
 
+		logger.LogUCIIn(line)
 		parts := strings.Fields(line)
 		cmd := parts[0]
 
@@ -152,10 +155,14 @@ func (u *UCI) cmdUCI() {
 	u.sendLine(fmt.Sprintf("option name SyzygyProbeDepth type spin default %d min 1 max 64", syzygy.ProbeDepth))
 	u.sendLine(fmt.Sprintf("option name Syzygy50MoveRule type check default %t", syzygy.Use50MoveRule))
 	u.sendLine(fmt.Sprintf("option name SyzygyProbeLimit type spin default %d min 0 max 7", syzygy.ProbeLimit))
+	u.sendLine(fmt.Sprintf("option name LogFile type string default %s", logger.Path()))
 	u.sendLine("uciok")
 }
 
 func (u *UCI) cmdIsReady() {
+	if syzygy.IsAvailable() {
+		u.sendLine(fmt.Sprintf("info string found %d-piece Syzygy tablebases", syzygy.MaxPieces()))
+	}
 	u.sendLine("readyok")
 }
 
@@ -191,18 +198,22 @@ func (u *UCI) cmdSetOption(args []string) {
 					} else if valLower == "false" || valLower == "0" {
 						nnue.Enabled = false
 					}
+					logger.Infof("UCI Option Set: UseNNUE=%t", nnue.Enabled)
 				case "evalfile":
 					if valStr != "" && valStr != "<embedded>" {
 						err := nnue.LoadFile(valStr)
 						if err != nil {
+							logger.Warnf("UCI Option Failed: EvalFile=%s err=%v", valStr, err)
 							u.sendLine(fmt.Sprintf("info string failed to load nnue file: %v", err))
 						} else {
 							u.evalFile = valStr
+							logger.Infof("UCI Option Set: EvalFile=%s (successfully loaded)", valStr)
 							u.sendLine(fmt.Sprintf("info string loaded nnue file %s", valStr))
 						}
 					} else if valStr == "<embedded>" {
 						u.evalFile = "<embedded>"
 						nnue.ResetToDefault()
+						logger.Infof("UCI Option Set: EvalFile=<embedded> (reset to embedded network)")
 						u.sendLine("info string reset to embedded nnue network")
 					}
 				case "syzygypath":
@@ -227,6 +238,18 @@ func (u *UCI) cmdSetOption(args []string) {
 					lim, err := strconv.Atoi(valStr)
 					if err == nil && lim >= 0 && lim <= 7 {
 						syzygy.ProbeLimit = lim
+					}
+				case "logfile", "log":
+					valPath := strings.TrimSpace(strings.Join(args[i+3:], " "))
+					if valPath == "<empty>" || valPath == "" {
+						_ = logger.Close()
+						u.sendLine("info string logging disabled")
+					} else {
+						if err := logger.Init(valPath); err != nil {
+							u.sendLine(fmt.Sprintf("info string failed to open log file: %v", err))
+						} else {
+							u.sendLine(fmt.Sprintf("info string logging to %s", valPath))
+						}
 					}
 				}
 			}
@@ -518,6 +541,8 @@ func (u *UCI) cmdEval() {
 	u.sendLine(fmt.Sprintf("NNUE evaluation       : %+d cp", nnueScore))
 	u.sendLine(fmt.Sprintf("Classical evaluation  : %+d cp", classicalScore))
 	u.sendLine(fmt.Sprintf("Active evaluation (%s): %+d cp (from %s's perspective)", active, activeScore, u.board.SideToMove))
+	logger.Infof("Evaluation Probe | FEN: %s | SideToMove: %s | Active: %s (%+d cp) | NNUE: %+d cp | Classical: %+d cp",
+		u.board.ToFEN(), u.board.SideToMove, active, activeScore, nnueScore, classicalScore)
 }
 
 func (u *UCI) cmdDisplay() {

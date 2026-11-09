@@ -85,7 +85,8 @@ func Update(curr *Accumulator, next *Accumulator, m types.Move, b *board.Board) 
 	}
 
 	// 2. Remove captured piece (if capture)
-	if m.IsEnPassant() {
+	isEP := m.IsEnPassant() || (movingPiece.Type() == types.Pawn && to == b.EPSquare && b.EPSquare < types.SquareNone)
+	if isEP {
 		var capSq types.Square
 		if b.SideToMove == types.White {
 			capSq = to - 8
@@ -105,7 +106,7 @@ func Update(curr *Accumulator, next *Accumulator, m types.Move, b *board.Board) 
 				}
 			}
 		}
-	} else if m.IsCapture() {
+	} else {
 		capPiece := b.Pieces[to]
 		if capPiece != types.PieceNone {
 			wCap := FeatureIndex(types.White, capPiece, to)
@@ -124,6 +125,8 @@ func Update(curr *Accumulator, next *Accumulator, m types.Move, b *board.Board) 
 	if m.IsPromotion() {
 		promoType := m.PromotionType()
 		placedPiece = types.MakePiece(b.SideToMove, promoType)
+	} else if movingPiece.Type() == types.Pawn && (to.Rank() == types.Rank8 || to.Rank() == types.Rank1) {
+		placedPiece = types.MakePiece(b.SideToMove, types.Queen)
 	}
 	wTo := FeatureIndex(types.White, placedPiece, to)
 	bTo := FeatureIndex(types.Black, placedPiece, to)
@@ -135,17 +138,17 @@ func Update(curr *Accumulator, next *Accumulator, m types.Move, b *board.Board) 
 	}
 
 	// 4. Castling rook move
-	if m.IsCastle() {
+	isCastle := m.IsCastle() || (movingPiece.Type() == types.King && (from == types.E1 && (to == types.G1 || to == types.C1) || from == types.E8 && (to == types.G8 || to == types.C8)))
+	if isCastle {
 		var rFrom, rTo types.Square
 		rookPiece := types.MakePiece(b.SideToMove, types.Rook)
-		switch m.Flags() {
-		case types.FlagKingCastle:
+		if to == types.G1 || to == types.G8 || m.Flags() == types.FlagKingCastle {
 			if b.SideToMove == types.White {
 				rFrom, rTo = types.H1, types.F1
 			} else {
 				rFrom, rTo = types.H8, types.F8
 			}
-		case types.FlagQueenCastle:
+		} else {
 			if b.SideToMove == types.White {
 				rFrom, rTo = types.A1, types.D1
 			} else {

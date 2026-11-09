@@ -33,7 +33,7 @@ func (h *SearchHistory) Clear() {
 }
 
 func (h *SearchHistory) UpdateKillers(ply int, m types.Move) {
-	if ply >= MaxPly || m.IsCapture() {
+	if ply >= MaxPly || m.IsCapture() || m.IsCastle() {
 		return
 	}
 	if h.Killers[ply][0] != m {
@@ -231,7 +231,7 @@ func (h *SearchHistory) UpdateCorrHist(side types.Color, pawnHash uint64, diff i
 }
 
 func (h *SearchHistory) UpdateCounterMove(prevMove, m types.Move) {
-	if prevMove != types.MoveNone && !m.IsCapture() {
+	if prevMove != types.MoveNone && !m.IsCapture() && !m.IsCastle() {
 		h.CounterMoves[prevMove.From()][prevMove.To()] = m
 	}
 }

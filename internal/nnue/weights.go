@@ -80,6 +80,7 @@ func init() {
 
 func ResetToDefault() {
 	ActiveNetwork = generateDefaultNetwork()
+	CurrentFilePath = "<embedded>"
 }
 
 func generateDefaultNetwork() *Network {

@@ -43,6 +43,10 @@ type SearchWorker struct {
 	Nodes             *atomic.Uint64
 	TBHits            *atomic.Uint64
 	LocalNodes        uint64
+	NnueEvals         uint64
+	NnueUpdates       uint64
+	NnueRefreshes     uint64
+	ClassicalEvals    uint64
 	SelDepth          int8
 	PVArray           [MaxPly][MaxPly]types.Move
 	PVLength          [MaxPly]int
@@ -56,8 +60,10 @@ type SearchWorker struct {
 func (w *SearchWorker) Evaluate(ply int) int32 {
 	var staticEval int32
 	if nnue.Enabled && nnue.ActiveNetwork != nil && ply < MaxPly {
+		w.NnueEvals++
 		staticEval = nnue.Evaluate(&w.Accumulators[ply], w.Board.SideToMove)
 	} else {
+		w.ClassicalEvals++
 		staticEval = eval.EvaluateClassical(w.Board)
 	}
 	corr := w.History.GetCorrection(w.Board.SideToMove, w.Board.PawnHash)
@@ -74,6 +80,7 @@ func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *a
 		Nodes:   nodes,
 		TBHits:  tbHits,
 	}
+	w.NnueRefreshes++
 	nnue.Refresh(w.Board, &w.Accumulators[0])
 	return w
 }
@@ -84,6 +91,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	}
 
 	if ply == 0 {
+		w.NnueRefreshes++
 		nnue.Refresh(w.Board, &w.Accumulators[0])
 	}
 
@@ -222,7 +230,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		staticEval = -Infinity
 	} else {
 		staticEval = w.Evaluate(ply)
-		if ttFound {
+		if ttFound && abs(ttScore) < MateThreshold {
 			if ttType == tt.Exact || (ttType == tt.LowerBound && ttScore > staticEval) || (ttType == tt.UpperBound && ttScore < staticEval) {
 				staticEval = ttScore
 			}
@@ -238,23 +246,26 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		improving = staticEval > w.StaticEvalHistory[ply-2]
 	}
 
+	us := w.Board.SideToMove
+	hasNonPawns := (w.Board.PieceBB[types.MakePiece(us, types.Knight)] |
+		w.Board.PieceBB[types.MakePiece(us, types.Bishop)] |
+		w.Board.PieceBB[types.MakePiece(us, types.Rook)] |
+		w.Board.PieceBB[types.MakePiece(us, types.Queen)]) != 0
+
 	// 4. Reverse Futility Pruning (Static Null Move Pruning)
-	if ply > 0 && !isPVNode && !inCheck && depth <= 6 && abs(beta) < MateThreshold {
-		margin := int32(depth) * 80
+	if ply > 0 && !isPVNode && !inCheck && depth <= 4 && abs(beta) < MateThreshold && hasNonPawns {
+		margin := int32(depth) * 75
 		if !improving {
-			margin = int32(depth) * 60
+			margin += int32(depth) * 35
 		}
 		if staticEval-margin >= beta {
-			return staticEval - margin
+			return beta
 		}
 	}
 
 	// 5. Razoring
-	if ply > 0 && !isPVNode && !inCheck && depth <= 3 {
-		razorMargin := int32(150 + int(depth)*125)
-		if !improving {
-			razorMargin -= 50
-		}
+	if ply > 0 && !isPVNode && !inCheck && depth <= 1 {
+		razorMargin := int32(350)
 		if staticEval+razorMargin <= alpha {
 			qScore := w.Quiescence(alpha, beta, ply)
 			if qScore <= alpha {
@@ -264,12 +275,6 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	}
 
 	// 6. Null Move Pruning (NMP)
-	us := w.Board.SideToMove
-	hasNonPawns := (w.Board.PieceBB[types.MakePiece(us, types.Knight)] |
-		w.Board.PieceBB[types.MakePiece(us, types.Bishop)] |
-		w.Board.PieceBB[types.MakePiece(us, types.Rook)] |
-		w.Board.PieceBB[types.MakePiece(us, types.Queen)]) != 0
-
 	if ply > 0 && !isPVNode && !inCheck && depth >= 3 && staticEval >= beta && hasNonPawns {
 		r := int8(3 + depth/4)
 		if !improving {
@@ -323,9 +328,6 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			if !isPVNode && sScore < singularBeta-25 {
 				extension = 2
 			}
-		} else if singularBeta >= beta {
-			// Multi-cut fail high: an alternative move beats beta at reduced depth
-			return beta
 		}
 	}
 
@@ -340,6 +342,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	// Staged Move Generation: Search TT move first before generating all moves
 	if ttMove != types.MoveNone && ttMove != excludedMove && movegen.IsPseudoLegal(w.Board, ttMove) {
 		if ply+1 < MaxPly {
+			w.NnueUpdates++
 			nnue.Update(&w.Accumulators[ply], &w.Accumulators[ply+1], ttMove, w.Board)
 		}
 		if w.Board.MakeMove(ttMove) {
@@ -413,9 +416,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 	// 7. ProbCut (Probability Cut)
 	// If a shallow capture search with elevated beta fails high, the node is almost certainly a CUT node.
-	if ply > 0 && canMultiCut && !isPVNode && !inCheck && depth >= 5 && abs(beta) < MateThreshold {
+	if ply > 0 && canMultiCut && !isPVNode && !inCheck && depth >= 5 && abs(beta) < MateThreshold && staticEval >= beta+150 {
 		probBeta := beta + 200
-		probDepth := depth - 4
+		probDepth := depth - 3
 		if probDepth < 1 {
 			probDepth = 1
 		}
@@ -432,6 +435,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				continue
 			}
 			if ply+1 < MaxPly {
+				w.NnueUpdates++
 				nnue.Update(&w.Accumulators[ply], &w.Accumulators[ply+1], m, w.Board)
 			}
 			if !w.Board.MakeMove(m) {
@@ -452,55 +456,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 	}
 
-	// 8. Multi-Cut Pruning (MPC)
-	// If at least M=3 out of the first C=8 candidate moves produce a beta cutoff
-	// at reduced depth (depth - 1 - R, R=3), the position is almost certainly a CUT node.
-	if ply > 0 && canMultiCut && !isPVNode && !inCheck && depth >= 6 && hasNonPawns && staticEval >= beta-100 {
-		var mcList movegen.MoveList
-		movegen.GenerateMoves(w.Board, false, &mcList)
-
-		var mcScores [256]int32
-		ScoreMoves(w.Board, &mcList, mcScores[:mcList.Count], ttMove, ply, prevMove, prevMove2, prevMove4, w.History)
-
-		c := 8
-		if mcList.Count < c {
-			c = mcList.Count
-		}
-
-		mcR := int8(3)
-		mcDepth := depth - 1 - mcR
-		cutoffs := 0
-
-		for i := 0; i < c; i++ {
-			m := PickNextMove(&mcList, mcScores[:mcList.Count], i)
-			if m == ttMove || m == excludedMove {
-				continue
-			}
-			if ply+1 < MaxPly {
-				nnue.Update(&w.Accumulators[ply], &w.Accumulators[ply+1], m, w.Board)
-			}
-			if !w.Board.MakeMove(m) {
-				continue
-			}
-
-			mcScore := -w.Search(mcDepth, -beta, -beta+1, ply+1, false, false, types.MoveNone, m, prevMove, prevMove2)
-			w.Board.UnmakeMove(m)
-
-			if w.TimeMan.Stopped.Load() {
-				return 0
-			}
-
-			if mcScore >= beta {
-				cutoffs++
-				if cutoffs >= 3 {
-					w.TT.Store(w.Board.Hash, m, tt.ScoreToTT(beta, ply), mcDepth, tt.LowerBound)
-					return beta
-				}
-			}
-		}
-	}
-
-	// 9. Staged Move Generation & Search Loop
+	// 8. Staged Move Generation & Search Loop
 	mp := NewMovePicker(w.Board, ttMove, excludedMove, ply, prevMove, prevMove2, prevMove4, w.History)
 	mp.stage = StageGenCaptures
 
@@ -518,22 +474,21 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		counterMove := mp.counterMove
 
 		// Late Move Pruning (LMP)
-		if !isPVNode && !inCheck && depth <= 5 && isQuiet && movesSearched > 0 && m != killer1 && m != killer2 {
-			lmpThreshold := 3 + 2*int(depth)*int(depth)
-			if !improving {
-				lmpThreshold /= 2
-			}
-			if legalMoves >= lmpThreshold {
-				continue
+		if !isPVNode && !inCheck && depth <= 4 && isQuiet && movesSearched > 0 && m != killer1 && m != killer2 && m != counterMove {
+			if !w.Board.GivesCheck(m) {
+				lmpThreshold := 5 + 3*int(depth)*int(depth)
+				if !improving {
+					lmpThreshold = 3 + 2*int(depth)*int(depth)
+				}
+				if legalMoves >= lmpThreshold {
+					continue
+				}
 			}
 		}
 
 		// Futility Pruning
-		if !isPVNode && !inCheck && depth <= 6 && isQuiet && movesSearched > 0 && m != killer1 && m != killer2 && m != counterMove {
-			futMargin := int32(80) * int32(depth)
-			if !improving {
-				futMargin -= int32(20) * int32(depth)
-			}
+		if !isPVNode && !inCheck && depth <= 4 && isQuiet && movesSearched > 0 && m != killer1 && m != killer2 && m != counterMove {
+			futMargin := int32(90) * int32(depth)
 			if staticEval+futMargin <= alpha {
 				if !w.Board.GivesCheck(m) {
 					continue
@@ -543,35 +498,56 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		// History Pruning
 		// Prune quiet moves with poor history score at shallow depths
-		if !isPVNode && !inCheck && depth <= 4 && isQuiet && movesSearched > 0 && m != killer1 && m != killer2 && m != counterMove {
-			histScore := w.History.HistoryTable[us][m.From()][m.To()]
-			if prevMove != types.MoveNone && prevMove.To() < 64 && m.To() < 64 {
-				histScore += w.History.ContHistory[prevMove.To()][m.To()]
-			}
-			if prevMove2 != types.MoveNone && prevMove2.To() < 64 && m.To() < 64 {
-				histScore += w.History.ContHistory2[prevMove2.To()][m.To()]
-			}
-			histMargin := -int32(depth) * 512
-			if !improving {
-				histMargin = -int32(depth) * 256
-			}
-			if histScore < histMargin {
-				continue
+		if !isPVNode && !inCheck && depth <= 3 && isQuiet && movesSearched > 0 && m != killer1 && m != killer2 && m != counterMove {
+			if !w.Board.GivesCheck(m) {
+				histScore := w.History.HistoryTable[us][m.From()][m.To()]
+				if prevMove != types.MoveNone && prevMove.To() < 64 && m.To() < 64 {
+					histScore += w.History.ContHistory[prevMove.To()][m.To()]
+				}
+				if prevMove2 != types.MoveNone && prevMove2.To() < 64 && m.To() < 64 {
+					histScore += w.History.ContHistory2[prevMove2.To()][m.To()]
+				}
+				histMargin := -int32(depth) * 1024
+				if !improving {
+					histMargin = -int32(depth) * 512
+				}
+				if histScore < histMargin {
+					continue
+				}
 			}
 		}
 
+		// Pre-compute move attributes before board mutation
+		fromSq := m.From()
+		toSq := m.To()
+		attacker := w.Board.Pieces[fromSq].Type()
+		victim := w.Board.Pieces[toSq].Type()
+		if m.IsEnPassant() {
+			victim = types.Pawn
+		}
+		moveSEE := eval.SEE(w.Board, m)
+		givesCheck := w.Board.GivesCheck(m)
+		isAdvancedPawnPush := isQuiet && attacker == types.Pawn &&
+			((us == types.White && toSq >= types.A6) || (us == types.Black && toSq <= types.H3))
+
 		// SEE Pruning
-		if !isPVNode && !inCheck && depth <= 4 && m != killer1 && m != killer2 {
-			seeThreshold := -int32(depth) * 35
-			if !isQuiet {
-				seeThreshold = -int32(depth) * 90
-			}
-			if eval.SEE(w.Board, m) < seeThreshold {
-				continue
+		// Do not prune tactical/killer moves, countermoves, advanced pawn pushes, or moves that give check
+		if !isPVNode && !inCheck && depth <= 3 && m != killer1 && m != killer2 && m != counterMove && !isAdvancedPawnPush {
+			if !givesCheck {
+				if isQuiet {
+					if depth <= 2 && moveSEE < -int32(depth)*60 {
+						continue
+					}
+				} else {
+					if moveSEE < -int32(depth)*200 {
+						continue
+					}
+				}
 			}
 		}
 
 		if ply+1 < MaxPly {
+			w.NnueUpdates++
 			nnue.Update(&w.Accumulators[ply], &w.Accumulators[ply+1], m, w.Board)
 		}
 		if !w.Board.MakeMove(m) {
@@ -580,7 +556,6 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		legalMoves++
 		searchedMoves[movesSearched] = m
-		givesCheck := w.Board.IsInCheck(w.Board.SideToMove)
 		var score int32
 
 		var startNodes uint64
@@ -588,13 +563,13 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			startNodes = w.LocalNodes
 		}
 
+		var reduction int8
 		// Principal Variation Search & LMR
 		if movesSearched == 0 {
 			// First move: full window (extended if singular)
 			score = -w.Search(depth-1+extension, -beta, -alpha, ply+1, isPVNode, true, types.MoveNone, m, prevMove, prevMove2)
 		} else {
 			// Late Move Reductions (LMR)
-			reduction := int8(0)
 			if depth >= 3 && movesSearched >= 2 && !inCheck {
 				dIdx := depth
 				if dIdx > 127 {
@@ -625,16 +600,21 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 						reduction--
 					}
 
+					// Advanced passed pawn push: don't reduce
+					if isAdvancedPawnPush {
+						reduction -= 2
+					}
+
 					// History-based reduction adjustment
-					hist := w.History.HistoryTable[us][m.From()][m.To()]
-					if prevMove != types.MoveNone && prevMove.To() < 64 && m.To() < 64 {
-						hist += w.History.ContHistory[prevMove.To()][m.To()]
+					hist := w.History.HistoryTable[us][fromSq][toSq]
+					if prevMove != types.MoveNone && prevMove.To() < 64 && toSq < 64 {
+						hist += w.History.ContHistory[prevMove.To()][toSq]
 					}
-					if prevMove2 != types.MoveNone && prevMove2.To() < 64 && m.To() < 64 {
-						hist += w.History.ContHistory2[prevMove2.To()][m.To()]
+					if prevMove2 != types.MoveNone && prevMove2.To() < 64 && toSq < 64 {
+						hist += w.History.ContHistory2[prevMove2.To()][toSq]
 					}
-					if prevMove4 != types.MoveNone && prevMove4.To() < 64 && m.To() < 64 {
-						hist += w.History.ContHistory4[prevMove4.To()][m.To()]
+					if prevMove4 != types.MoveNone && prevMove4.To() < 64 && toSq < 64 {
+						hist += w.History.ContHistory4[prevMove4.To()][toSq]
 					}
 					if hist > 4000 {
 						reduction--
@@ -649,25 +629,20 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					}
 				} else {
 					// Tactical moves / Captures (Noisy LMR)
-					if depth >= 4 && movesSearched >= 4 {
+					if ply == 0 || moveSEE < 0 {
+						// Never reduce captures at root, or potential tactical sacrifices
+						reduction = 0
+					} else if depth >= 4 && movesSearched >= 4 {
 						reduction /= 2
 
-						attacker := w.Board.Pieces[m.From()].Type()
-						victim := w.Board.Pieces[m.To()].Type()
-						if m.IsEnPassant() {
-							victim = types.Pawn
-						}
-						capHist := w.History.CaptureHistory[attacker][m.To()][victim]
+						capHist := w.History.CaptureHistory[attacker][toSq][victim]
 						if capHist < 0 {
 							reduction++
 						} else if capHist > 2000 {
 							reduction--
 						}
 
-						see := eval.SEE(w.Board, m)
-						if see < 0 {
-							reduction++
-						} else if see > 100 {
+						if moveSEE > 100 {
 							reduction--
 						}
 					} else {
@@ -675,9 +650,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					}
 				}
 
-				// Check if move gives check: checks should be reduced less
+				// Check if move gives check: NEVER reduce checks
 				if givesCheck {
-					reduction--
+					reduction = 0
 				}
 
 				if reduction < 0 {
@@ -697,7 +672,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			}
 
 			// If null-window fails high and in PV node, re-search with full PV window
-			if isPVNode && score > alpha && !w.TimeMan.Stopped.Load() {
+			if isPVNode && score > alpha && score < beta && !w.TimeMan.Stopped.Load() {
 				score = -w.Search(depth-1, -beta, -alpha, ply+1, true, true, types.MoveNone, m, prevMove, prevMove2)
 			}
 		}
@@ -810,6 +785,10 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		w.PVLength[0] = 1
 	}
 
+	if w.TimeMan.Stopped.Load() {
+		return 0
+	}
+
 	w.TT.Store(w.Board.Hash, bestMove, tt.ScoreToTT(alpha, ply), depth, bestType)
 	return alpha
 }
@@ -848,8 +827,9 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 		if standPat >= beta {
 			return beta
 		}
-		// Delta pruning
-		if standPat < alpha-950 {
+		// Delta pruning: do not delta-prune if pawns are close to promotion
+		pawnsNearPromo := (w.Board.PieceBB[types.WhitePawn]&bitboard.Rank7BB != 0) || (w.Board.PieceBB[types.BlackPawn]&bitboard.Rank2BB != 0)
+		if !pawnsNearPromo && standPat < alpha-1100 {
 			return alpha
 		}
 		if standPat > alpha {
@@ -885,12 +865,13 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 	for i := 0; i < ml.Count; i++ {
 		m := PickNextMove(&ml, scores[:ml.Count], i)
 
-		// SEE pruning in quiescence: skip losing captures if not in check
-		if !inCheck && eval.SEE(w.Board, m) < 0 {
+		// SEE pruning in quiescence: skip losing captures if not in check and move does not give check
+		if !inCheck && !w.Board.GivesCheck(m) && eval.SEE(w.Board, m) < 0 {
 			continue
 		}
 
 		if ply+1 < MaxPly {
+			w.NnueUpdates++
 			nnue.Update(&w.Accumulators[ply], &w.Accumulators[ply+1], m, w.Board)
 		}
 		if !w.Board.MakeMove(m) {

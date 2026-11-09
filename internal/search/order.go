@@ -19,12 +19,13 @@ var PieceMVV = [7]int32{
 
 const (
 	ScoreTTMove         int32 = 2_000_000_000
-	ScoreQueenPromotion int32 = 120_000_000
+	ScoreQueenPromotion int32 = 150_000_000
 	ScoreGoodCapture    int32 = 100_000_000
 	ScoreKiller1        int32 = 50_000_000
 	ScoreKiller2        int32 = 45_000_000
 	ScoreCounterMove    int32 = 40_000_000
 	ScoreQuietCheck     int32 = 30_000_000
+	ScorePassedPawnPush int32 = 25_000_000
 	ScoreBadCapture     int32 = -50_000_000
 )
 
@@ -79,11 +80,16 @@ func ScoreMoves(
 			}
 
 			seeScore := eval.SEE(b, m)
-			if seeScore >= 0 {
-				// Winning or equal capture
+			givesCheck := b.GivesCheck(m)
+			if givesCheck {
+				if seeScore >= 0 {
+					scores[i] = ScoreGoodCapture + 20_000_000 + seeScore*100 + mvvLva*10 + capHist
+				} else {
+					scores[i] = ScoreGoodCapture + 10_000_000 + seeScore*100 + mvvLva*10 + capHist
+				}
+			} else if seeScore >= 0 {
 				scores[i] = ScoreGoodCapture + seeScore*100 + mvvLva*10 + capHist
 			} else {
-				// Losing capture: demote below quiet moves
 				scores[i] = ScoreBadCapture + seeScore*100 + mvvLva*10 + capHist
 			}
 			continue
@@ -123,9 +129,15 @@ func ScoreMoves(
 			histScore += history.ContHistory4[prevMove4.To()][m.To()]
 		}
 
+		isPawnPush := b.Pieces[m.From()].Type() == types.Pawn
+		toSq := m.To()
+		isAdvancedPawn := isPawnPush && ((side == types.White && toSq >= types.A6) || (side == types.Black && toSq <= types.H3))
+
 		// Quiet checks priority: boost check-giving moves above ordinary quiet moves
 		if b.GivesCheck(m) {
 			scores[i] = ScoreQuietCheck + histScore/10
+		} else if isAdvancedPawn {
+			scores[i] = ScorePassedPawnPush + histScore/10
 		} else {
 			scores[i] = histScore
 		}

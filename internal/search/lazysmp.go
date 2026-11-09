@@ -9,6 +9,7 @@ import (
 
 	"devilfish/internal/bitboard"
 	"devilfish/internal/board"
+	"devilfish/internal/logger"
 	"devilfish/internal/movegen"
 	"devilfish/internal/syzygy"
 	"devilfish/internal/tt"
@@ -110,11 +111,23 @@ func (e *Engine) Search(
 				rootScore = -MateScore + 100 + int32(dtz)
 			}
 
+			isMate := false
+			mateIn := 0
+			if rootScore > MateThreshold {
+				isMate = true
+				mateIn = int((MateScore - rootScore + 1) / 2)
+			} else if rootScore < -MateThreshold {
+				isMate = true
+				mateIn = -int((MateScore + rootScore + 1) / 2)
+			}
+
 			if infoCallback != nil {
 				infoCallback(SearchInfo{
 					Depth:    1,
 					SelDepth: 1,
 					Score:    rootScore,
+					IsMate:   isMate,
+					MateIn:   mateIn,
 					Nodes:    1,
 					NPS:      0,
 					TimeMs:   0,
@@ -124,6 +137,7 @@ func (e *Engine) Search(
 				})
 			}
 
+			logger.Infof("Syzygy Root Probe Hit: Move=%s, WDL=%d, DTZ=%d, Score=%d, IsMate=%t, MateIn=%d", rootMove, wdl, dtz, rootScore, isMate, mateIn)
 			e.TT.Store(b.Hash, rootMove, tt.ScoreToTT(rootScore, 0), 127, tt.Exact)
 			return rootMove, types.MoveNone
 		}
@@ -132,6 +146,11 @@ func (e *Engine) Search(
 	tm := NewTimeManager(limits, b.SideToMove, &e.Stopped, &e.Nodes)
 	e.currentTM.Store(tm)
 	defer e.currentTM.Store(nil)
+
+	logger.Infof("Search started | FEN: %s | Limits: depth=%d, nodes=%d, movetime=%v, wtime=%d, btime=%d, winc=%d, binc=%d",
+		b.ToFEN(), limits.MaxDepth, limits.MaxNodes, limits.MoveTime, limits.WhiteTime, limits.BlackTime, limits.WhiteInc, limits.BlackInc)
+	logger.Profilef("TimeManager Allocation: OptTime=%v, MaxTime=%v, IsEmergency=%t, IsTimeTrouble=%t",
+		tm.OptTime, tm.MaxTime, tm.IsEmergency, tm.IsTimeTrouble)
 
 	maxDepth := limits.MaxDepth
 	if maxDepth <= 0 || maxDepth > 64 {
@@ -147,21 +166,23 @@ func (e *Engine) Search(
 
 	// WaitGroup for helper threads
 	var wg sync.WaitGroup
+	var helpers []*SearchWorker
 
 	// Start helper workers
 	for id := 1; id < e.NumThreads; id++ {
 		wg.Add(1)
-		go func(workerID int) {
+		helper := NewWorker(id, b, e.TT, tm, &e.Nodes, &e.TBHits)
+		helpers = append(helpers, helper)
+		go func(workerID int, w *SearchWorker) {
 			defer wg.Done()
-			helper := NewWorker(workerID, b, e.TT, tm, &e.Nodes, &e.TBHits)
 			// Helper searches with depth variation
 			for d := int8(1 + (workerID % 2)); d <= maxDepth; d++ {
 				if e.Stopped.Load() {
 					break
 				}
-				helper.Search(d, -Infinity, Infinity, 0, true, true, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+				w.Search(d, -Infinity, Infinity, 0, true, true, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
 			}
-		}(id)
+		}(id, helper)
 	}
 
 	startTime := time.Now()
@@ -176,6 +197,7 @@ func (e *Engine) Search(
 			break
 		}
 
+		iterStartTime := time.Now()
 		master.RootMoveNodes = [64][64]uint64{}
 
 		var score int32
@@ -186,15 +208,15 @@ func (e *Engine) Search(
 			delta := int32(30)
 			alpha := rootScore - delta
 			beta := rootScore + delta
+			if alpha < -Infinity {
+				alpha = -Infinity
+			}
+			if beta > Infinity {
+				beta = Infinity
+			}
 
+			failedAttempts := 0
 			for {
-				if alpha < -Infinity {
-					alpha = -Infinity
-				}
-				if beta > Infinity {
-					beta = Infinity
-				}
-
 				score = master.Search(depth, alpha, beta, 0, true, true, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
 
 				if e.Stopped.Load() {
@@ -202,13 +224,26 @@ func (e *Engine) Search(
 				}
 
 				if score <= alpha {
-					alpha -= delta
-					delta += delta / 2
+					beta = (alpha + beta) / 2
+					alpha = score - delta
+					if alpha < -Infinity {
+						alpha = -Infinity
+					}
+					failedAttempts++
 				} else if score >= beta {
-					beta += delta
-					delta += delta / 2
+					beta = score + delta
+					if beta > Infinity {
+						beta = Infinity
+					}
+					failedAttempts++
 				} else {
 					break
+				}
+
+				delta += delta / 2
+				if failedAttempts >= 2 || delta >= 300 {
+					alpha = -Infinity
+					beta = Infinity
 				}
 			}
 		}
@@ -289,6 +324,9 @@ func (e *Engine) Search(
 			})
 		}
 
+		logger.Profilef("Iteration depth=%d seldepth=%d: Score=%d (IsMate=%t, MateIn=%d), Nodes=%d, NPS=%d, Elapsed=%v, HashFull=%d/1000, TBHits=%d, PV=%v",
+			depth, master.SelDepth, score, isMate, mateIn, totalNodes, nps, elapsed, e.TT.HashFull(), e.TBHits.Load(), pv)
+
 		// Check if we found checkmate
 		if isMate && mateIn > 0 && mateIn <= int(depth)/2 {
 			if !tm.Ponder.Load() {
@@ -300,6 +338,9 @@ func (e *Engine) Search(
 		if depth >= 5 && rootBestMove != types.MoveNone {
 			if rootBestMove == prevIterationBestMove {
 				bestMoveStability++
+				if tm.IsTimeTrouble && bestMoveStability >= 2 && depth >= 6 {
+					break
+				}
 				// If the best move has been rock-solid across 4+ iterations, reduce time to save clock
 				if bestMoveStability >= 4 {
 					tm.AdjustOptTime(0.85)
@@ -312,24 +353,31 @@ func (e *Engine) Search(
 			rootNodes := master.RootMoveNodes[rootBestMove.From()][rootBestMove.To()]
 			if master.LocalNodes > 0 {
 				nodeRatio := float64(rootNodes) / float64(master.LocalNodes)
-				if nodeRatio >= 0.65 {
-					// Clear dominance: reduce allocated time
-					tm.AdjustOptTime(0.75)
-				} else if nodeRatio < 0.35 {
-					// Disputed position: extend allocated time
-					tm.AdjustOptTime(1.30)
+				if tm.IsTimeTrouble {
+					if nodeRatio >= 0.50 {
+						tm.AdjustOptTime(0.70)
+					}
+				} else {
+					if nodeRatio >= 0.65 {
+						// Clear dominance: reduce allocated time
+						tm.AdjustOptTime(0.75)
+					} else if nodeRatio < 0.35 {
+						// Disputed position: extend allocated time
+						tm.AdjustOptTime(1.30)
+					}
 				}
 			}
 
-			// If the score dropped significantly from the previous iteration, extend time to recover
-			if prevIterationScore != 0 && score < prevIterationScore-40 {
+			// If the score dropped significantly from the previous iteration, extend time to recover (only if not in time trouble)
+			if !tm.IsTimeTrouble && prevIterationScore != 0 && score < prevIterationScore-40 {
 				tm.AdjustOptTime(1.35)
 			}
 		}
 		prevIterationBestMove = rootBestMove
 		prevIterationScore = rootScore
 
-		if !tm.CanStartNewIteration() {
+		iterDuration := time.Since(iterStartTime)
+		if !tm.CanStartNewIteration(iterDuration) {
 			break
 		}
 	}
@@ -345,6 +393,39 @@ func (e *Engine) Search(
 			rootBestMove = legalMoves[0]
 		}
 	}
+
+	totalNodes := e.Nodes.Load() + (master.LocalNodes % 2048)
+	totalElapsed := time.Since(startTime)
+	var finalNps uint64
+	if totalElapsed.Seconds() > 0 {
+		finalNps = uint64(float64(totalNodes) / totalElapsed.Seconds())
+	}
+	logger.Profilef("Search completed: BestMove=%s, PonderMove=%s, Score=%d, TotalNodes=%d, Elapsed=%v, NPS=%d, TBHits=%d",
+		rootBestMove, rootPonderMove, rootScore, totalNodes, totalElapsed, finalNps, e.TBHits.Load())
+
+	totalNnueEvals := master.NnueEvals
+	totalNnueUpdates := master.NnueUpdates
+	totalNnueRefreshes := master.NnueRefreshes
+	totalClassicalEvals := master.ClassicalEvals
+
+	for _, h := range helpers {
+		totalNnueEvals += h.NnueEvals
+		totalNnueUpdates += h.NnueUpdates
+		totalNnueRefreshes += h.NnueRefreshes
+		totalClassicalEvals += h.ClassicalEvals
+	}
+
+	evalPct := 0.0
+	if totalNodes > 0 {
+		evalPct = float64(totalNnueEvals) / float64(totalNodes) * 100.0
+	}
+	incHitRate := 0.0
+	totAccumOps := totalNnueUpdates + totalNnueRefreshes
+	if totAccumOps > 0 {
+		incHitRate = float64(totalNnueUpdates) / float64(totAccumOps) * 100.0
+	}
+	logger.Profilef("NNUE Statistics: Evals=%d (%.1f%% of nodes), ClassicalEvals=%d, Accumulator Updates=%d, Accumulator Refreshes=%d, Incremental Hit Rate=%.2f%%",
+		totalNnueEvals, evalPct, totalClassicalEvals, totalNnueUpdates, totalNnueRefreshes, incHitRate)
 
 	return rootBestMove, rootPonderMove
 }
