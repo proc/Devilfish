@@ -13,7 +13,7 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		Threads: 1,
+		Threads: 10,
 		Hash:    64,
 	}
 }
@@ -27,7 +27,7 @@ func GetDefaultConfigPath() string {
 }
 
 // Load reads the config file from path (or ~/.devilfish/config.json if path is empty).
-// If the file does not exist, it returns the default config without error.
+// If the file does not exist, it creates the file with default settings and returns it.
 func Load(path string) (Config, error) {
 	cfg := DefaultConfig()
 
@@ -42,6 +42,7 @@ func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			_ = Save(path, cfg)
 			return cfg, nil
 		}
 		return cfg, err

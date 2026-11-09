@@ -8,21 +8,42 @@ import (
 
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.Threads != 1 {
-		t.Errorf("expected default threads 1, got %d", cfg.Threads)
+	if cfg.Threads != 10 {
+		t.Errorf("expected default threads 10, got %d", cfg.Threads)
 	}
 	if cfg.Hash != 64 {
 		t.Errorf("expected default hash 64, got %d", cfg.Hash)
 	}
 }
 
-func TestLoadNonExistent(t *testing.T) {
-	cfg, err := Load("/path/to/non/existent/config.json")
+func TestLoadNonExistentCreatesFile(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "devilfish_test_*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	configPath := filepath.Join(tmpDir, "sub", "config.json")
+	cfg, err := Load(configPath)
 	if err != nil {
 		t.Fatalf("expected no error for missing file, got %v", err)
 	}
-	if cfg.Threads != 1 || cfg.Hash != 64 {
+	if cfg.Threads != 10 || cfg.Hash != 64 {
 		t.Errorf("expected default config, got %+v", cfg)
+	}
+
+	// Verify file was created on disk with correct defaults
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		t.Fatalf("expected config file to be created at %s, but it was not", configPath)
+	}
+
+	// Read and verify saved file content
+	reloaded, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("failed to reload created config: %v", err)
+	}
+	if reloaded.Threads != 10 || reloaded.Hash != 64 {
+		t.Errorf("expected reloaded threads=10, hash=64, got %+v", reloaded)
 	}
 }
 

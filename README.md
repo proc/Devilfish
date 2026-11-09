@@ -81,11 +81,11 @@ Fully compatible with modern chess GUIs (Cutechess, Arena, Banksia GUI, Fritz, L
 
 #### Configuration Methods:
 1. **JSON Configuration File**:
-   Devilfish automatically loads settings from `~/.devilfish/config.json` on startup if present:
+   Devilfish automatically creates and loads settings from `~/.devilfish/config.json` on startup if it does not exist (defaulting to 10 threads):
    ```json
    {
-     "threads": 4,
-     "hash": 128
+     "threads": 10,
+     "hash": 64
    }
    ```
 2. **Command-Line Arguments** (override config file):

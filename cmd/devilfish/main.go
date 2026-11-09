@@ -26,7 +26,7 @@ func printHelp() {
 	fmt.Println("  --no-nnue                   Disable NNUE evaluation (use classical HCE)")
 	fmt.Println("\nConfiguration File:")
 	fmt.Printf("  If present, configuration is automatically loaded from:\n    %s\n", config.GetDefaultConfigPath())
-	fmt.Println("  Example format: {\"threads\": 4, \"hash\": 128}")
+	fmt.Println("  Example format: {\"threads\": 10, \"hash\": 64}")
 }
 
 func main() {
