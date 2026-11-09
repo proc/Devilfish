@@ -177,19 +177,21 @@ func (tt *TT) Store(hash uint64, m types.Move, score int32, depth int8, nodeType
 }
 
 func (tt *TT) HashFull() int {
-	sampled := 1000
-	if len(tt.entries) < sampled {
-		sampled = len(tt.entries)
+	sampleCount := 1000
+	if len(tt.entries) < sampleCount {
+		sampleCount = len(tt.entries)
 	}
+	step := len(tt.entries) / sampleCount
+	if step < 1 {
+		step = 1
+	}
+
 	used := 0
-	for i := 0; i < sampled; i++ {
-		data := tt.entries[i].Data
-		if data != 0 {
-			_, _, _, _, age := unpackData(data)
-			if age == tt.age {
-				used++
-			}
+	for i := 0; i < sampleCount; i++ {
+		idx := i * step
+		if tt.entries[idx].Data != 0 {
+			used++
 		}
 	}
-	return (used * 1000) / sampled
+	return (used * 1000) / sampleCount
 }

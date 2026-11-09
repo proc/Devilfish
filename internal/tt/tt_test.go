@@ -53,3 +53,29 @@ func TestTTConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestTTHashFull(t *testing.T) {
+	table := New(1) // 1 MB: 65,536 entries
+	defer table.Clear()
+
+	if hf := table.HashFull(); hf != 0 {
+		t.Errorf("expected empty table hashfull 0, got %d", hf)
+	}
+
+	// Fill roughly 50% of the entries evenly
+	total := len(table.entries)
+	for i := 0; i < total; i += 2 {
+		hash := uint64(i)
+		table.Store(hash, types.MakeMove(types.E2, types.E4, types.FlagQuiet), 100, 4, Exact)
+	}
+
+	hf := table.HashFull()
+	if hf < 450 || hf > 550 {
+		t.Errorf("expected hashfull ~500 for half-filled table, got %d", hf)
+	}
+
+	table.Clear()
+	if hf := table.HashFull(); hf != 0 {
+		t.Errorf("expected hashfull 0 after clear, got %d", hf)
+	}
+}
