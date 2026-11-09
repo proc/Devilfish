@@ -1,6 +1,6 @@
 # Devilfish ♟️🦈
 
-**Devilfish** is a modern, high-performance, UCI-compliant chess engine written in Golang. It features 64-bit magic bitboard move generation, tapered midgame/endgame evaluation, an advanced search algorithm (PVS with aspiration windows and aggressive pruning/reductions), and multithreading powered by **Lazy Symmetric Multiprocessing (Lazy SMP)** over a lockless shared Transposition Table.
+**Devilfish** is a modern, high-performance, UCI-compliant chess engine written in Golang. It features 64-bit magic bitboard move generation, dual NNUE and tapered classical evaluation, an advanced search algorithm (PVS with aspiration windows, aggressive Late Move Reductions, and forward pruning), and multithreading powered by **Lazy Symmetric Multiprocessing (Lazy SMP)** over a lockless shared Transposition Table.
 
 ---
 
@@ -12,7 +12,7 @@
 - **Pseudo-legal move generation with fast check detection**, achieving **> 43,000,000 NPS** on single-core perft.
 - 100% verified correctness on standard perft suites (Startpos, Kiwipete, Position 3, 4, 5).
 - **Zobrist Hashing** for positions, castling rights, and en passant files with full 3-fold repetition detection.
-- Fast move make/unmake with delta undo stack.
+- Fast move make/unmake with delta undo stack and zero-allocation check validation (`b.GivesCheck(m)`).
 
 ### 2. Evaluation: NNUE & Handcrafted Classical Fallback
 - **NNUE (Efficiently Updatable Neural Network)**:
@@ -40,20 +40,29 @@
   - Delta pruning.
   - Dynamic evasion search when in check.
   - SEE pruning to eliminate losing captures.
-- **Pruning & Reductions**:
-  - **The `improving` Flag Heuristic**: Tracks whether the static evaluation has improved compared to two plies ago (same player's previous turn), dynamically tuning pruning aggressiveness and LMR depth reductions.
-  - **Reverse Futility Pruning (Static Null Move Pruning)** at shallow depths, tightened when `!improving`.
-  - **Razoring** to drop directly into quiescence when static eval is far below alpha.
-  - **Null Move Pruning (NMP)** with adaptive reduction $R = 3 + \lfloor\text{depth}/4\rfloor$ (+1 if `!improving`) and zugzwang safeguards.
-  - **ProbCut (Probability Cut)** at depth $\ge 5$, quickly pruning CUT nodes when a shallow capture search beats $\beta + 200$ at reduced depth ($d - 4$).
-  - **Multi-Cut Pruning (MPC)** in expected CUT nodes (depth $\ge 6$), pruning the sub-tree when $M \ge 3$ candidate moves out of $C = 8$ cause a beta cutoff at reduced depth ($d - 1 - 3$).
-  - **Singular Extensions (SE)** to verify whether the Transposition Table move is uniquely superior to all other alternatives; if so, extends search depth by +1 (or +2) ply to explore critical forced lines deeper.
-  - **Late Move Pruning (LMP)** to prune quiet moves after finding a strong move at shallow depths (scaled by `improving`).
-  - **History Pruning**: Pruning unpromising quiet moves whose history heuristic scores are significantly negative at shallow depths ($d \le 4$), bypassing moves that have consistently failed to produce cutoffs.
-  - **Futility Pruning** at frontier nodes.
-  - **Late Move Reductions (LMR)** using logarithmic reduction tables dynamically scaled by the `improving` flag, quiet history, and continuation history.
-  - **Check Extensions** to search critical checks deeper.
-  - **Mate Distance Pruning** to prioritize faster mates.
+- **Advanced Late Move Reductions (LMR)**:
+  - **Precomputed Logarithmic Reduction Curve**: $R = 0.4 + \frac{\ln(\text{depth}) \times \ln(\text{movesSearched})}{2.3}$.
+  - **Quiet Move Reductions**: Activated for $\text{depth} \ge 3$ and $\text{movesSearched} \ge 2$.
+  - **Dynamic Reduction Scaling**:
+    - **Cut-Nodes vs PV-Nodes**: Non-PV nodes increase reduction ($R+1$); PV nodes decrease reduction ($R-1$).
+    - **Improving Flag**: Reduces deeper ($R+1$) when static evaluation fails to improve over 2 plies ago, and reduces less ($R-1$) when improving.
+    - **Killer & Countermove Protection**: High-likelihood refutations are protected ($R-2$ for killers, $R-1$ for countermoves).
+    - **History & Continuation History**: Dynamically scaled by quiet history scores ($\pm 1$ or $\pm 2$).
+    - **Check-Giving Moves**: Moves delivering check are reduced less ($R-1$).
+  - **Noisy LMR (Late Capture Reductions)**: Reduces late non-quiet moves ($d \ge 4, m \ge 4$) by half base reduction ($R/2$), dynamically adjusted by capture history and Static Exchange Evaluation ($\text{SEE} < 0 \implies R+1$).
+  - **Two-Stage Re-Search**: Reduced searches that fail high are immediately re-searched at full depth with a null window, and full-window re-searched in PV nodes.
+- **Forward Pruning Techniques**:
+  - **Razoring (Pre-Move Pruning)**: At $\text{depth} \le 3$, if $\text{staticEval} + 150 + 125 \times d \le \alpha$, immediately drops into quiescence search; if $q\text{Score} \le \alpha$, the node is razored and returned without generating moves.
+  - **Futility Pruning (Move-Loop Pruning)**: At $\text{depth} \le 6$, prunes quiet moves when $\text{staticEval} + 80 \times d \le \alpha$ ($60 \times d$ if `!improving`), safeguarding checks (`b.GivesCheck(m)`), killers, and countermoves.
+  - **Reverse Futility Pruning (Static Null Move Pruning)**: At $\text{depth} \le 6$, returns early when $\text{staticEval} - 80 \times d \ge \beta$ ($60 \times d$ if `!improving`).
+  - **Null Move Pruning (NMP)**: Adaptive reduction $R = 3 + \lfloor\text{depth}/4\rfloor$ ($+1$ if `!improving`) with zugzwang safeguards.
+  - **ProbCut (Probability Cut)**: At $\text{depth} \ge 5$, quickly prunes CUT nodes when a shallow capture search beats $\beta + 200$ at reduced depth ($d - 4$).
+  - **Multi-Cut Pruning (MPC)**: In expected CUT nodes ($\text{depth} \ge 6$), prunes when $M \ge 3$ out of $C = 8$ candidate moves produce a beta cutoff at reduced depth ($d - 4$).
+  - **Singular Extensions (SE)**: Verifies if the TT move is uniquely superior to all other alternatives; extends depth by +1 (or +2) ply on critical forced lines.
+  - **Late Move Pruning (LMP)**: Prunes quiet moves past $3 + 2 \times d^2$ move count at $\text{depth} \le 5$.
+  - **History Pruning**: Prunes moves with negative history heuristic scores at shallow depths ($d \le 4$).
+  - **SEE Pruning**: Prunes quiet moves with $\text{SEE} < -35 \times d$ and losing captures with $\text{SEE} < -90 \times d$.
+  - **Check Extensions & Mate Distance Pruning**.
 
 ### 4. Move Ordering
 1. **Transposition Table Best Move** (PV move).
@@ -77,7 +86,7 @@
 - Helper threads execute varied iterative deepening iterations, priming the shared TT with deep cutoffs and branch evaluations.
 
 ### 7. Universal Chess Interface (UCI) Compatibility & Configuration
-Fully compatible with modern chess GUIs (Cutechess, Arena, Banksia GUI, Fritz, LiChess bot frameworks).
+Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena, Banksia GUI, Fritz, LiChess bot frameworks).
 
 #### Configuration Methods:
 1. **JSON Configuration File**:
@@ -104,40 +113,36 @@ Fully compatible with modern chess GUIs (Cutechess, Arena, Banksia GUI, Fritz, L
    - `setoption name UseNNUE value <true|false>`
    - `setoption name EvalFile value <path>`
 
-Supports:
-- `uci`
-- `isready`
-- `setoption name Hash value <MB>`
-- `setoption name Threads value <N>`
-- `setoption name Ponder value <true|false>`
-- `setoption name UseNNUE value <true|false>`
-- `setoption name EvalFile value <path>`
-- `ucinewgame`
-- `position [startpos | fen <fen>] [moves <m1> ...]`
-- `go [wtime <ms>] [btime <ms>] [winc <ms>] [binc <ms>] [movestogo <n>] [depth <d>] [nodes <n>] [movetime <ms>] [infinite] [ponder]`
-- `ponderhit` (transitions ponder search to normal clock time)
-- `stop`
-- `quit`
-- **Continuous Background Pondering**: After reporting `bestmove <m1> ponder <m2>`, the engine never goes idle. It immediately sets up the predicted board continuation as if the opponent already made move `m2` and calculates in the background, pre-warming the Transposition Table and depth tree so subsequent moves respond instantly.
+#### Protocol Support & Robustness:
+- Standard UCI Commands: `uci`, `isready`, `ucinewgame`, `position`, `go`, `stop`, `ponderhit`, `quit`, `ping`.
+- **Thread-Safe Stdout**: All engine outputs are synchronized via write mutexes to prevent interleaved or corrupted responses.
+- **Airtight Ping Timer Compliance**: Guaranteed immediate `readyok` and `bestmove` responses to satisfy GUI ping timeouts under all race conditions.
+- **UCI Pondering**: Full compliance with GUI `go ponder` instructions, cleanly waiting for `ponderhit` or `stop` without premature exits.
+- **Continuous Background Auto-Pondering**: When not explicitly commanded by a GUI, the engine calculates the predicted opponent continuation silently in the background, pre-warming the transposition table for instant tactical responses.
 - Diagnostic commands: `d` / `display`, `eval`, `perft <depth>`, `bench [depth] [threads]`.
 
 ### 8. Performance & Benchmarks
 
-Devilfish includes a built-in tactical benchmark suite covering opening, middlegame, endgames, tactical sacrifices, and promotion tactics:
+Devilfish includes a built-in tactical benchmark suite covering openings, middlegames, endgames, tactical sacrifices, and promotion tactics:
 
 ```bash
-./devilfish bench 9
+./devilfish bench 8
 ```
 
-| Suite Position | FEN Category | Target Best Move | Nodes Searched | Single-Thread Time |
-| :--- | :--- | :--- | :--- | :--- |
-| **Position 1** | Standard Opening | `e2e4` | 34,816 | 18.0 ms |
-| **Position 2** | Tactical Knight Sac | `e2a6` | 256,000 | 119.9 ms |
-| **Position 3** | Greek Gift Sac | `b4f4` | 67,584 | 15.6 ms |
-| **Position 4** | Queen Trapping | `c4c5` | 184,320 | 79.9 ms |
-| **Position 5** | Promotion Tactic | `d7c8q` | 174,080 | 79.3 ms |
-| **Position 6** | Central Breakthrough | `c3d5` | 114,688 | 46.9 ms |
-| **Total** | **Benchmark Depth 9** | **6/6 Solved** | **831,488 nodes** | **359.9 ms (2.31M NPS)** |
+```text
+Running benchmark at depth 8 with 10 threads...
+Position 1/6: bestmove e2e3 | nodes 51200 | time 14.7ms
+Position 2/6: bestmove e2a6 | nodes 253952 | time 41.7ms
+Position 3/6: bestmove b4f4 | nodes 47104 | time 7.8ms
+Position 4/6: bestmove c4c5 | nodes 110592 | time 20.1ms
+Position 5/6: bestmove d7c8q | nodes 65536 | time 15.8ms
+Position 6/6: bestmove g5f6 | nodes 231424 | time 41.6ms
+===============================================
+Total nodes: 759808
+Total time : 142.2ms
+Nodes/sec  : 5342663
+===============================================
+```
 
 ---
 
