@@ -27,6 +27,7 @@ type TimeManager struct {
 	MaxDepth    int8
 	MaxNodes    uint64
 	Infinite    bool
+	Ponder      atomic.Bool
 	Stopped     *atomic.Bool
 	Nodes       *atomic.Uint64
 }
@@ -40,6 +41,7 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 		Stopped:   stopped,
 		Nodes:     nodes,
 	}
+	tm.Ponder.Store(limits.Ponder)
 
 	if limits.MoveTime > 0 {
 		dur := time.Duration(limits.MoveTime) * time.Millisecond
@@ -96,6 +98,11 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 	return tm
 }
 
+func (tm *TimeManager) PonderHit() {
+	tm.StartTime = time.Now()
+	tm.Ponder.Store(false)
+}
+
 func (tm *TimeManager) CheckLimits() bool {
 	if tm.Stopped.Load() {
 		return true
@@ -104,6 +111,10 @@ func (tm *TimeManager) CheckLimits() bool {
 	if tm.MaxNodes > 0 && tm.Nodes.Load() >= tm.MaxNodes {
 		tm.Stopped.Store(true)
 		return true
+	}
+
+	if tm.Ponder.Load() {
+		return false
 	}
 
 	if tm.Infinite {
@@ -121,6 +132,9 @@ func (tm *TimeManager) CheckLimits() bool {
 func (tm *TimeManager) CanStartNewIteration() bool {
 	if tm.Stopped.Load() {
 		return false
+	}
+	if tm.Ponder.Load() {
+		return true
 	}
 	if tm.Infinite {
 		return true

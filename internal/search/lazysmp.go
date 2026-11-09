@@ -31,6 +31,7 @@ type Engine struct {
 	NumThreads int
 	Stopped    atomic.Bool
 	Nodes      atomic.Uint64
+	currentTM  atomic.Pointer[TimeManager]
 }
 
 func NewEngine(ttSizeMB int, numThreads int) *Engine {
@@ -58,16 +59,24 @@ func (e *Engine) Stop() {
 	e.Stopped.Store(true)
 }
 
+func (e *Engine) PonderHit() {
+	if tm := e.currentTM.Load(); tm != nil {
+		tm.PonderHit()
+	}
+}
+
 func (e *Engine) Search(
 	b *board.Board,
 	limits SearchLimits,
 	infoCallback func(SearchInfo),
-) types.Move {
+) (types.Move, types.Move) {
 	e.Stopped.Store(false)
 	e.Nodes.Store(0)
 	e.TT.IncrementAge()
 
 	tm := NewTimeManager(limits, b.SideToMove, &e.Stopped, &e.Nodes)
+	e.currentTM.Store(tm)
+	defer e.currentTM.Store(nil)
 
 	maxDepth := limits.MaxDepth
 	if maxDepth <= 0 || maxDepth > 64 {
@@ -75,6 +84,7 @@ func (e *Engine) Search(
 	}
 
 	var rootBestMove types.Move
+	var rootPonderMove types.Move
 	var rootScore int32
 
 	// Master worker
@@ -170,6 +180,9 @@ func (e *Engine) Search(
 		if len(pv) > 0 && rootBestMove == types.MoveNone {
 			rootBestMove = pv[0]
 		}
+		if len(pv) >= 2 {
+			rootPonderMove = pv[1]
+		}
 
 		elapsed := time.Since(startTime)
 		elapsedMs := elapsed.Milliseconds()
@@ -248,7 +261,7 @@ func (e *Engine) Search(
 		}
 	}
 
-	return rootBestMove
+	return rootBestMove, rootPonderMove
 }
 
 func (e *Engine) extractPV(b *board.Board, master *SearchWorker, depth int8) []types.Move {

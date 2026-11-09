@@ -81,6 +81,8 @@ func (u *UCI) Loop() {
 			u.cmdGo(parts[1:])
 		case "stop":
 			u.cmdStop()
+		case "ponderhit":
+			u.cmdPonderHit()
 		case "quit":
 			u.cmdStop()
 			return
@@ -103,6 +105,7 @@ func (u *UCI) cmdUCI() {
 	fmt.Fprintf(u.out, "id author %s\n", EngineAuthor)
 	fmt.Fprintf(u.out, "option name Hash type spin default %d min 1 max 65536\n", u.engine.TT.SizeMB())
 	fmt.Fprintf(u.out, "option name Threads type spin default %d min 1 max 512\n", u.engine.NumThreads)
+	fmt.Fprintf(u.out, "option name Ponder type check default true\n")
 	fmt.Fprintf(u.out, "option name UseNNUE type check default %t\n", nnue.Enabled)
 	fmt.Fprintf(u.out, "option name EvalFile type string default <embedded>\n")
 	fmt.Fprintf(u.out, "uciok\n")
@@ -259,6 +262,8 @@ func (u *UCI) cmdGo(args []string) {
 			}
 		case "infinite":
 			limits.Infinite = true
+		case "ponder":
+			limits.Ponder = true
 		}
 	}
 
@@ -277,9 +282,17 @@ func (u *UCI) cmdGo(args []string) {
 			fmt.Fprintln(u.out, search.FormatInfo(info))
 		}
 
-		bestMove := u.engine.Search(u.board, limits, infoCallback)
-		fmt.Fprintf(u.out, "bestmove %s\n", bestMove.String())
+		bestMove, ponderMove := u.engine.Search(u.board, limits, infoCallback)
+		if ponderMove != types.MoveNone {
+			fmt.Fprintf(u.out, "bestmove %s ponder %s\n", bestMove.String(), ponderMove.String())
+		} else {
+			fmt.Fprintf(u.out, "bestmove %s\n", bestMove.String())
+		}
 	}()
+}
+
+func (u *UCI) cmdPonderHit() {
+	u.engine.PonderHit()
 }
 
 func (u *UCI) cmdStop() {
@@ -370,7 +383,7 @@ func (u *UCI) cmdBench(args []string) {
 			continue
 		}
 		posStart := time.Now()
-		bestMove := u.engine.Search(b, limits, nil)
+		bestMove, _ := u.engine.Search(b, limits, nil)
 		posElapsed := time.Since(posStart)
 		nodes := u.engine.Nodes.Load()
 		totalNodes += nodes

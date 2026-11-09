@@ -33,7 +33,7 @@ func TestTacticsMateInOne(t *testing.T) {
 			t.Fatalf("failed to parse FEN %s: %v", tt.fen, err)
 		}
 		engine := NewEngine(64, 1)
-		mv := engine.Search(b, SearchLimits{MaxDepth: 4}, nil)
+		mv, _ := engine.Search(b, SearchLimits{MaxDepth: 4}, nil)
 		if mv.String() != tt.bestMove {
 			t.Errorf("FEN %s: expected %s, got %s", tt.fen, tt.bestMove, mv.String())
 		}
@@ -48,7 +48,7 @@ func TestLazySMPScaling(t *testing.T) {
 
 	// Search with 4 threads using Lazy SMP
 	engine := NewEngine(64, 4)
-	mv := engine.Search(b, SearchLimits{MaxDepth: 6}, nil)
+	mv, _ := engine.Search(b, SearchLimits{MaxDepth: 6}, nil)
 	if mv == types.MoveNone {
 		t.Errorf("Lazy SMP search returned MoveNone")
 	}
@@ -61,7 +61,7 @@ func TestHistoryPruning(t *testing.T) {
 	}
 
 	engine := NewEngine(64, 1)
-	mv := engine.Search(b, SearchLimits{MaxDepth: 5}, nil)
+	mv, _ := engine.Search(b, SearchLimits{MaxDepth: 5}, nil)
 	if mv == types.MoveNone {
 		t.Errorf("Search with History Pruning returned MoveNone")
 	}
@@ -101,5 +101,37 @@ func TestDynamicTimeAdjustment(t *testing.T) {
 	tm.AdjustOptTime(1.5)
 	if tm.OptTime <= initialOpt*8/10 {
 		t.Errorf("expected increased OptTime, got %v", tm.OptTime)
+	}
+}
+
+func TestPonderMove(t *testing.T) {
+	b, err := board.ParseFEN(board.StartFEN)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewEngine(64, 1)
+	bestMove, ponderMove := engine.Search(b, SearchLimits{MaxDepth: 4}, nil)
+	if bestMove == types.MoveNone {
+		t.Errorf("expected valid bestMove")
+	}
+	if ponderMove == types.MoveNone {
+		t.Errorf("expected valid ponderMove at depth 4")
+	}
+}
+
+func TestPonderHit(t *testing.T) {
+	var stopped atomic.Bool
+	var nodes atomic.Uint64
+	tm := NewTimeManager(SearchLimits{WhiteTime: 5000, Ponder: true}, types.White, &stopped, &nodes)
+	if !tm.Ponder.Load() {
+		t.Errorf("expected Ponder to be true initially")
+	}
+	if tm.CheckLimits() {
+		t.Errorf("CheckLimits should return false while pondering")
+	}
+	tm.PonderHit()
+	if tm.Ponder.Load() {
+		t.Errorf("expected Ponder to be false after PonderHit")
 	}
 }
