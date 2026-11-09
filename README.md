@@ -97,6 +97,7 @@ Fully compatible with modern chess GUIs (Cutechess, Arena, Banksia GUI, Fritz, L
 3. **Runtime UCI Options**:
    - `setoption name Threads value <N>`
    - `setoption name Hash value <MB>`
+   - `setoption name Ponder value <true|false>`
    - `setoption name UseNNUE value <true|false>`
    - `setoption name EvalFile value <path>`
 
@@ -105,13 +106,16 @@ Supports:
 - `isready`
 - `setoption name Hash value <MB>`
 - `setoption name Threads value <N>`
+- `setoption name Ponder value <true|false>`
 - `setoption name UseNNUE value <true|false>`
 - `setoption name EvalFile value <path>`
 - `ucinewgame`
 - `position [startpos | fen <fen>] [moves <m1> ...]`
-- `go [wtime <ms>] [btime <ms>] [winc <ms>] [binc <ms>] [movestogo <n>] [depth <d>] [nodes <n>] [movetime <ms>] [infinite]`
+- `go [wtime <ms>] [btime <ms>] [winc <ms>] [binc <ms>] [movestogo <n>] [depth <d>] [nodes <n>] [movetime <ms>] [infinite] [ponder]`
+- `ponderhit` (transitions ponder search to normal clock time)
 - `stop`
 - `quit`
+- **Continuous Background Pondering**: After reporting `bestmove <m1> ponder <m2>`, the engine never goes idle. It immediately sets up the predicted board continuation as if the opponent already made move `m2` and calculates in the background, pre-warming the Transposition Table and depth tree so subsequent moves respond instantly.
 - Diagnostic commands: `d` / `display`, `eval`, `perft <depth>`, `bench [depth] [threads]`.
 
 ### 8. Performance & Benchmarks

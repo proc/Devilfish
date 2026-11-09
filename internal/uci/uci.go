@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"devilfish/internal/board"
@@ -26,12 +27,16 @@ const (
 )
 
 type UCI struct {
-	board     *board.Board
-	engine    *search.Engine
-	searching bool
-	searchMu  sync.Mutex
-	in        *bufio.Reader
-	out       io.Writer
+	board          *board.Board
+	engine         *search.Engine
+	searching      bool
+	isAutoPonder   bool
+	autoPonderHash uint64
+	ponderEnabled  bool
+	manualStop     atomic.Bool
+	searchMu       sync.Mutex
+	in             *bufio.Reader
+	out            io.Writer
 }
 
 func New(in io.Reader, out io.Writer, cfg config.Config) *UCI {
@@ -45,10 +50,11 @@ func New(in io.Reader, out io.Writer, cfg config.Config) *UCI {
 		hash = 64
 	}
 	return &UCI{
-		board:  b,
-		engine: search.NewEngine(hash, threads),
-		in:     bufio.NewReader(in),
-		out:    out,
+		board:         b,
+		engine:        search.NewEngine(hash, threads),
+		ponderEnabled: true,
+		in:            bufio.NewReader(in),
+		out:           out,
 	}
 }
 
@@ -105,7 +111,7 @@ func (u *UCI) cmdUCI() {
 	fmt.Fprintf(u.out, "id author %s\n", EngineAuthor)
 	fmt.Fprintf(u.out, "option name Hash type spin default %d min 1 max 65536\n", u.engine.TT.SizeMB())
 	fmt.Fprintf(u.out, "option name Threads type spin default %d min 1 max 512\n", u.engine.NumThreads)
-	fmt.Fprintf(u.out, "option name Ponder type check default true\n")
+	fmt.Fprintf(u.out, "option name Ponder type check default %t\n", u.ponderEnabled)
 	fmt.Fprintf(u.out, "option name UseNNUE type check default %t\n", nnue.Enabled)
 	fmt.Fprintf(u.out, "option name EvalFile type string default <embedded>\n")
 	fmt.Fprintf(u.out, "uciok\n")
@@ -131,6 +137,14 @@ func (u *UCI) cmdSetOption(args []string) {
 					threads, err := strconv.Atoi(valStr)
 					if err == nil && threads > 0 {
 						u.engine.SetThreads(threads)
+					}
+				case "ponder":
+					valLower := strings.ToLower(valStr)
+					if valLower == "true" || valLower == "1" {
+						u.ponderEnabled = true
+					} else if valLower == "false" || valLower == "0" {
+						u.ponderEnabled = false
+						u.cmdStop()
 					}
 				case "usennue":
 					valLower := strings.ToLower(valStr)
@@ -166,8 +180,6 @@ func (u *UCI) cmdPosition(args []string) {
 		return
 	}
 
-	u.cmdStop()
-
 	var b *board.Board
 	idx := 0
 
@@ -202,11 +214,23 @@ func (u *UCI) cmdPosition(args []string) {
 		}
 	}
 
+	u.searchMu.Lock()
+	isAuto := u.isAutoPonder
+	ponderHash := u.autoPonderHash
+	u.searchMu.Unlock()
+
+	// If currently auto-pondering on this exact position, keep thinking!
+	// Otherwise stop the background calculation.
+	if !isAuto || b.Hash != ponderHash {
+		u.cmdStop()
+	}
+
 	u.board = b
 }
 
 func (u *UCI) cmdGo(args []string) {
 	u.cmdStop()
+	u.manualStop.Store(false)
 
 	var limits search.SearchLimits
 
@@ -269,12 +293,16 @@ func (u *UCI) cmdGo(args []string) {
 
 	u.searchMu.Lock()
 	u.searching = true
+	u.isAutoPonder = false
+	u.autoPonderHash = 0
 	u.searchMu.Unlock()
 
 	go func() {
 		defer func() {
 			u.searchMu.Lock()
 			u.searching = false
+			u.isAutoPonder = false
+			u.autoPonderHash = 0
 			u.searchMu.Unlock()
 		}()
 
@@ -282,20 +310,78 @@ func (u *UCI) cmdGo(args []string) {
 			fmt.Fprintln(u.out, search.FormatInfo(info))
 		}
 
-		bestMove, ponderMove := u.engine.Search(u.board, limits, infoCallback)
+		currentBoard := u.board
+		bestMove, ponderMove := u.engine.Search(currentBoard, limits, infoCallback)
 		if ponderMove != types.MoveNone {
 			fmt.Fprintf(u.out, "bestmove %s ponder %s\n", bestMove.String(), ponderMove.String())
 		} else {
 			fmt.Fprintf(u.out, "bestmove %s\n", bestMove.String())
 		}
+
+		// Background calculation: look for principal variation and calculate as if opponent played it
+		for u.ponderEnabled && !u.manualStop.Load() && bestMove != types.MoveNone {
+			opponentMove := ponderMove
+			if opponentMove == types.MoveNone {
+				tempB := currentBoard.Clone()
+				if tempB.MakeMove(bestMove) {
+					if ttM, _, _, _, found := u.engine.TT.Probe(tempB.Hash); found && ttM != types.MoveNone && isLegal(tempB, ttM) {
+						opponentMove = ttM
+					}
+				}
+			}
+
+			if opponentMove == types.MoveNone {
+				break
+			}
+
+			// Apply both moves: engine's move and predicted opponent move
+			hypoBoard := currentBoard.Clone()
+			if !hypoBoard.MakeMove(bestMove) || !hypoBoard.MakeMove(opponentMove) {
+				break
+			}
+
+			u.searchMu.Lock()
+			u.isAutoPonder = true
+			u.autoPonderHash = hypoBoard.Hash
+			u.searchMu.Unlock()
+
+			autoLimits := search.SearchLimits{Infinite: true, Ponder: true}
+			nextBest, nextPonder := u.engine.Search(hypoBoard, autoLimits, infoCallback)
+
+			u.searchMu.Lock()
+			wasAuto := u.isAutoPonder
+			u.isAutoPonder = false
+			u.autoPonderHash = 0
+			u.searchMu.Unlock()
+
+			// If it transitioned from auto-ponder to a normal search via ponderhit, output and continue
+			if !wasAuto && !u.manualStop.Load() && nextBest != types.MoveNone {
+				if nextPonder != types.MoveNone {
+					fmt.Fprintf(u.out, "bestmove %s ponder %s\n", nextBest.String(), nextPonder.String())
+				} else {
+					fmt.Fprintf(u.out, "bestmove %s\n", nextBest.String())
+				}
+				currentBoard = hypoBoard
+				bestMove = nextBest
+				ponderMove = nextPonder
+			} else {
+				break
+			}
+		}
 	}()
 }
 
 func (u *UCI) cmdPonderHit() {
+	u.searchMu.Lock()
+	if u.isAutoPonder {
+		u.isAutoPonder = false
+	}
+	u.searchMu.Unlock()
 	u.engine.PonderHit()
 }
 
 func (u *UCI) cmdStop() {
+	u.manualStop.Store(true)
 	u.searchMu.Lock()
 	searching := u.searching
 	u.searchMu.Unlock()
@@ -316,6 +402,7 @@ func (u *UCI) cmdStop() {
 }
 
 func (u *UCI) cmdPerft(args []string) {
+	u.cmdStop()
 	depth := 1
 	if len(args) > 0 {
 		d, err := strconv.Atoi(args[0])
@@ -363,6 +450,7 @@ func (u *UCI) Bench(depth int8) {
 }
 
 func (u *UCI) cmdBench(args []string) {
+	u.cmdStop()
 	depth := int8(7)
 	if len(args) > 0 {
 		d, err := strconv.Atoi(args[0])
@@ -397,6 +485,18 @@ func (u *UCI) cmdBench(args []string) {
 	fmt.Fprintf(u.out, "Total time : %v\n", elapsed)
 	fmt.Fprintf(u.out, "Nodes/sec  : %.0f\n", nps)
 	fmt.Fprintf(u.out, "===============================================\n")
+}
+
+func isLegal(b *board.Board, m types.Move) bool {
+	if m == types.MoveNone {
+		return false
+	}
+	for _, lm := range movegen.GenerateLegalMoves(b) {
+		if lm == m {
+			return true
+		}
+	}
+	return false
 }
 
 func parseMove(b *board.Board, moveStr string) (types.Move, error) {
