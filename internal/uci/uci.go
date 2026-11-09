@@ -513,6 +513,7 @@ func (u *UCI) Bench(depth int8) {
 
 func (u *UCI) cmdBench(args []string) {
 	u.stopSearch(false)
+	u.abortSearch.Store(false)
 	depth := int8(7)
 	if len(args) > 0 {
 		d, err := strconv.Atoi(args[0])

@@ -70,9 +70,7 @@ func (e *Engine) Search(
 	limits SearchLimits,
 	infoCallback func(SearchInfo),
 ) (types.Move, types.Move) {
-	if e.Stopped.Load() {
-		return types.MoveNone, types.MoveNone
-	}
+	e.Stopped.Store(false)
 	e.Nodes.Store(0)
 	e.TT.IncrementAge()
 

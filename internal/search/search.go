@@ -23,9 +23,9 @@ var LMRTable [128][128]int8
 func init() {
 	for d := 1; d < 128; d++ {
 		for m := 1; m < 128; m++ {
-			r := 0.75 + math.Log(float64(d))*math.Log(float64(m))/2.25
-			if r < 1 {
-				r = 1
+			r := 0.4 + math.Log(float64(d))*math.Log(float64(m))/2.3
+			if r < 0 {
+				r = 0
 			}
 			LMRTable[d][m] = int8(r)
 		}
@@ -181,7 +181,11 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 	// 5. Razoring
 	if !isPVNode && !inCheck && depth <= 3 {
-		if staticEval+int32(depth)*400 <= alpha {
+		razorMargin := int32(150 + int(depth)*125)
+		if !improving {
+			razorMargin -= 50
+		}
+		if staticEval+razorMargin <= alpha {
 			qScore := w.Quiescence(alpha, beta, ply)
 			if qScore <= alpha {
 				return qScore
@@ -427,21 +431,27 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		isQuiet := !m.IsCapture() && !m.IsPromotion()
 
 		// Late Move Pruning (LMP)
-		lmpThreshold := 3 + 2*int(depth)*int(depth)
-		if !improving {
-			lmpThreshold = lmpThreshold / 2
-		}
-		if !isPVNode && !inCheck && depth <= 4 && isQuiet && legalMoves >= lmpThreshold {
-			continue
+		if !isPVNode && !inCheck && depth <= 5 && isQuiet && movesSearched > 0 && m != killer1 && m != killer2 {
+			lmpThreshold := 3 + 2*int(depth)*int(depth)
+			if !improving {
+				lmpThreshold /= 2
+			}
+			if legalMoves >= lmpThreshold {
+				continue
+			}
 		}
 
 		// Futility Pruning
-		futMargin := int32(depth) * 100
-		if !improving {
-			futMargin = int32(depth) * 75
-		}
-		if !isPVNode && !inCheck && depth <= 3 && isQuiet && (staticEval+futMargin <= alpha) {
-			continue
+		if !isPVNode && !inCheck && depth <= 6 && isQuiet && movesSearched > 0 && m != killer1 && m != killer2 && m != counterMove {
+			futMargin := int32(80) * int32(depth)
+			if !improving {
+				futMargin -= int32(20) * int32(depth)
+			}
+			if staticEval+futMargin <= alpha {
+				if !w.Board.GivesCheck(m) {
+					continue
+				}
+			}
 		}
 
 		// History Pruning
@@ -461,8 +471,14 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 
 		// SEE Pruning
-		if !inCheck && depth <= 3 && eval.SEE(w.Board, m) < -int32(depth)*60 {
-			continue
+		if !isPVNode && !inCheck && depth <= 4 && m != killer1 && m != killer2 {
+			seeThreshold := -int32(depth) * 35
+			if !isQuiet {
+				seeThreshold = -int32(depth) * 90
+			}
+			if eval.SEE(w.Board, m) < seeThreshold {
+				continue
+			}
 		}
 
 		if ply+1 < MaxPly {
@@ -474,6 +490,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		legalMoves++
 		searchedMoves[movesSearched] = m
+		givesCheck := w.Board.IsInCheck(w.Board.SideToMove)
 		var score int32
 
 		// Principal Variation Search & LMR
@@ -483,7 +500,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		} else {
 			// Late Move Reductions (LMR)
 			reduction := int8(0)
-			if depth >= 3 && movesSearched >= 4 && isQuiet && !inCheck {
+			if depth >= 3 && movesSearched >= 2 && !inCheck {
 				dIdx := depth
 				if dIdx > 127 {
 					dIdx = 127
@@ -493,24 +510,73 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					mIdx = 127
 				}
 				reduction = LMRTable[dIdx][mIdx]
-				if isPVNode {
-					reduction--
-				}
-				if !improving {
-					reduction++
+
+				if isQuiet {
+					// Base reduction for quiet moves
+					if !isPVNode {
+						reduction++ // Non-PV nodes (cut nodes) reduce more
+					}
+					if !improving {
+						reduction++ // Position getting worse: reduce more
+					} else {
+						reduction-- // Position improving: reduce less
+					}
+
+					// Killer & Countermove reductions
+					if m == killer1 || m == killer2 {
+						reduction -= 2
+					}
+					if m == counterMove {
+						reduction--
+					}
+
+					// History-based reduction adjustment
+					hist := w.History.HistoryTable[us][m.From()][m.To()]
+					if prevMove != types.MoveNone && prevMove.To() < 64 && m.To() < 64 {
+						hist += w.History.ContHistory[prevMove.To()][m.To()]
+					}
+					if hist > 4000 {
+						reduction--
+						if hist > 8000 {
+							reduction--
+						}
+					} else if hist < -4000 {
+						reduction++
+						if hist < -8000 {
+							reduction++
+						}
+					}
 				} else {
-					reduction--
+					// Tactical moves / Captures (Noisy LMR)
+					if depth >= 4 && movesSearched >= 4 {
+						reduction /= 2
+
+						attacker := w.Board.Pieces[m.From()].Type()
+						victim := w.Board.Pieces[m.To()].Type()
+						if m.IsEnPassant() {
+							victim = types.Pawn
+						}
+						capHist := w.History.CaptureHistory[attacker][m.To()][victim]
+						if capHist < 0 {
+							reduction++
+						} else if capHist > 2000 {
+							reduction--
+						}
+
+						see := eval.SEE(w.Board, m)
+						if see < 0 {
+							reduction++
+						} else if see > 100 {
+							reduction--
+						}
+					} else {
+						reduction = 0
+					}
 				}
 
-				// History-based LMR adjustment
-				hist := w.History.HistoryTable[us][m.From()][m.To()]
-				if prevMove != types.MoveNone && prevMove.To() < 64 && m.To() < 64 {
-					hist += w.History.ContHistory[prevMove.To()][m.To()]
-				}
-				if hist > 4000 {
+				// Check if move gives check: checks should be reduced less
+				if givesCheck {
 					reduction--
-				} else if hist < -4000 {
-					reduction++
 				}
 
 				if reduction < 0 {
@@ -524,12 +590,12 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			// Null-window search with reduction
 			score = -w.Search(depth-1-reduction, -alpha-1, -alpha, ply+1, false, false, types.MoveNone, m)
 
-			// If reduced search fails high, re-search at full depth
+			// If reduced search fails high, re-search at full depth with null window
 			if reduction > 0 && score > alpha {
 				score = -w.Search(depth-1, -alpha-1, -alpha, ply+1, false, true, types.MoveNone, m)
 			}
 
-			// If null-window fails high and in PV node, re-search with full window
+			// If null-window fails high and in PV node, re-search with full PV window
 			if isPVNode && score > alpha && score < beta {
 				score = -w.Search(depth-1, -beta, -alpha, ply+1, true, true, types.MoveNone, m)
 			}

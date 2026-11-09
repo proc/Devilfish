@@ -172,6 +172,15 @@ func (b *Board) IsInCheck(c types.Color) bool {
 	return b.IsSquareAttacked(kSq, c.Other())
 }
 
+func (b *Board) GivesCheck(m types.Move) bool {
+	if !b.MakeMove(m) {
+		return false
+	}
+	check := b.IsInCheck(b.SideToMove)
+	b.UnmakeMove(m)
+	return check
+}
+
 func (b *Board) CalculateHash() uint64 {
 	var hash uint64
 	for sq := 0; sq < 64; sq++ {

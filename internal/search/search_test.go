@@ -135,3 +135,52 @@ func TestPonderHit(t *testing.T) {
 		t.Errorf("expected Ponder to be false after PonderHit")
 	}
 }
+
+func TestLMRTable(t *testing.T) {
+	// Verify LMRTable values
+	if LMRTable[1][1] != 0 {
+		t.Errorf("expected LMRTable[1][1] == 0, got %d", LMRTable[1][1])
+	}
+	if LMRTable[6][6] <= LMRTable[3][3] {
+		t.Errorf("expected LMRTable[6][6] > LMRTable[3][3], got %d vs %d", LMRTable[6][6], LMRTable[3][3])
+	}
+	if LMRTable[10][20] <= LMRTable[5][5] {
+		t.Errorf("expected LMRTable[10][20] > LMRTable[5][5], got %d vs %d", LMRTable[10][20], LMRTable[5][5])
+	}
+}
+
+func TestForwardPruningTacticsIntegrity(t *testing.T) {
+	// A tactical position where White has Scholar's mate threat f3f7#
+	// Razoring and futility pruning must not prune the winning tactic!
+	fen := "r1bqkb1r/pppp1ppp/2n5/4p3/2B1n3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 0 1"
+	b, err := board.ParseFEN(fen)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewEngine(64, 1)
+	mv, _ := engine.Search(b, SearchLimits{MaxDepth: 5}, nil)
+	if mv.String() != "f3f7" {
+		t.Errorf("expected tactical mate f3f7 with pruning enabled, got %s", mv.String())
+	}
+}
+
+func TestBoardGivesCheck(t *testing.T) {
+	b, err := board.ParseFEN(board.StartFEN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// e2e4 does not give check
+	e2e4 := types.MakeMove(types.E2, types.E4, types.FlagDoublePawnPush)
+	if b.GivesCheck(e2e4) {
+		t.Errorf("expected e2e4 to not give check")
+	}
+
+	// Position where Q checks king
+	checkPos := "rnbqkbnr/ppppp1pp/8/5p2/4P3/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 2"
+	b2, _ := board.ParseFEN(checkPos)
+	d1h5 := types.MakeMove(types.D1, types.H5, types.FlagQuiet)
+	if !b2.GivesCheck(d1h5) {
+		t.Errorf("expected d1h5 to give check")
+	}
+}
