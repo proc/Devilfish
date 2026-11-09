@@ -177,7 +177,7 @@ func (tt *TT) Store(hash uint64, m types.Move, score int32, depth int8, nodeType
 }
 
 func (tt *TT) HashFull() int {
-	sampleCount := 1000
+	sampleCount := 2000
 	if len(tt.entries) < sampleCount {
 		sampleCount = len(tt.entries)
 	}
