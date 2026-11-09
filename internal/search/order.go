@@ -36,6 +36,7 @@ func ScoreMoves(
 	ply int,
 	prevMove types.Move,
 	prevMove2 types.Move,
+	prevMove4 types.Move,
 	history *SearchHistory,
 ) {
 	side := b.SideToMove
@@ -110,13 +111,16 @@ func ScoreMoves(
 			continue
 		}
 
-		// 7. Quiet Moves: History + 1-ply & 2-ply Continuation History
+		// 7. Quiet Moves: History + 1-ply, 2-ply & 4-ply Continuation History
 		histScore := history.HistoryTable[side][m.From()][m.To()]
 		if prevMove != types.MoveNone && prevMove.To() < 64 && m.To() < 64 {
 			histScore += history.ContHistory[prevMove.To()][m.To()]
 		}
 		if prevMove2 != types.MoveNone && prevMove2.To() < 64 && m.To() < 64 {
 			histScore += history.ContHistory2[prevMove2.To()][m.To()]
+		}
+		if prevMove4 != types.MoveNone && prevMove4.To() < 64 && m.To() < 64 {
+			histScore += history.ContHistory4[prevMove4.To()][m.To()]
 		}
 
 		// Quiet checks priority: boost check-giving moves above ordinary quiet moves

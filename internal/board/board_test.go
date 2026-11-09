@@ -38,6 +38,9 @@ func TestZobristHashIncremental(t *testing.T) {
 	if initialHash != calculatedHash {
 		t.Fatalf("initial hash mismatch: 0x%x vs 0x%x", initialHash, calculatedHash)
 	}
+	if b.PawnHash != b.CalculatePawnHash() {
+		t.Fatalf("initial pawn hash mismatch: 0x%x vs 0x%x", b.PawnHash, b.CalculatePawnHash())
+	}
 
 	// Make move e2e4
 	m := types.MakeMove(types.E2, types.E4, types.FlagDoublePawnPush)
@@ -45,6 +48,9 @@ func TestZobristHashIncremental(t *testing.T) {
 
 	if b.Hash != b.CalculateHash() {
 		t.Fatalf("hash mismatch after e2e4: 0x%x vs 0x%x", b.Hash, b.CalculateHash())
+	}
+	if b.PawnHash != b.CalculatePawnHash() {
+		t.Fatalf("pawn hash mismatch after e2e4: 0x%x vs 0x%x", b.PawnHash, b.CalculatePawnHash())
 	}
 
 	// Make move e7e5
@@ -54,17 +60,26 @@ func TestZobristHashIncremental(t *testing.T) {
 	if b.Hash != b.CalculateHash() {
 		t.Fatalf("hash mismatch after e7e5: 0x%x vs 0x%x", b.Hash, b.CalculateHash())
 	}
+	if b.PawnHash != b.CalculatePawnHash() {
+		t.Fatalf("pawn hash mismatch after e7e5: 0x%x vs 0x%x", b.PawnHash, b.CalculatePawnHash())
+	}
 
 	// Unmake e7e5
 	b.UnmakeMove(m2)
 	if b.Hash != b.CalculateHash() {
 		t.Fatalf("hash mismatch after unmake e7e5: 0x%x vs 0x%x", b.Hash, b.CalculateHash())
 	}
+	if b.PawnHash != b.CalculatePawnHash() {
+		t.Fatalf("pawn hash mismatch after unmake e7e5: 0x%x vs 0x%x", b.PawnHash, b.CalculatePawnHash())
+	}
 
 	// Unmake e2e4
 	b.UnmakeMove(m)
 	if b.Hash != initialHash {
 		t.Fatalf("hash mismatch after full unmake: 0x%x vs 0x%x", b.Hash, initialHash)
+	}
+	if b.PawnHash != b.CalculatePawnHash() {
+		t.Fatalf("pawn hash mismatch after full unmake: 0x%x vs 0x%x", b.PawnHash, b.CalculatePawnHash())
 	}
 }
 

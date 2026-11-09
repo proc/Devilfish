@@ -208,7 +208,7 @@ func TestAggressiveMoveOrdering(t *testing.T) {
 	movegen.GenerateMoves(b, false, &ml)
 	scores := make([]int32, ml.Count)
 
-	ScoreMoves(b, &ml, scores, types.MoveNone, 0, types.MoveNone, types.MoveNone, hist)
+	ScoreMoves(b, &ml, scores, types.MoveNone, 0, types.MoveNone, types.MoveNone, types.MoveNone, hist)
 
 	var promoScore, winCapScore, k1Score, k2Score, checkScore, quietScore, badCapScore int32
 	foundPromo, foundBadCap, foundK1, foundK2 := false, false, false, false
@@ -265,7 +265,7 @@ func TestAggressiveMoveOrdering(t *testing.T) {
 	var mlBad movegen.MoveList
 	movegen.GenerateMoves(bBad, false, &mlBad)
 	scoresBad := make([]int32, mlBad.Count)
-	ScoreMoves(bBad, &mlBad, scoresBad, types.MoveNone, 0, types.MoveNone, types.MoveNone, hist)
+	ScoreMoves(bBad, &mlBad, scoresBad, types.MoveNone, 0, types.MoveNone, types.MoveNone, types.MoveNone, hist)
 
 	for i := 0; i < mlBad.Count; i++ {
 		m := mlBad.Moves[i]
@@ -304,5 +304,78 @@ func TestContinuationHistory2(t *testing.T) {
 	scoreAfter := hist.ContHistory2[prev2.To()][m.To()]
 	if scoreAfter >= scoreBefore {
 		t.Errorf("expected ContHistory2 to decrease after penalty")
+	}
+}
+
+func TestContinuationHistory4(t *testing.T) {
+	hist := NewSearchHistory()
+	prev4 := types.MakeMove(types.D2, types.D4, types.FlagDoublePawnPush)
+	m := types.MakeMove(types.C1, types.F4, types.FlagQuiet)
+
+	hist.UpdateContHistory4(prev4, m, 5)
+	if hist.ContHistory4[prev4.To()][m.To()] <= 0 {
+		t.Errorf("expected positive ContHistory4 after update")
+	}
+
+	scoreBefore := hist.ContHistory4[prev4.To()][m.To()]
+	hist.PenalizeContHistory4(prev4, m, 5)
+	scoreAfter := hist.ContHistory4[prev4.To()][m.To()]
+	if scoreAfter >= scoreBefore {
+		t.Errorf("expected ContHistory4 to decrease after penalty")
+	}
+}
+
+func TestCorrectionHistory(t *testing.T) {
+	hist := NewSearchHistory()
+	pawnHash := uint64(0x123456789ABCDEF0)
+
+	corrInit := hist.GetCorrection(types.White, pawnHash)
+	if corrInit != 0 {
+		t.Errorf("expected initial correction 0, got %d", corrInit)
+	}
+
+	// Update with positive error diff (search score was higher than static eval)
+	hist.UpdateCorrHist(types.White, pawnHash, 100, 4)
+	corrAfter := hist.GetCorrection(types.White, pawnHash)
+	if corrAfter <= 0 {
+		t.Errorf("expected positive correction after update, got %d", corrAfter)
+	}
+
+	// White and Black indices are distinct
+	corrBlack := hist.GetCorrection(types.Black, pawnHash)
+	if corrBlack != 0 {
+		t.Errorf("expected black correction to remain 0, got %d", corrBlack)
+	}
+}
+
+func TestMovePicker(t *testing.T) {
+	b, _ := board.ParseFEN(board.StartFEN)
+	hist := NewSearchHistory()
+	ttMove := types.MakeMove(types.E2, types.E4, types.FlagDoublePawnPush)
+
+	mp := NewMovePicker(b, ttMove, types.MoveNone, 0, types.MoveNone, types.MoveNone, types.MoveNone, hist)
+
+	// First move should be the TT move
+	first := mp.Next()
+	if first != ttMove {
+		t.Errorf("expected first move to be ttMove %s, got %s", ttMove, first)
+	}
+
+	// Subsequent moves should be generated and not repeat ttMove
+	var moves []types.Move
+	for {
+		m := mp.Next()
+		if m == types.MoveNone {
+			break
+		}
+		if m == ttMove {
+			t.Errorf("MovePicker yielded ttMove %s again", ttMove)
+		}
+		moves = append(moves, m)
+	}
+
+	// Standard start position has 20 moves, minus 1 TT move = 19 moves
+	if len(moves) != 19 {
+		t.Errorf("expected 19 remaining moves, got %d", len(moves))
 	}
 }

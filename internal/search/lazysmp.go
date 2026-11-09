@@ -32,6 +32,7 @@ type Engine struct {
 	Stopped    atomic.Bool
 	Nodes      atomic.Uint64
 	currentTM  atomic.Pointer[TimeManager]
+	searchMu   sync.Mutex
 }
 
 func NewEngine(ttSizeMB int, numThreads int) *Engine {
@@ -70,6 +71,9 @@ func (e *Engine) Search(
 	limits SearchLimits,
 	infoCallback func(SearchInfo),
 ) (types.Move, types.Move) {
+	e.searchMu.Lock()
+	defer e.searchMu.Unlock()
+
 	e.Stopped.Store(false)
 	e.Nodes.Store(0)
 	e.TT.IncrementAge()
@@ -104,7 +108,7 @@ func (e *Engine) Search(
 				if e.Stopped.Load() {
 					break
 				}
-				helper.Search(d, -Infinity, Infinity, 0, false, true, types.MoveNone, types.MoveNone, types.MoveNone)
+				helper.Search(d, -Infinity, Infinity, 0, false, true, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
 			}
 		}(id)
 	}
@@ -120,9 +124,11 @@ func (e *Engine) Search(
 			break
 		}
 
+		master.RootMoveNodes = [64][64]uint64{}
+
 		var score int32
 		if depth < 4 {
-			score = master.Search(depth, -Infinity, Infinity, 0, true, true, types.MoveNone, types.MoveNone, types.MoveNone)
+			score = master.Search(depth, -Infinity, Infinity, 0, true, true, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
 		} else {
 			// Aspiration Windows
 			delta := int32(30)
@@ -137,7 +143,7 @@ func (e *Engine) Search(
 					beta = Infinity
 				}
 
-				score = master.Search(depth, alpha, beta, 0, true, true, types.MoveNone, types.MoveNone, types.MoveNone)
+				score = master.Search(depth, alpha, beta, 0, true, true, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
 
 				if e.Stopped.Load() {
 					break
@@ -226,7 +232,7 @@ func (e *Engine) Search(
 			}
 		}
 
-		// Dynamic Time Management: Best move stability & fail-low recovery
+		// Dynamic Time Management: Best move stability, node dominance & fail-low recovery
 		if depth >= 5 && rootBestMove != types.MoveNone {
 			if rootBestMove == prevIterationBestMove {
 				bestMoveStability++
@@ -236,6 +242,19 @@ func (e *Engine) Search(
 				}
 			} else {
 				bestMoveStability = 0
+			}
+
+			// Node-based time management: evaluate dominance of root move
+			rootNodes := master.RootMoveNodes[rootBestMove.From()][rootBestMove.To()]
+			if master.LocalNodes > 0 {
+				nodeRatio := float64(rootNodes) / float64(master.LocalNodes)
+				if nodeRatio >= 0.65 {
+					// Clear dominance: reduce allocated time
+					tm.AdjustOptTime(0.75)
+				} else if nodeRatio < 0.35 {
+					// Disputed position: extend allocated time
+					tm.AdjustOptTime(1.30)
+				}
 			}
 
 			// If the score dropped significantly from the previous iteration, extend time to recover

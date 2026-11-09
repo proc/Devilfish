@@ -30,6 +30,7 @@ type UndoState struct {
 	EPSquare      types.Square
 	HalfmoveClock uint8
 	Hash          uint64
+	PawnHash      uint64
 }
 
 type Board struct {
@@ -43,6 +44,7 @@ type Board struct {
 	HalfmoveClock  uint8
 	FullmoveNumber uint16
 	Hash           uint64
+	PawnHash       uint64
 
 	UndoStack []UndoState
 }
@@ -85,6 +87,9 @@ func (b *Board) PutPiece(p types.Piece, sq types.Square) {
 	b.PieceBB[p] |= bb
 	b.ColorBB[p.Color()] |= bb
 	b.Hash ^= ZobristPiece[p][sq]
+	if p.Type() == types.Pawn {
+		b.PawnHash ^= ZobristPiece[p][sq]
+	}
 }
 
 func (b *Board) RemovePiece(sq types.Square) types.Piece {
@@ -100,6 +105,9 @@ func (b *Board) RemovePiece(sq types.Square) types.Piece {
 	b.PieceBB[p] &= ^bb
 	b.ColorBB[p.Color()] &= ^bb
 	b.Hash ^= ZobristPiece[p][sq]
+	if p.Type() == types.Pawn {
+		b.PawnHash ^= ZobristPiece[p][sq]
+	}
 	return p
 }
 
@@ -118,6 +126,9 @@ func (b *Board) MovePiece(p types.Piece, from, to types.Square) {
 	b.ColorBB[p.Color()] ^= fromToBB
 
 	b.Hash ^= ZobristPiece[p][from] ^ ZobristPiece[p][to]
+	if p.Type() == types.Pawn {
+		b.PawnHash ^= ZobristPiece[p][from] ^ ZobristPiece[p][to]
+	}
 }
 
 func (b *Board) IsSquareAttacked(sq types.Square, byColor types.Color) bool {
@@ -195,6 +206,17 @@ func (b *Board) CalculateHash() uint64 {
 	}
 	if b.SideToMove == types.Black {
 		hash ^= ZobristSide
+	}
+	return hash
+}
+
+func (b *Board) CalculatePawnHash() uint64 {
+	var hash uint64
+	for sq := 0; sq < 64; sq++ {
+		p := b.Pieces[sq]
+		if p != types.PieceNone && p.Type() == types.Pawn {
+			hash ^= ZobristPiece[p][sq]
+		}
 	}
 	return hash
 }

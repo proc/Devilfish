@@ -47,13 +47,18 @@ type SearchWorker struct {
 	Accumulators      [MaxPly]nnue.Accumulator
 	RootBestMove      types.Move
 	RootScore         int32
+	RootMoveNodes     [64][64]uint64
 }
 
 func (w *SearchWorker) Evaluate(ply int) int32 {
+	var staticEval int32
 	if nnue.Enabled && nnue.ActiveNetwork != nil && ply < MaxPly {
-		return nnue.Evaluate(&w.Accumulators[ply], w.Board.SideToMove)
+		staticEval = nnue.Evaluate(&w.Accumulators[ply], w.Board.SideToMove)
+	} else {
+		staticEval = eval.EvaluateClassical(w.Board)
 	}
-	return eval.EvaluateClassical(w.Board)
+	corr := w.History.GetCorrection(w.Board.SideToMove, w.Board.PawnHash)
+	return staticEval + corr
 }
 
 func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *atomic.Uint64) *SearchWorker {
@@ -69,7 +74,11 @@ func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *a
 	return w
 }
 
-func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode bool, canMultiCut bool, excludedMove types.Move, prevMove types.Move, prevMove2 types.Move) int32 {
+func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode bool, canMultiCut bool, excludedMove types.Move, prevMove types.Move, prevMove2 types.Move, prevMove4 types.Move) int32 {
+	if w.TimeMan.Stopped.Load() {
+		return 0
+	}
+
 	if ply == 0 {
 		nnue.Refresh(w.Board, &w.Accumulators[0])
 	}
@@ -209,7 +218,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			w.Accumulators[ply+1] = w.Accumulators[ply]
 		}
 		w.Board.MakeNullMove()
-		nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, false, types.MoveNone, types.MoveNone, types.MoveNone)
+		nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
 		w.Board.UnmakeNullMove()
 
 		if w.TimeMan.Stopped.Load() {
@@ -221,6 +230,12 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			}
 			return nullScore
 		}
+	}
+
+	// Internal Iterative Reduction (IIR)
+	// If at depth >= 4 with no TT move, reduce search depth by 1 ply
+	if excludedMove == types.MoveNone && depth >= 4 && ttMove == types.MoveNone {
+		depth--
 	}
 
 	extension := int8(0)
@@ -239,7 +254,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			sDepth = 1
 		}
 
-		sScore := w.Search(sDepth, singularBeta-1, singularBeta, ply, false, false, ttMove, prevMove, prevMove2)
+		sScore := w.Search(sDepth, singularBeta-1, singularBeta, ply, false, false, ttMove, prevMove, prevMove2, prevMove4)
 
 		if w.TimeMan.Stopped.Load() {
 			return 0
@@ -271,9 +286,18 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			legalMoves++
 			searchedMoves[movesSearched] = ttMove
 
-			score := -w.Search(depth-1+extension, -beta, -alpha, ply+1, isPVNode, true, types.MoveNone, ttMove, prevMove)
+			var startNodes uint64
+			if ply == 0 {
+				startNodes = w.LocalNodes
+			}
+
+			score := -w.Search(depth-1+extension, -beta, -alpha, ply+1, isPVNode, true, types.MoveNone, ttMove, prevMove, prevMove2)
 			w.Board.UnmakeMove(ttMove)
 			movesSearched++
+
+			if ply == 0 {
+				w.RootMoveNodes[ttMove.From()][ttMove.To()] += w.LocalNodes - startNodes
+			}
 
 			if w.TimeMan.Stopped.Load() {
 				return 0
@@ -282,6 +306,11 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			// Beta Cutoff (Fail-High)
 			if score >= beta {
 				w.TT.Store(w.Board.Hash, ttMove, tt.ScoreToTT(score, ply), depth, tt.LowerBound)
+
+				if !inCheck && score < MateThreshold && score > -MateThreshold {
+					diff := score - staticEval
+					w.History.UpdateCorrHist(us, w.Board.PawnHash, diff, depth)
+				}
 
 				if ply == 0 {
 					bestMove = ttMove
@@ -293,6 +322,8 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					w.History.UpdateKillers(ply, ttMove)
 					w.History.UpdateHistory(us, ttMove, depth)
 					w.History.UpdateContHistory(prevMove, ttMove, depth)
+					w.History.UpdateContHistory2(prevMove2, ttMove, depth)
+					w.History.UpdateContHistory4(prevMove4, ttMove, depth)
 					w.History.UpdateCounterMove(prevMove, ttMove)
 				} else if ttMove.IsCapture() {
 					attacker := w.Board.Pieces[ttMove.From()].Type()
@@ -331,7 +362,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		movegen.GenerateMoves(w.Board, true, &probList)
 
 		var probScores [256]int32
-		ScoreMoves(w.Board, &probList, probScores[:probList.Count], ttMove, ply, prevMove, prevMove2, w.History)
+		ScoreMoves(w.Board, &probList, probScores[:probList.Count], ttMove, ply, prevMove, prevMove2, prevMove4, w.History)
 
 		for i := 0; i < probList.Count; i++ {
 			m := PickNextMove(&probList, probScores[:probList.Count], i)
@@ -345,7 +376,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				continue
 			}
 
-			probScore := -w.Search(probDepth, -probBeta, -probBeta+1, ply+1, false, false, types.MoveNone, m, prevMove)
+			probScore := -w.Search(probDepth, -probBeta, -probBeta+1, ply+1, false, false, types.MoveNone, m, prevMove, prevMove2)
 			w.Board.UnmakeMove(m)
 
 			if w.TimeMan.Stopped.Load() {
@@ -367,7 +398,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		movegen.GenerateMoves(w.Board, false, &mcList)
 
 		var mcScores [256]int32
-		ScoreMoves(w.Board, &mcList, mcScores[:mcList.Count], ttMove, ply, prevMove, prevMove2, w.History)
+		ScoreMoves(w.Board, &mcList, mcScores[:mcList.Count], ttMove, ply, prevMove, prevMove2, prevMove4, w.History)
 
 		c := 8
 		if mcList.Count < c {
@@ -390,7 +421,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				continue
 			}
 
-			mcScore := -w.Search(mcDepth, -beta, -beta+1, ply+1, false, false, types.MoveNone, m, prevMove)
+			mcScore := -w.Search(mcDepth, -beta, -beta+1, ply+1, false, false, types.MoveNone, m, prevMove, prevMove2)
 			w.Board.UnmakeMove(m)
 
 			if w.TimeMan.Stopped.Load() {
@@ -407,28 +438,22 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 	}
 
-	// 8. Move Generation & Scoring (only needed if TT move and Multi-Cut did not cut off)
-	var ml movegen.MoveList
-	movegen.GenerateMoves(w.Board, false, &ml)
+	// 9. Staged Move Generation & Search Loop
+	mp := NewMovePicker(w.Board, ttMove, excludedMove, ply, prevMove, prevMove2, prevMove4, w.History)
+	mp.stage = StageGenCaptures
 
-	var scores [256]int32
-	ScoreMoves(w.Board, &ml, scores[:ml.Count], types.MoveNone, ply, prevMove, prevMove2, w.History)
-
-	var killer1, killer2, counterMove types.Move
-	if ply < MaxPly {
-		killer1 = w.History.Killers[ply][0]
-		killer2 = w.History.Killers[ply][1]
-	}
-	if prevMove != types.MoveNone {
-		counterMove = w.History.CounterMoves[prevMove.From()][prevMove.To()]
-	}
-
-	for i := 0; i < ml.Count; i++ {
-		m := PickNextMove(&ml, scores[:ml.Count], i)
+	for {
+		m := mp.Next()
+		if m == types.MoveNone {
+			break
+		}
 		if m == ttMove || m == excludedMove {
 			continue
 		}
 		isQuiet := !m.IsCapture() && !m.IsPromotion()
+		killer1 := mp.killer1
+		killer2 := mp.killer2
+		counterMove := mp.counterMove
 
 		// Late Move Pruning (LMP)
 		if !isPVNode && !inCheck && depth <= 5 && isQuiet && movesSearched > 0 && m != killer1 && m != killer2 {
@@ -496,10 +521,15 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		givesCheck := w.Board.IsInCheck(w.Board.SideToMove)
 		var score int32
 
+		var startNodes uint64
+		if ply == 0 {
+			startNodes = w.LocalNodes
+		}
+
 		// Principal Variation Search & LMR
 		if movesSearched == 0 {
 			// First move: full window (extended if singular)
-			score = -w.Search(depth-1+extension, -beta, -alpha, ply+1, isPVNode, true, types.MoveNone, m, prevMove)
+			score = -w.Search(depth-1+extension, -beta, -alpha, ply+1, isPVNode, true, types.MoveNone, m, prevMove, prevMove2)
 		} else {
 			// Late Move Reductions (LMR)
 			reduction := int8(0)
@@ -540,6 +570,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					}
 					if prevMove2 != types.MoveNone && prevMove2.To() < 64 && m.To() < 64 {
 						hist += w.History.ContHistory2[prevMove2.To()][m.To()]
+					}
+					if prevMove4 != types.MoveNone && prevMove4.To() < 64 && m.To() < 64 {
+						hist += w.History.ContHistory4[prevMove4.To()][m.To()]
 					}
 					if hist > 4000 {
 						reduction--
@@ -594,21 +627,25 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			}
 
 			// Null-window search with reduction
-			score = -w.Search(depth-1-reduction, -alpha-1, -alpha, ply+1, false, false, types.MoveNone, m, prevMove)
+			score = -w.Search(depth-1-reduction, -alpha-1, -alpha, ply+1, false, false, types.MoveNone, m, prevMove, prevMove2)
 
 			// If reduced search fails high, re-search at full depth with null window
-			if reduction > 0 && score > alpha {
-				score = -w.Search(depth-1, -alpha-1, -alpha, ply+1, false, true, types.MoveNone, m, prevMove)
+			if reduction > 0 && score > alpha && !w.TimeMan.Stopped.Load() {
+				score = -w.Search(depth-1, -alpha-1, -alpha, ply+1, false, true, types.MoveNone, m, prevMove, prevMove2)
 			}
 
 			// If null-window fails high and in PV node, re-search with full PV window
-			if isPVNode && score > alpha && score < beta {
-				score = -w.Search(depth-1, -beta, -alpha, ply+1, true, true, types.MoveNone, m, prevMove)
+			if isPVNode && score > alpha && score < beta && !w.TimeMan.Stopped.Load() {
+				score = -w.Search(depth-1, -beta, -alpha, ply+1, true, true, types.MoveNone, m, prevMove, prevMove2)
 			}
 		}
 
 		w.Board.UnmakeMove(m)
 		movesSearched++
+
+		if ply == 0 {
+			w.RootMoveNodes[m.From()][m.To()] += w.LocalNodes - startNodes
+		}
 
 		if w.TimeMan.Stopped.Load() {
 			return 0
@@ -617,6 +654,11 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		// Beta Cutoff (Fail-High)
 		if score >= beta {
 			w.TT.Store(w.Board.Hash, m, tt.ScoreToTT(score, ply), depth, tt.LowerBound)
+
+			if !inCheck && score < MateThreshold && score > -MateThreshold {
+				diff := score - staticEval
+				w.History.UpdateCorrHist(us, w.Board.PawnHash, diff, depth)
+			}
 
 			if ply == 0 {
 				bestMove = m
@@ -629,6 +671,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				w.History.UpdateHistory(us, m, depth)
 				w.History.UpdateContHistory(prevMove, m, depth)
 				w.History.UpdateContHistory2(prevMove2, m, depth)
+				w.History.UpdateContHistory4(prevMove4, m, depth)
 				w.History.UpdateCounterMove(prevMove, m)
 
 				// Penalize preceding quiet moves that failed to produce a cutoff
@@ -638,6 +681,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 						w.History.PenalizeHistory(us, prevQuiet, depth)
 						w.History.PenalizeContHistory(prevMove, prevQuiet, depth)
 						w.History.PenalizeContHistory2(prevMove2, prevQuiet, depth)
+						w.History.PenalizeContHistory4(prevMove4, prevQuiet, depth)
 					}
 				}
 			} else if m.IsCapture() {
@@ -648,6 +692,20 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				}
 				w.History.UpdateCaptureHistory(attacker, victim, m.To(), depth)
 			}
+
+			// Penalize preceding captures that failed to produce a cutoff
+			for j := 0; j < movesSearched-1; j++ {
+				prevCap := searchedMoves[j]
+				if prevCap.IsCapture() {
+					att := w.Board.Pieces[prevCap.From()].Type()
+					vic := w.Board.Pieces[prevCap.To()].Type()
+					if prevCap.IsEnPassant() {
+						vic = types.Pawn
+					}
+					w.History.PenalizeCaptureHistory(att, vic, prevCap.To(), depth)
+				}
+			}
+
 			return beta
 		}
 
@@ -675,11 +733,20 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		return 0
 	}
 
+	if !inCheck && alpha < MateThreshold && alpha > -MateThreshold {
+		diff := alpha - staticEval
+		w.History.UpdateCorrHist(us, w.Board.PawnHash, diff, depth)
+	}
+
 	w.TT.Store(w.Board.Hash, bestMove, tt.ScoreToTT(alpha, ply), depth, bestType)
 	return alpha
 }
 
 func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
+	if w.TimeMan.Stopped.Load() {
+		return 0
+	}
+
 	w.LocalNodes++
 	if w.LocalNodes%1024 == 0 {
 		w.Nodes.Add(1024)

@@ -20,7 +20,23 @@ func (ml *MoveList) Slice() []types.Move {
 	return ml.Moves[:ml.Count]
 }
 
+type MoveGenType uint8
+
+const (
+	GenAll MoveGenType = iota
+	GenCaptures
+	GenQuiets
+)
+
 func GenerateMoves(b *board.Board, capturesOnly bool, ml *MoveList) {
+	if capturesOnly {
+		GenerateMovesByType(b, GenCaptures, ml)
+	} else {
+		GenerateMovesByType(b, GenAll, ml)
+	}
+}
+
+func GenerateMovesByType(b *board.Board, genType MoveGenType, ml *MoveList) {
 	ml.Count = 0
 	us := b.SideToMove
 	them := us.Other()
@@ -41,17 +57,19 @@ func GenerateMoves(b *board.Board, capturesOnly bool, ml *MoveList) {
 	// 1. Pawn Moves
 	if us == types.White {
 		// Single pawn push
-		if !capturesOnly {
+		if genType != GenCaptures {
 			singlePush := bitboard.ShiftNorth(pawns) & empty
 			spCopy := singlePush
 			for spCopy != 0 {
 				to := bitboard.PopLSB(&spCopy)
 				from := to - 8
 				if to.Rank() == types.Rank8 {
-					ml.Add(types.MakeMove(from, to, types.FlagQueenPromo))
-					ml.Add(types.MakeMove(from, to, types.FlagRookPromo))
-					ml.Add(types.MakeMove(from, to, types.FlagBishopPromo))
-					ml.Add(types.MakeMove(from, to, types.FlagKnightPromo))
+					if genType != GenQuiets {
+						ml.Add(types.MakeMove(from, to, types.FlagQueenPromo))
+						ml.Add(types.MakeMove(from, to, types.FlagRookPromo))
+						ml.Add(types.MakeMove(from, to, types.FlagBishopPromo))
+						ml.Add(types.MakeMove(from, to, types.FlagKnightPromo))
+					}
 				} else {
 					ml.Add(types.MakeMove(from, to, types.FlagQuiet))
 				}
@@ -66,7 +84,7 @@ func GenerateMoves(b *board.Board, capturesOnly bool, ml *MoveList) {
 				ml.Add(types.MakeMove(from, to, types.FlagDoublePawnPush))
 			}
 		} else {
-			// In capturesOnly, we still want pawn promotions from single push
+			// In GenCaptures, promotions from single push
 			singlePush := (bitboard.ShiftNorth(pawns) & empty) & bitboard.Rank8BB
 			for singlePush != 0 {
 				to := bitboard.PopLSB(&singlePush)
@@ -79,56 +97,60 @@ func GenerateMoves(b *board.Board, capturesOnly bool, ml *MoveList) {
 		}
 
 		// Pawn captures
-		capNorthWest := bitboard.ShiftNorthWest(pawns) & theirPieces
-		for capNorthWest != 0 {
-			to := bitboard.PopLSB(&capNorthWest)
-			from := to - 7
-			if to.Rank() == types.Rank8 {
-				ml.Add(types.MakeMove(from, to, types.FlagQueenPromoCap))
-				ml.Add(types.MakeMove(from, to, types.FlagRookPromoCap))
-				ml.Add(types.MakeMove(from, to, types.FlagBishopPromoCap))
-				ml.Add(types.MakeMove(from, to, types.FlagKnightPromoCap))
-			} else {
-				ml.Add(types.MakeMove(from, to, types.FlagCapture))
+		if genType != GenQuiets {
+			capNorthWest := bitboard.ShiftNorthWest(pawns) & theirPieces
+			for capNorthWest != 0 {
+				to := bitboard.PopLSB(&capNorthWest)
+				from := to - 7
+				if to.Rank() == types.Rank8 {
+					ml.Add(types.MakeMove(from, to, types.FlagQueenPromoCap))
+					ml.Add(types.MakeMove(from, to, types.FlagRookPromoCap))
+					ml.Add(types.MakeMove(from, to, types.FlagBishopPromoCap))
+					ml.Add(types.MakeMove(from, to, types.FlagKnightPromoCap))
+				} else {
+					ml.Add(types.MakeMove(from, to, types.FlagCapture))
+				}
 			}
-		}
 
-		capNorthEast := bitboard.ShiftNorthEast(pawns) & theirPieces
-		for capNorthEast != 0 {
-			to := bitboard.PopLSB(&capNorthEast)
-			from := to - 9
-			if to.Rank() == types.Rank8 {
-				ml.Add(types.MakeMove(from, to, types.FlagQueenPromoCap))
-				ml.Add(types.MakeMove(from, to, types.FlagRookPromoCap))
-				ml.Add(types.MakeMove(from, to, types.FlagBishopPromoCap))
-				ml.Add(types.MakeMove(from, to, types.FlagKnightPromoCap))
-			} else {
-				ml.Add(types.MakeMove(from, to, types.FlagCapture))
+			capNorthEast := bitboard.ShiftNorthEast(pawns) & theirPieces
+			for capNorthEast != 0 {
+				to := bitboard.PopLSB(&capNorthEast)
+				from := to - 9
+				if to.Rank() == types.Rank8 {
+					ml.Add(types.MakeMove(from, to, types.FlagQueenPromoCap))
+					ml.Add(types.MakeMove(from, to, types.FlagRookPromoCap))
+					ml.Add(types.MakeMove(from, to, types.FlagBishopPromoCap))
+					ml.Add(types.MakeMove(from, to, types.FlagKnightPromoCap))
+				} else {
+					ml.Add(types.MakeMove(from, to, types.FlagCapture))
+				}
 			}
-		}
 
-		// En Passant
-		if b.EPSquare < types.SquareNone {
-			epAttacks := bitboard.PawnAttacks(types.Black, b.EPSquare) & pawns
-			for epAttacks != 0 {
-				from := bitboard.PopLSB(&epAttacks)
-				ml.Add(types.MakeMove(from, b.EPSquare, types.FlagEnPassant))
+			// En Passant
+			if b.EPSquare < types.SquareNone {
+				epAttacks := bitboard.PawnAttacks(types.Black, b.EPSquare) & pawns
+				for epAttacks != 0 {
+					from := bitboard.PopLSB(&epAttacks)
+					ml.Add(types.MakeMove(from, b.EPSquare, types.FlagEnPassant))
+				}
 			}
 		}
 	} else {
 		// Black pawns
 		// Single push
-		if !capturesOnly {
+		if genType != GenCaptures {
 			singlePush := bitboard.ShiftSouth(pawns) & empty
 			spCopy := singlePush
 			for spCopy != 0 {
 				to := bitboard.PopLSB(&spCopy)
 				from := to + 8
 				if to.Rank() == types.Rank1 {
-					ml.Add(types.MakeMove(from, to, types.FlagQueenPromo))
-					ml.Add(types.MakeMove(from, to, types.FlagRookPromo))
-					ml.Add(types.MakeMove(from, to, types.FlagBishopPromo))
-					ml.Add(types.MakeMove(from, to, types.FlagKnightPromo))
+					if genType != GenQuiets {
+						ml.Add(types.MakeMove(from, to, types.FlagQueenPromo))
+						ml.Add(types.MakeMove(from, to, types.FlagRookPromo))
+						ml.Add(types.MakeMove(from, to, types.FlagBishopPromo))
+						ml.Add(types.MakeMove(from, to, types.FlagKnightPromo))
+					}
 				} else {
 					ml.Add(types.MakeMove(from, to, types.FlagQuiet))
 				}
@@ -143,7 +165,7 @@ func GenerateMoves(b *board.Board, capturesOnly bool, ml *MoveList) {
 				ml.Add(types.MakeMove(from, to, types.FlagDoublePawnPush))
 			}
 		} else {
-			// In capturesOnly, promotions from single push
+			// In GenCaptures, promotions from single push
 			singlePush := (bitboard.ShiftSouth(pawns) & empty) & bitboard.Rank1BB
 			for singlePush != 0 {
 				to := bitboard.PopLSB(&singlePush)
@@ -156,40 +178,42 @@ func GenerateMoves(b *board.Board, capturesOnly bool, ml *MoveList) {
 		}
 
 		// Pawn captures
-		capSouthWest := bitboard.ShiftSouthWest(pawns) & theirPieces
-		for capSouthWest != 0 {
-			to := bitboard.PopLSB(&capSouthWest)
-			from := to + 9
-			if to.Rank() == types.Rank1 {
-				ml.Add(types.MakeMove(from, to, types.FlagQueenPromoCap))
-				ml.Add(types.MakeMove(from, to, types.FlagRookPromoCap))
-				ml.Add(types.MakeMove(from, to, types.FlagBishopPromoCap))
-				ml.Add(types.MakeMove(from, to, types.FlagKnightPromoCap))
-			} else {
-				ml.Add(types.MakeMove(from, to, types.FlagCapture))
+		if genType != GenQuiets {
+			capSouthWest := bitboard.ShiftSouthWest(pawns) & theirPieces
+			for capSouthWest != 0 {
+				to := bitboard.PopLSB(&capSouthWest)
+				from := to + 9
+				if to.Rank() == types.Rank1 {
+					ml.Add(types.MakeMove(from, to, types.FlagQueenPromoCap))
+					ml.Add(types.MakeMove(from, to, types.FlagRookPromoCap))
+					ml.Add(types.MakeMove(from, to, types.FlagBishopPromoCap))
+					ml.Add(types.MakeMove(from, to, types.FlagKnightPromoCap))
+				} else {
+					ml.Add(types.MakeMove(from, to, types.FlagCapture))
+				}
 			}
-		}
 
-		capSouthEast := bitboard.ShiftSouthEast(pawns) & theirPieces
-		for capSouthEast != 0 {
-			to := bitboard.PopLSB(&capSouthEast)
-			from := to + 7
-			if to.Rank() == types.Rank1 {
-				ml.Add(types.MakeMove(from, to, types.FlagQueenPromoCap))
-				ml.Add(types.MakeMove(from, to, types.FlagRookPromoCap))
-				ml.Add(types.MakeMove(from, to, types.FlagBishopPromoCap))
-				ml.Add(types.MakeMove(from, to, types.FlagKnightPromoCap))
-			} else {
-				ml.Add(types.MakeMove(from, to, types.FlagCapture))
+			capSouthEast := bitboard.ShiftSouthEast(pawns) & theirPieces
+			for capSouthEast != 0 {
+				to := bitboard.PopLSB(&capSouthEast)
+				from := to + 7
+				if to.Rank() == types.Rank1 {
+					ml.Add(types.MakeMove(from, to, types.FlagQueenPromoCap))
+					ml.Add(types.MakeMove(from, to, types.FlagRookPromoCap))
+					ml.Add(types.MakeMove(from, to, types.FlagBishopPromoCap))
+					ml.Add(types.MakeMove(from, to, types.FlagKnightPromoCap))
+				} else {
+					ml.Add(types.MakeMove(from, to, types.FlagCapture))
+				}
 			}
-		}
 
-		// En Passant
-		if b.EPSquare < types.SquareNone {
-			epAttacks := bitboard.PawnAttacks(types.White, b.EPSquare) & pawns
-			for epAttacks != 0 {
-				from := bitboard.PopLSB(&epAttacks)
-				ml.Add(types.MakeMove(from, b.EPSquare, types.FlagEnPassant))
+			// En Passant
+			if b.EPSquare < types.SquareNone {
+				epAttacks := bitboard.PawnAttacks(types.White, b.EPSquare) & pawns
+				for epAttacks != 0 {
+					from := bitboard.PopLSB(&epAttacks)
+					ml.Add(types.MakeMove(from, b.EPSquare, types.FlagEnPassant))
+				}
 			}
 		}
 	}
@@ -198,9 +222,13 @@ func GenerateMoves(b *board.Board, capturesOnly bool, ml *MoveList) {
 	knights := b.PieceBB[knight]
 	for knights != 0 {
 		from := bitboard.PopLSB(&knights)
-		attacks := bitboard.KnightAttacks(from) & ^ourPieces
-		if capturesOnly {
+		attacks := bitboard.KnightAttacks(from)
+		if genType == GenCaptures {
 			attacks &= theirPieces
+		} else if genType == GenQuiets {
+			attacks &= empty
+		} else {
+			attacks &= ^ourPieces
 		}
 		for attacks != 0 {
 			to := bitboard.PopLSB(&attacks)
@@ -216,9 +244,13 @@ func GenerateMoves(b *board.Board, capturesOnly bool, ml *MoveList) {
 	bishops := b.PieceBB[bishop]
 	for bishops != 0 {
 		from := bitboard.PopLSB(&bishops)
-		attacks := bitboard.BishopAttacks(from, allPieces) & ^ourPieces
-		if capturesOnly {
+		attacks := bitboard.BishopAttacks(from, allPieces)
+		if genType == GenCaptures {
 			attacks &= theirPieces
+		} else if genType == GenQuiets {
+			attacks &= empty
+		} else {
+			attacks &= ^ourPieces
 		}
 		for attacks != 0 {
 			to := bitboard.PopLSB(&attacks)
@@ -234,9 +266,13 @@ func GenerateMoves(b *board.Board, capturesOnly bool, ml *MoveList) {
 	rooks := b.PieceBB[rook]
 	for rooks != 0 {
 		from := bitboard.PopLSB(&rooks)
-		attacks := bitboard.RookAttacks(from, allPieces) & ^ourPieces
-		if capturesOnly {
+		attacks := bitboard.RookAttacks(from, allPieces)
+		if genType == GenCaptures {
 			attacks &= theirPieces
+		} else if genType == GenQuiets {
+			attacks &= empty
+		} else {
+			attacks &= ^ourPieces
 		}
 		for attacks != 0 {
 			to := bitboard.PopLSB(&attacks)
@@ -252,9 +288,13 @@ func GenerateMoves(b *board.Board, capturesOnly bool, ml *MoveList) {
 	queens := b.PieceBB[queen]
 	for queens != 0 {
 		from := bitboard.PopLSB(&queens)
-		attacks := bitboard.QueenAttacks(from, allPieces) & ^ourPieces
-		if capturesOnly {
+		attacks := bitboard.QueenAttacks(from, allPieces)
+		if genType == GenCaptures {
 			attacks &= theirPieces
+		} else if genType == GenQuiets {
+			attacks &= empty
+		} else {
+			attacks &= ^ourPieces
 		}
 		for attacks != 0 {
 			to := bitboard.PopLSB(&attacks)
@@ -269,9 +309,13 @@ func GenerateMoves(b *board.Board, capturesOnly bool, ml *MoveList) {
 	// 6. King Moves
 	kingSq := b.KingSquare(us)
 	if kingSq < types.SquareNone {
-		attacks := bitboard.KingAttacks(kingSq) & ^ourPieces
-		if capturesOnly {
+		attacks := bitboard.KingAttacks(kingSq)
+		if genType == GenCaptures {
 			attacks &= theirPieces
+		} else if genType == GenQuiets {
+			attacks &= empty
+		} else {
+			attacks &= ^ourPieces
 		}
 		for attacks != 0 {
 			to := bitboard.PopLSB(&attacks)
@@ -282,8 +326,8 @@ func GenerateMoves(b *board.Board, capturesOnly bool, ml *MoveList) {
 			}
 		}
 
-		// Castling (never captures, only if not capturesOnly and King is NOT in check)
-		if !capturesOnly && !b.IsSquareAttacked(kingSq, them) {
+		// Castling (never captures, only if genType != GenCaptures and King is NOT in check)
+		if genType != GenCaptures && !b.IsSquareAttacked(kingSq, them) {
 			if us == types.White {
 				// White Kingside
 				if b.Castling&types.CastlingWhiteKing != 0 {

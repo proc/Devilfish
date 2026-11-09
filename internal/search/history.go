@@ -12,7 +12,9 @@ type SearchHistory struct {
 	CounterMoves   [64][64]types.Move
 	ContHistory    [64][64]int32
 	ContHistory2   [64][64]int32
+	ContHistory4   [64][64]int32
 	CaptureHistory [7][64][7]int32
+	CorrHist       [2][16384]int16
 }
 
 func NewSearchHistory() *SearchHistory {
@@ -25,7 +27,9 @@ func (h *SearchHistory) Clear() {
 	h.CounterMoves = [64][64]types.Move{}
 	h.ContHistory = [64][64]int32{}
 	h.ContHistory2 = [64][64]int32{}
+	h.ContHistory4 = [64][64]int32{}
 	h.CaptureHistory = [7][64][7]int32{}
+	h.CorrHist = [2][16384]int16{}
 }
 
 func (h *SearchHistory) UpdateKillers(ply int, m types.Move) {
@@ -142,6 +146,81 @@ func (h *SearchHistory) UpdateCaptureHistory(attacker, victim types.PieceType, t
 	}
 	cur := h.CaptureHistory[attacker][to][victim]
 	h.CaptureHistory[attacker][to][victim] = cur + bonus - (cur * bonus / 16384)
+}
+
+func (h *SearchHistory) PenalizeCaptureHistory(attacker, victim types.PieceType, to types.Square, depth int8) {
+	if attacker >= 7 || victim >= 7 || to >= 64 {
+		return
+	}
+	penalty := int32(depth) * int32(depth)
+	if penalty > 16384 {
+		penalty = 16384
+	}
+	cur := h.CaptureHistory[attacker][to][victim]
+	h.CaptureHistory[attacker][to][victim] = cur - penalty - (cur * penalty / 16384)
+}
+
+func (h *SearchHistory) UpdateContHistory4(prevMove4, m types.Move, depth int8) {
+	if prevMove4 == types.MoveNone || m.IsCapture() || m.IsPromotion() {
+		return
+	}
+	bonus := int32(depth) * int32(depth)
+	if bonus > 16384 {
+		bonus = 16384
+	}
+	pTo := prevMove4.To()
+	to := m.To()
+	if pTo < 64 && to < 64 {
+		cur := h.ContHistory4[pTo][to]
+		h.ContHistory4[pTo][to] = cur + bonus - (cur * bonus / 16384)
+	}
+}
+
+func (h *SearchHistory) PenalizeContHistory4(prevMove4, m types.Move, depth int8) {
+	if prevMove4 == types.MoveNone || m.IsCapture() || m.IsPromotion() {
+		return
+	}
+	penalty := int32(depth) * int32(depth)
+	if penalty > 16384 {
+		penalty = 16384
+	}
+	pTo := prevMove4.To()
+	to := m.To()
+	if pTo < 64 && to < 64 {
+		cur := h.ContHistory4[pTo][to]
+		h.ContHistory4[pTo][to] = cur - penalty - (cur * penalty / 16384)
+	}
+}
+
+func (h *SearchHistory) GetCorrection(side types.Color, pawnHash uint64) int32 {
+	if side >= 2 {
+		return 0
+	}
+	return int32(h.CorrHist[side][pawnHash%16384]) / 128
+}
+
+func (h *SearchHistory) UpdateCorrHist(side types.Color, pawnHash uint64, diff int32, depth int8) {
+	if side >= 2 {
+		return
+	}
+	if diff > 1024 {
+		diff = 1024
+	} else if diff < -1024 {
+		diff = -1024
+	}
+	weight := int32(depth) * int32(depth)
+	if weight > 128 {
+		weight = 128
+	}
+	idx := pawnHash % 16384
+	cur := int32(h.CorrHist[side][idx])
+	newVal := cur + (diff*128*weight-cur*weight)/256
+	if newVal > 16384 {
+		newVal = 16384
+	} else if newVal < -16384 {
+		newVal = -16384
+	}
+	h.CorrHist[side][idx] = int16(newVal)
 }
 
 func (h *SearchHistory) UpdateCounterMove(prevMove, m types.Move) {

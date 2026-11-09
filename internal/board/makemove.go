@@ -46,6 +46,7 @@ func (b *Board) MakeMove(m types.Move) bool {
 		EPSquare:      b.EPSquare,
 		HalfmoveClock: b.HalfmoveClock,
 		Hash:          b.Hash,
+		PawnHash:      b.PawnHash,
 	}
 	b.UndoStack = append(b.UndoStack, undo)
 
@@ -192,6 +193,7 @@ func (b *Board) UnmakeMove(m types.Move) {
 	b.EPSquare = undo.EPSquare
 	b.HalfmoveClock = undo.HalfmoveClock
 	b.Hash = undo.Hash
+	b.PawnHash = undo.PawnHash
 }
 
 func (b *Board) MakeNullMove() {
@@ -202,6 +204,7 @@ func (b *Board) MakeNullMove() {
 		EPSquare:      b.EPSquare,
 		HalfmoveClock: b.HalfmoveClock,
 		Hash:          b.Hash,
+		PawnHash:      b.PawnHash,
 	}
 	b.UndoStack = append(b.UndoStack, undo)
 
@@ -224,4 +227,5 @@ func (b *Board) UnmakeNullMove() {
 	b.EPSquare = undo.EPSquare
 	b.HalfmoveClock = undo.HalfmoveClock
 	b.Hash = undo.Hash
+	b.PawnHash = undo.PawnHash
 }

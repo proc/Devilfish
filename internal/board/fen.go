@@ -128,6 +128,7 @@ func ParseFEN(fen string) (*Board, error) {
 	}
 
 	b.Hash = b.CalculateHash()
+	b.PawnHash = b.CalculatePawnHash()
 	return b, nil
 }
 
