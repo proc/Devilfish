@@ -81,15 +81,24 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 		maxTimeMs = (myTime / 8) + myInc
 	}
 
-	// Safety margins
-	if optTimeMs < 10 {
-		optTimeMs = 10
+	// Safety margins & Move Overhead
+	moveOverhead := int64(25) // 25ms buffer for GUI / pipe latency
+	if myTime > moveOverhead*2 {
+		if maxTimeMs > myTime-moveOverhead {
+			maxTimeMs = myTime - moveOverhead
+		}
+	} else {
+		maxTimeMs = myTime / 2
+		if maxTimeMs < 5 {
+			maxTimeMs = 5
+		}
 	}
-	if maxTimeMs > myTime*8/10 {
-		maxTimeMs = myTime * 8 / 10
+
+	if optTimeMs > maxTimeMs {
+		optTimeMs = maxTimeMs
 	}
-	if maxTimeMs < optTimeMs {
-		maxTimeMs = optTimeMs
+	if optTimeMs < 5 {
+		optTimeMs = 5
 	}
 
 	tm.OptTime = time.Duration(optTimeMs) * time.Millisecond

@@ -2,6 +2,7 @@ package search
 
 import (
 	"devilfish/internal/board"
+	"devilfish/internal/eval"
 	"devilfish/internal/movegen"
 	"devilfish/internal/types"
 )
@@ -16,6 +17,17 @@ var PieceMVV = [7]int32{
 	6, // King
 }
 
+const (
+	ScoreTTMove         int32 = 2_000_000_000
+	ScoreQueenPromotion int32 = 120_000_000
+	ScoreGoodCapture    int32 = 100_000_000
+	ScoreKiller1        int32 = 50_000_000
+	ScoreKiller2        int32 = 45_000_000
+	ScoreCounterMove    int32 = 40_000_000
+	ScoreQuietCheck     int32 = 30_000_000
+	ScoreBadCapture     int32 = -50_000_000
+)
+
 func ScoreMoves(
 	b *board.Board,
 	ml *movegen.MoveList,
@@ -23,6 +35,7 @@ func ScoreMoves(
 	ttMove types.Move,
 	ply int,
 	prevMove types.Move,
+	prevMove2 types.Move,
 	history *SearchHistory,
 ) {
 	side := b.SideToMove
@@ -41,12 +54,18 @@ func ScoreMoves(
 
 		// 1. TT Move
 		if m == ttMove {
-			scores[i] = 2000000000
+			scores[i] = ScoreTTMove
 			continue
 		}
 
-		// 2. Captures and Promotions
-		if m.IsCapture() || m.IsPromotion() {
+		// 2. Queen Promotion (capture or quiet)
+		if m.IsPromotion() && m.PromotionType() == types.Queen {
+			scores[i] = ScoreQueenPromotion + eval.SEE(b, m)
+			continue
+		}
+
+		// 3. Captures
+		if m.IsCapture() {
 			attacker := b.Pieces[m.From()].Type()
 			victim := b.Pieces[m.To()].Type()
 			if m.IsEnPassant() {
@@ -57,32 +76,55 @@ func ScoreMoves(
 			if attacker < 7 && victim < 7 && m.To() < 64 {
 				capHist = history.CaptureHistory[attacker][m.To()][victim]
 			}
-			scores[i] = 10000000 + mvvLva*1000 + capHist
+
+			seeScore := eval.SEE(b, m)
+			if seeScore >= 0 {
+				// Winning or equal capture
+				scores[i] = ScoreGoodCapture + seeScore*100 + mvvLva*10 + capHist
+			} else {
+				// Losing capture: demote below quiet moves
+				scores[i] = ScoreBadCapture + seeScore*100 + mvvLva*10 + capHist
+			}
 			continue
 		}
 
-		// 3. Killer Moves
+		// 4. Minor promotions (Knight/Rook/Bishop) without Queen
+		if m.IsPromotion() {
+			scores[i] = ScoreBadCapture + eval.SEE(b, m)
+			continue
+		}
+
+		// 5. Killer Moves
 		if m == killer1 {
-			scores[i] = 9000000
+			scores[i] = ScoreKiller1
 			continue
 		}
 		if m == killer2 {
-			scores[i] = 8000000
+			scores[i] = ScoreKiller2
 			continue
 		}
 
-		// 4. Countermove Heuristic
+		// 6. Countermove Heuristic
 		if m == counterMove {
-			scores[i] = 7000000
+			scores[i] = ScoreCounterMove
 			continue
 		}
 
-		// 5. History Heuristic + Continuation History
+		// 7. Quiet Moves: History + 1-ply & 2-ply Continuation History
 		histScore := history.HistoryTable[side][m.From()][m.To()]
 		if prevMove != types.MoveNone && prevMove.To() < 64 && m.To() < 64 {
 			histScore += history.ContHistory[prevMove.To()][m.To()]
 		}
-		scores[i] = histScore
+		if prevMove2 != types.MoveNone && prevMove2.To() < 64 && m.To() < 64 {
+			histScore += history.ContHistory2[prevMove2.To()][m.To()]
+		}
+
+		// Quiet checks priority: boost check-giving moves above ordinary quiet moves
+		if b.GivesCheck(m) {
+			scores[i] = ScoreQuietCheck + histScore/10
+		} else {
+			scores[i] = histScore
+		}
 	}
 }
 

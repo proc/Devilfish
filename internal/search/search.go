@@ -69,15 +69,15 @@ func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *a
 	return w
 }
 
-func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode bool, canMultiCut bool, excludedMove types.Move, prevMove types.Move) int32 {
+func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode bool, canMultiCut bool, excludedMove types.Move, prevMove types.Move, prevMove2 types.Move) int32 {
 	if ply == 0 {
 		nnue.Refresh(w.Board, &w.Accumulators[0])
 	}
 
 	// Periodically check search time/limits
 	w.LocalNodes++
-	if w.LocalNodes%2048 == 0 {
-		w.Nodes.Add(2048)
+	if w.LocalNodes%1024 == 0 {
+		w.Nodes.Add(1024)
 		if w.TimeMan.CheckLimits() {
 			return 0
 		}
@@ -209,7 +209,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			w.Accumulators[ply+1] = w.Accumulators[ply]
 		}
 		w.Board.MakeNullMove()
-		nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, false, types.MoveNone, types.MoveNone)
+		nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, false, types.MoveNone, types.MoveNone, types.MoveNone)
 		w.Board.UnmakeNullMove()
 
 		if w.TimeMan.Stopped.Load() {
@@ -239,7 +239,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			sDepth = 1
 		}
 
-		sScore := w.Search(sDepth, singularBeta-1, singularBeta, ply, false, false, ttMove, prevMove)
+		sScore := w.Search(sDepth, singularBeta-1, singularBeta, ply, false, false, ttMove, prevMove, prevMove2)
 
 		if w.TimeMan.Stopped.Load() {
 			return 0
@@ -271,7 +271,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			legalMoves++
 			searchedMoves[movesSearched] = ttMove
 
-			score := -w.Search(depth-1+extension, -beta, -alpha, ply+1, isPVNode, true, types.MoveNone, ttMove)
+			score := -w.Search(depth-1+extension, -beta, -alpha, ply+1, isPVNode, true, types.MoveNone, ttMove, prevMove)
 			w.Board.UnmakeMove(ttMove)
 			movesSearched++
 
@@ -331,7 +331,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		movegen.GenerateMoves(w.Board, true, &probList)
 
 		var probScores [256]int32
-		ScoreMoves(w.Board, &probList, probScores[:probList.Count], ttMove, ply, prevMove, w.History)
+		ScoreMoves(w.Board, &probList, probScores[:probList.Count], ttMove, ply, prevMove, prevMove2, w.History)
 
 		for i := 0; i < probList.Count; i++ {
 			m := PickNextMove(&probList, probScores[:probList.Count], i)
@@ -345,7 +345,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				continue
 			}
 
-			probScore := -w.Search(probDepth, -probBeta, -probBeta+1, ply+1, false, false, types.MoveNone, m)
+			probScore := -w.Search(probDepth, -probBeta, -probBeta+1, ply+1, false, false, types.MoveNone, m, prevMove)
 			w.Board.UnmakeMove(m)
 
 			if w.TimeMan.Stopped.Load() {
@@ -367,7 +367,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		movegen.GenerateMoves(w.Board, false, &mcList)
 
 		var mcScores [256]int32
-		ScoreMoves(w.Board, &mcList, mcScores[:mcList.Count], ttMove, ply, prevMove, w.History)
+		ScoreMoves(w.Board, &mcList, mcScores[:mcList.Count], ttMove, ply, prevMove, prevMove2, w.History)
 
 		c := 8
 		if mcList.Count < c {
@@ -390,7 +390,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				continue
 			}
 
-			mcScore := -w.Search(mcDepth, -beta, -beta+1, ply+1, false, false, types.MoveNone, m)
+			mcScore := -w.Search(mcDepth, -beta, -beta+1, ply+1, false, false, types.MoveNone, m, prevMove)
 			w.Board.UnmakeMove(m)
 
 			if w.TimeMan.Stopped.Load() {
@@ -412,7 +412,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	movegen.GenerateMoves(w.Board, false, &ml)
 
 	var scores [256]int32
-	ScoreMoves(w.Board, &ml, scores[:ml.Count], types.MoveNone, ply, prevMove, w.History)
+	ScoreMoves(w.Board, &ml, scores[:ml.Count], types.MoveNone, ply, prevMove, prevMove2, w.History)
 
 	var killer1, killer2, counterMove types.Move
 	if ply < MaxPly {
@@ -461,6 +461,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			if prevMove != types.MoveNone && prevMove.To() < 64 && m.To() < 64 {
 				histScore += w.History.ContHistory[prevMove.To()][m.To()]
 			}
+			if prevMove2 != types.MoveNone && prevMove2.To() < 64 && m.To() < 64 {
+				histScore += w.History.ContHistory2[prevMove2.To()][m.To()]
+			}
 			histMargin := -int32(depth) * 512
 			if !improving {
 				histMargin = -int32(depth) * 256
@@ -496,7 +499,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		// Principal Variation Search & LMR
 		if movesSearched == 0 {
 			// First move: full window (extended if singular)
-			score = -w.Search(depth-1+extension, -beta, -alpha, ply+1, isPVNode, true, types.MoveNone, m)
+			score = -w.Search(depth-1+extension, -beta, -alpha, ply+1, isPVNode, true, types.MoveNone, m, prevMove)
 		} else {
 			// Late Move Reductions (LMR)
 			reduction := int8(0)
@@ -534,6 +537,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					hist := w.History.HistoryTable[us][m.From()][m.To()]
 					if prevMove != types.MoveNone && prevMove.To() < 64 && m.To() < 64 {
 						hist += w.History.ContHistory[prevMove.To()][m.To()]
+					}
+					if prevMove2 != types.MoveNone && prevMove2.To() < 64 && m.To() < 64 {
+						hist += w.History.ContHistory2[prevMove2.To()][m.To()]
 					}
 					if hist > 4000 {
 						reduction--
@@ -588,16 +594,16 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			}
 
 			// Null-window search with reduction
-			score = -w.Search(depth-1-reduction, -alpha-1, -alpha, ply+1, false, false, types.MoveNone, m)
+			score = -w.Search(depth-1-reduction, -alpha-1, -alpha, ply+1, false, false, types.MoveNone, m, prevMove)
 
 			// If reduced search fails high, re-search at full depth with null window
 			if reduction > 0 && score > alpha {
-				score = -w.Search(depth-1, -alpha-1, -alpha, ply+1, false, true, types.MoveNone, m)
+				score = -w.Search(depth-1, -alpha-1, -alpha, ply+1, false, true, types.MoveNone, m, prevMove)
 			}
 
 			// If null-window fails high and in PV node, re-search with full PV window
 			if isPVNode && score > alpha && score < beta {
-				score = -w.Search(depth-1, -beta, -alpha, ply+1, true, true, types.MoveNone, m)
+				score = -w.Search(depth-1, -beta, -alpha, ply+1, true, true, types.MoveNone, m, prevMove)
 			}
 		}
 
@@ -622,6 +628,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				w.History.UpdateKillers(ply, m)
 				w.History.UpdateHistory(us, m, depth)
 				w.History.UpdateContHistory(prevMove, m, depth)
+				w.History.UpdateContHistory2(prevMove2, m, depth)
 				w.History.UpdateCounterMove(prevMove, m)
 
 				// Penalize preceding quiet moves that failed to produce a cutoff
@@ -630,6 +637,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					if !prevQuiet.IsCapture() && !prevQuiet.IsPromotion() {
 						w.History.PenalizeHistory(us, prevQuiet, depth)
 						w.History.PenalizeContHistory(prevMove, prevQuiet, depth)
+						w.History.PenalizeContHistory2(prevMove2, prevQuiet, depth)
 					}
 				}
 			} else if m.IsCapture() {
@@ -673,8 +681,8 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 	w.LocalNodes++
-	if w.LocalNodes%2048 == 0 {
-		w.Nodes.Add(2048)
+	if w.LocalNodes%1024 == 0 {
+		w.Nodes.Add(1024)
 		if w.TimeMan.CheckLimits() {
 			return 0
 		}
@@ -716,13 +724,21 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 	var scores [256]int32
 	for i := 0; i < ml.Count; i++ {
 		m := ml.Moves[i]
+		if m.IsPromotion() && m.PromotionType() == types.Queen {
+			scores[i] = 100000 + eval.SEE(w.Board, m)
+			continue
+		}
 		if m.IsCapture() || m.IsPromotion() {
 			attacker := w.Board.Pieces[m.From()].Type()
 			victim := w.Board.Pieces[m.To()].Type()
 			if m.IsEnPassant() {
 				victim = types.Pawn
 			}
-			scores[i] = PieceMVV[victim]*10 - PieceMVV[attacker]
+			capHist := int32(0)
+			if attacker < 7 && victim < 7 && m.To() < 64 {
+				capHist = w.History.CaptureHistory[attacker][m.To()][victim]
+			}
+			scores[i] = PieceMVV[victim]*1000 - PieceMVV[attacker]*100 + capHist/10
 		}
 	}
 

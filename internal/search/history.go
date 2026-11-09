@@ -11,6 +11,7 @@ type SearchHistory struct {
 	HistoryTable   [2][64][64]int32
 	CounterMoves   [64][64]types.Move
 	ContHistory    [64][64]int32
+	ContHistory2   [64][64]int32
 	CaptureHistory [7][64][7]int32
 }
 
@@ -23,6 +24,7 @@ func (h *SearchHistory) Clear() {
 	h.HistoryTable = [2][64][64]int32{}
 	h.CounterMoves = [64][64]types.Move{}
 	h.ContHistory = [64][64]int32{}
+	h.ContHistory2 = [64][64]int32{}
 	h.CaptureHistory = [7][64][7]int32{}
 }
 
@@ -95,6 +97,38 @@ func (h *SearchHistory) PenalizeContHistory(prevMove, m types.Move, depth int8) 
 	if pTo < 64 && to < 64 {
 		cur := h.ContHistory[pTo][to]
 		h.ContHistory[pTo][to] = cur - penalty - (cur * penalty / 16384)
+	}
+}
+
+func (h *SearchHistory) UpdateContHistory2(prevMove2, m types.Move, depth int8) {
+	if prevMove2 == types.MoveNone || m.IsCapture() || m.IsPromotion() {
+		return
+	}
+	bonus := int32(depth) * int32(depth)
+	if bonus > 16384 {
+		bonus = 16384
+	}
+	pTo := prevMove2.To()
+	to := m.To()
+	if pTo < 64 && to < 64 {
+		cur := h.ContHistory2[pTo][to]
+		h.ContHistory2[pTo][to] = cur + bonus - (cur * bonus / 16384)
+	}
+}
+
+func (h *SearchHistory) PenalizeContHistory2(prevMove2, m types.Move, depth int8) {
+	if prevMove2 == types.MoveNone || m.IsCapture() || m.IsPromotion() {
+		return
+	}
+	penalty := int32(depth) * int32(depth)
+	if penalty > 16384 {
+		penalty = 16384
+	}
+	pTo := prevMove2.To()
+	to := m.To()
+	if pTo < 64 && to < 64 {
+		cur := h.ContHistory2[pTo][to]
+		h.ContHistory2[pTo][to] = cur - penalty - (cur * penalty / 16384)
 	}
 }
 

@@ -27,20 +27,21 @@ const (
 )
 
 type UCI struct {
-	board          *board.Board
-	engine         *search.Engine
-	searching      atomic.Bool
-	isPonder       atomic.Bool
-	isAutoPonder   atomic.Bool
-	autoPonderHash atomic.Uint64
-	guiStop        atomic.Bool
-	abortSearch    atomic.Bool
-	bestMoveSent   atomic.Bool
-	ponderEnabled  bool
-	evalFile       string
-	outMu          sync.Mutex
-	in             *bufio.Reader
-	out            io.Writer
+	board             *board.Board
+	engine            *search.Engine
+	searching         atomic.Bool
+	isPonder          atomic.Bool
+	isAutoPonder      atomic.Bool
+	autoPonderCancel  atomic.Bool
+	autoPonderHash    atomic.Uint64
+	guiStop           atomic.Bool
+	abortSearch       atomic.Bool
+	bestMoveSent      atomic.Bool
+	ponderEnabled     bool
+	evalFile          string
+	outMu             sync.Mutex
+	in                *bufio.Reader
+	out               io.Writer
 }
 
 func New(in io.Reader, out io.Writer, cfg config.Config) *UCI {
@@ -210,9 +211,11 @@ func (u *UCI) stopSearch(requestedByGUI bool) {
 		u.guiStop.Store(true)
 	}
 	u.abortSearch.Store(true)
+	u.autoPonderCancel.Store(true)
 	u.engine.Stop()
 
-	for u.searching.Load() {
+	// Wait up to 50ms for official search or auto-ponder to stop cleanly without blocking the UCI loop indefinitely
+	for i := 0; i < 50 && (u.searching.Load() || u.isAutoPonder.Load()); i++ {
 		time.Sleep(1 * time.Millisecond)
 	}
 
@@ -277,6 +280,7 @@ func (u *UCI) cmdGo(args []string) {
 	u.engine.Stopped.Store(false)
 	u.guiStop.Store(false)
 	u.abortSearch.Store(false)
+	u.autoPonderCancel.Store(false)
 	u.bestMoveSent.Store(false)
 
 	var limits search.SearchLimits
@@ -349,8 +353,6 @@ func (u *UCI) cmdGo(args []string) {
 		defer func() {
 			u.searching.Store(false)
 			u.isPonder.Store(false)
-			u.isAutoPonder.Store(false)
-			u.autoPonderHash.Store(0)
 		}()
 
 		infoCallback := func(info search.SearchInfo) {
@@ -384,7 +386,7 @@ func (u *UCI) cmdGo(args []string) {
 			return
 		}
 
-		// Normal search completed
+		// Normal search completed: emit bestmove to GUI
 		u.bestMoveSent.Store(true)
 		if ponderMove != types.MoveNone {
 			u.sendLine(fmt.Sprintf("bestmove %s ponder %s", bestMove, ponderMove))
@@ -392,66 +394,56 @@ func (u *UCI) cmdGo(args []string) {
 			u.sendLine(fmt.Sprintf("bestmove %s", bestMove))
 		}
 
-		// Background calculation (auto-ponder):
-		// Check if we were told to stop or abort before starting auto-ponder
-		if u.abortSearch.Load() || u.guiStop.Load() || !u.ponderEnabled || bestMove == types.MoveNone {
-			return
-		}
+		// Mark GUI search complete immediately so Loop is never blocked
+		u.searching.Store(false)
 
-		opponentMove := ponderMove
-		if opponentMove == types.MoveNone {
-			tempB := currentBoard.Clone()
-			if tempB.MakeMove(bestMove) {
-				if ttM, _, _, _, found := u.engine.TT.Probe(tempB.Hash); found && ttM != types.MoveNone && isLegal(tempB, ttM) {
-					opponentMove = ttM
-				}
-			}
-		}
-
-		if opponentMove == types.MoveNone {
-			return
-		}
-
-		// Apply both moves: engine's move and predicted opponent move
-		hypoBoard := currentBoard.Clone()
-		if !hypoBoard.MakeMove(bestMove) || !hypoBoard.MakeMove(opponentMove) {
-			return
-		}
-
-		if u.abortSearch.Load() || u.guiStop.Load() {
-			return
-		}
-
-		u.engine.Stopped.Store(false)
-		u.isAutoPonder.Store(true)
-		u.autoPonderHash.Store(hypoBoard.Hash)
-
-		autoLimits := search.SearchLimits{Infinite: true, Ponder: true}
-		// Silent infoCallback during auto-ponder so GUI is not sent out-of-turn PV lines!
-		nextBest, nextPonder := u.engine.Search(hypoBoard, autoLimits, nil)
-
-		u.isAutoPonder.Store(false)
-		u.autoPonderHash.Store(0)
-
-		// If GUI sent "stop" during auto-ponder, Cutechess called stopThinking() and is waiting for bestmove!
-		if u.guiStop.Load() && !u.bestMoveSent.Load() {
-			u.bestMoveSent.Store(true)
-			if nextBest != types.MoveNone {
-				if nextPonder != types.MoveNone {
-					u.sendLine(fmt.Sprintf("bestmove %s ponder %s", nextBest, nextPonder))
-				} else {
-					u.sendLine(fmt.Sprintf("bestmove %s", nextBest))
-				}
-			} else {
-				legals := movegen.GenerateLegalMoves(hypoBoard)
-				if len(legals) > 0 {
-					u.sendLine(fmt.Sprintf("bestmove %s", legals[0]))
-				} else {
-					u.sendLine("bestmove 0000")
-				}
-			}
+		// Speculative background calculation (auto-ponder):
+		// Runs in a detached goroutine while waiting for opponent move
+		if u.ponderEnabled && bestMove != types.MoveNone && !u.abortSearch.Load() && !u.guiStop.Load() && !u.autoPonderCancel.Load() {
+			go u.startAutoPonder(currentBoard, bestMove, ponderMove)
 		}
 	}()
+}
+
+func (u *UCI) startAutoPonder(currentBoard *board.Board, bestMove, ponderMove types.Move) {
+	if !u.ponderEnabled || bestMove == types.MoveNone || u.abortSearch.Load() || u.guiStop.Load() || u.autoPonderCancel.Load() {
+		return
+	}
+
+	opponentMove := ponderMove
+	if opponentMove == types.MoveNone {
+		tempB := currentBoard.Clone()
+		if tempB.MakeMove(bestMove) {
+			if ttM, _, _, _, found := u.engine.TT.Probe(tempB.Hash); found && ttM != types.MoveNone && isLegal(tempB, ttM) {
+				opponentMove = ttM
+			}
+		}
+	}
+
+	if opponentMove == types.MoveNone {
+		return
+	}
+
+	// Apply both moves: engine's move and predicted opponent move
+	hypoBoard := currentBoard.Clone()
+	if !hypoBoard.MakeMove(bestMove) || !hypoBoard.MakeMove(opponentMove) {
+		return
+	}
+
+	if u.abortSearch.Load() || u.guiStop.Load() || u.autoPonderCancel.Load() {
+		return
+	}
+
+	u.isAutoPonder.Store(true)
+	u.autoPonderHash.Store(hypoBoard.Hash)
+	defer func() {
+		u.isAutoPonder.Store(false)
+		u.autoPonderHash.Store(0)
+	}()
+
+	autoLimits := search.SearchLimits{Infinite: true, Ponder: true}
+	// Silent background search: pre-warms Transposition Table
+	u.engine.Search(hypoBoard, autoLimits, nil)
 }
 
 func (u *UCI) cmdPonderHit() {

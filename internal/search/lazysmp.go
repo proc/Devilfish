@@ -104,7 +104,7 @@ func (e *Engine) Search(
 				if e.Stopped.Load() {
 					break
 				}
-				helper.Search(d, -Infinity, Infinity, 0, false, true, types.MoveNone, types.MoveNone)
+				helper.Search(d, -Infinity, Infinity, 0, false, true, types.MoveNone, types.MoveNone, types.MoveNone)
 			}
 		}(id)
 	}
@@ -122,7 +122,7 @@ func (e *Engine) Search(
 
 		var score int32
 		if depth < 4 {
-			score = master.Search(depth, -Infinity, Infinity, 0, true, true, types.MoveNone, types.MoveNone)
+			score = master.Search(depth, -Infinity, Infinity, 0, true, true, types.MoveNone, types.MoveNone, types.MoveNone)
 		} else {
 			// Aspiration Windows
 			delta := int32(30)
@@ -137,7 +137,7 @@ func (e *Engine) Search(
 					beta = Infinity
 				}
 
-				score = master.Search(depth, alpha, beta, 0, true, true, types.MoveNone, types.MoveNone)
+				score = master.Search(depth, alpha, beta, 0, true, true, types.MoveNone, types.MoveNone, types.MoveNone)
 
 				if e.Stopped.Load() {
 					break
