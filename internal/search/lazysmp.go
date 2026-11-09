@@ -70,7 +70,9 @@ func (e *Engine) Search(
 	limits SearchLimits,
 	infoCallback func(SearchInfo),
 ) (types.Move, types.Move) {
-	e.Stopped.Store(false)
+	if e.Stopped.Load() {
+		return types.MoveNone, types.MoveNone
+	}
 	e.Nodes.Store(0)
 	e.TT.IncrementAge()
 
@@ -221,7 +223,9 @@ func (e *Engine) Search(
 
 		// Check if we found checkmate
 		if isMate && mateIn > 0 && mateIn <= int(depth)/2 {
-			break
+			if !tm.Ponder.Load() {
+				break
+			}
 		}
 
 		// Dynamic Time Management: Best move stability & fail-low recovery

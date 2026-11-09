@@ -23,21 +23,15 @@ func TestAutoPondering(t *testing.T) {
 	// Give the initial search time to complete and begin auto-pondering
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		u.searchMu.Lock()
-		isAuto := u.isAutoPonder
-		u.searchMu.Unlock()
-		if isAuto {
+		if u.isAutoPonder.Load() {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	u.searchMu.Lock()
-	if !u.isAutoPonder {
-		u.searchMu.Unlock()
+	if !u.isAutoPonder.Load() {
 		t.Fatalf("expected engine to be auto-pondering after making its move, but it was not. Output:\n%s", out.String())
 	}
-	u.searchMu.Unlock()
 
 	// Output should contain "bestmove" and "ponder"
 	output := out.String()
@@ -48,12 +42,8 @@ func TestAutoPondering(t *testing.T) {
 	// Verify cmdStop stops the auto-ponder search
 	u.cmdStop()
 
-	u.searchMu.Lock()
-	if u.searching || u.isAutoPonder {
-		u.searchMu.Unlock()
+	if u.searching.Load() || u.isAutoPonder.Load() {
 		t.Errorf("expected searching and isAutoPonder to be false after cmdStop")
-	} else {
-		u.searchMu.Unlock()
 	}
 }
 
@@ -71,19 +61,13 @@ func TestAutoPonderPositionMatch(t *testing.T) {
 	// Wait for auto-ponder to kick in
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		u.searchMu.Lock()
-		isAuto := u.isAutoPonder
-		u.searchMu.Unlock()
-		if isAuto {
+		if u.isAutoPonder.Load() {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	u.searchMu.Lock()
-	autoHash := u.autoPonderHash
-	u.searchMu.Unlock()
-
+	autoHash := u.autoPonderHash.Load()
 	if autoHash == 0 {
 		t.Fatalf("expected non-zero autoPonderHash")
 	}
@@ -92,12 +76,8 @@ func TestAutoPonderPositionMatch(t *testing.T) {
 	u.cmdPosition([]string{"startpos", "moves", "e2e4", "c7c5"})
 
 	// Should have stopped because c7c5 doesn't match autoPonderHash
-	u.searchMu.Lock()
-	if u.isAutoPonder {
-		u.searchMu.Unlock()
+	if u.isAutoPonder.Load() {
 		t.Errorf("expected auto-ponder to stop on non-matching position")
-	} else {
-		u.searchMu.Unlock()
 	}
 }
 
@@ -115,10 +95,7 @@ func TestAutoPonderPonderHit(t *testing.T) {
 	// Wait for auto-ponder to kick in
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		u.searchMu.Lock()
-		isAuto := u.isAutoPonder
-		u.searchMu.Unlock()
-		if isAuto {
+		if u.isAutoPonder.Load() {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)

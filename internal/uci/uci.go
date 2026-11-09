@@ -29,13 +29,16 @@ const (
 type UCI struct {
 	board          *board.Board
 	engine         *search.Engine
-	searching      bool
-	isAutoPonder   bool
-	autoPonderHash uint64
+	searching      atomic.Bool
+	isPonder       atomic.Bool
+	isAutoPonder   atomic.Bool
+	autoPonderHash atomic.Uint64
+	guiStop        atomic.Bool
+	abortSearch    atomic.Bool
+	bestMoveSent   atomic.Bool
 	ponderEnabled  bool
 	evalFile       string
-	manualStop     atomic.Bool
-	searchMu       sync.Mutex
+	outMu          sync.Mutex
 	in             *bufio.Reader
 	out            io.Writer
 }
@@ -64,6 +67,12 @@ func New(in io.Reader, out io.Writer, cfg config.Config) *UCI {
 	}
 }
 
+func (u *UCI) sendLine(line string) {
+	u.outMu.Lock()
+	defer u.outMu.Unlock()
+	fmt.Fprintln(u.out, line)
+}
+
 func (u *UCI) Loop() {
 	for {
 		line, err := u.in.ReadString('\n')
@@ -83,6 +92,12 @@ func (u *UCI) Loop() {
 			u.cmdUCI()
 		case "isready":
 			u.cmdIsReady()
+		case "ping":
+			if len(parts) > 1 {
+				u.sendLine(fmt.Sprintf("pong %s", parts[1]))
+			} else {
+				u.sendLine("pong")
+			}
 		case "setoption":
 			u.cmdSetOption(parts[1:])
 		case "ucinewgame":
@@ -96,7 +111,7 @@ func (u *UCI) Loop() {
 		case "ponderhit":
 			u.cmdPonderHit()
 		case "quit":
-			u.cmdStop()
+			u.stopSearch(false)
 			return
 		case "perft":
 			u.cmdPerft(parts[1:])
@@ -113,22 +128,22 @@ func (u *UCI) Loop() {
 }
 
 func (u *UCI) cmdUCI() {
-	fmt.Fprintf(u.out, "id name %s %s\n", EngineName, EngineVersion)
-	fmt.Fprintf(u.out, "id author %s\n", EngineAuthor)
-	fmt.Fprintf(u.out, "option name Hash type spin default %d min 1 max 65536\n", u.engine.TT.SizeMB())
-	fmt.Fprintf(u.out, "option name Threads type spin default %d min 1 max 512\n", u.engine.NumThreads)
-	fmt.Fprintf(u.out, "option name Ponder type check default %t\n", u.ponderEnabled)
-	fmt.Fprintf(u.out, "option name UseNNUE type check default %t\n", nnue.Enabled)
+	u.sendLine(fmt.Sprintf("id name %s %s", EngineName, EngineVersion))
+	u.sendLine(fmt.Sprintf("id author %s", EngineAuthor))
+	u.sendLine(fmt.Sprintf("option name Hash type spin default %d min 1 max 65536", u.engine.TT.SizeMB()))
+	u.sendLine(fmt.Sprintf("option name Threads type spin default %d min 1 max 512", u.engine.NumThreads))
+	u.sendLine(fmt.Sprintf("option name Ponder type check default %t", u.ponderEnabled))
+	u.sendLine(fmt.Sprintf("option name UseNNUE type check default %t", nnue.Enabled))
 	evalFile := u.evalFile
 	if evalFile == "" {
 		evalFile = "<embedded>"
 	}
-	fmt.Fprintf(u.out, "option name EvalFile type string default %s\n", evalFile)
-	fmt.Fprintf(u.out, "uciok\n")
+	u.sendLine(fmt.Sprintf("option name EvalFile type string default %s", evalFile))
+	u.sendLine("uciok")
 }
 
 func (u *UCI) cmdIsReady() {
-	fmt.Fprintf(u.out, "readyok\n")
+	u.sendLine("readyok")
 }
 
 func (u *UCI) cmdSetOption(args []string) {
@@ -154,7 +169,7 @@ func (u *UCI) cmdSetOption(args []string) {
 						u.ponderEnabled = true
 					} else if valLower == "false" || valLower == "0" {
 						u.ponderEnabled = false
-						u.cmdStop()
+						u.stopSearch(false)
 					}
 				case "usennue":
 					valLower := strings.ToLower(valStr)
@@ -167,15 +182,15 @@ func (u *UCI) cmdSetOption(args []string) {
 					if valStr != "" && valStr != "<embedded>" {
 						err := nnue.LoadFile(valStr)
 						if err != nil {
-							fmt.Fprintf(u.out, "info string failed to load nnue file: %v\n", err)
+							u.sendLine(fmt.Sprintf("info string failed to load nnue file: %v", err))
 						} else {
 							u.evalFile = valStr
-							fmt.Fprintf(u.out, "info string loaded nnue file %s\n", valStr)
+							u.sendLine(fmt.Sprintf("info string loaded nnue file %s", valStr))
 						}
 					} else if valStr == "<embedded>" {
 						u.evalFile = "<embedded>"
 						nnue.ResetToDefault()
-						fmt.Fprintf(u.out, "info string reset to embedded nnue network\n")
+						u.sendLine("info string reset to embedded nnue network")
 					}
 				}
 			}
@@ -184,10 +199,33 @@ func (u *UCI) cmdSetOption(args []string) {
 }
 
 func (u *UCI) cmdUCINewGame() {
-	u.cmdStop()
+	u.stopSearch(false)
 	u.engine.TT.Clear()
 	b, _ := board.ParseFEN(board.StartFEN)
 	u.board = b
+}
+
+func (u *UCI) stopSearch(requestedByGUI bool) {
+	if requestedByGUI {
+		u.guiStop.Store(true)
+	}
+	u.abortSearch.Store(true)
+	u.engine.Stop()
+
+	for u.searching.Load() {
+		time.Sleep(1 * time.Millisecond)
+	}
+
+	// If GUI sent "stop" and no bestmove was emitted, emit one to satisfy ping
+	if requestedByGUI && !u.bestMoveSent.Load() {
+		u.bestMoveSent.Store(true)
+		legals := movegen.GenerateLegalMoves(u.board)
+		if len(legals) > 0 {
+			u.sendLine(fmt.Sprintf("bestmove %s", legals[0]))
+		} else {
+			u.sendLine("bestmove 0000")
+		}
+	}
 }
 
 func (u *UCI) cmdPosition(args []string) {
@@ -195,9 +233,10 @@ func (u *UCI) cmdPosition(args []string) {
 		return
 	}
 
+	u.stopSearch(false)
+
 	var b *board.Board
 	idx := 0
-
 	if args[0] == "startpos" {
 		b, _ = board.ParseFEN(board.StartFEN)
 		idx = 1
@@ -209,7 +248,7 @@ func (u *UCI) cmdPosition(args []string) {
 		fen := strings.Join(fenParts, " ")
 		parsed, err := board.ParseFEN(fen)
 		if err != nil {
-			fmt.Fprintf(u.out, "info string failed to parse FEN: %v\n", err)
+			u.sendLine(fmt.Sprintf("info string failed to parse FEN: %v", err))
 			return
 		}
 		b = parsed
@@ -229,23 +268,16 @@ func (u *UCI) cmdPosition(args []string) {
 		}
 	}
 
-	u.searchMu.Lock()
-	isAuto := u.isAutoPonder
-	ponderHash := u.autoPonderHash
-	u.searchMu.Unlock()
-
-	// If currently auto-pondering on this exact position, keep thinking!
-	// Otherwise stop the background calculation.
-	if !isAuto || b.Hash != ponderHash {
-		u.cmdStop()
-	}
-
 	u.board = b
 }
 
 func (u *UCI) cmdGo(args []string) {
-	u.cmdStop()
-	u.manualStop.Store(false)
+	// Stop any running search or auto-ponder first
+	u.stopSearch(false)
+	u.engine.Stopped.Store(false)
+	u.guiStop.Store(false)
+	u.abortSearch.Store(false)
+	u.bestMoveSent.Store(false)
 
 	var limits search.SearchLimits
 
@@ -306,118 +338,133 @@ func (u *UCI) cmdGo(args []string) {
 		}
 	}
 
-	u.searchMu.Lock()
-	u.searching = true
-	u.isAutoPonder = false
-	u.autoPonderHash = 0
-	u.searchMu.Unlock()
+	u.searching.Store(true)
+	u.isPonder.Store(limits.Ponder)
+	u.isAutoPonder.Store(false)
+	u.autoPonderHash.Store(0)
+
+	currentBoard := u.board.Clone()
 
 	go func() {
 		defer func() {
-			u.searchMu.Lock()
-			u.searching = false
-			u.isAutoPonder = false
-			u.autoPonderHash = 0
-			u.searchMu.Unlock()
+			u.searching.Store(false)
+			u.isPonder.Store(false)
+			u.isAutoPonder.Store(false)
+			u.autoPonderHash.Store(0)
 		}()
 
 		infoCallback := func(info search.SearchInfo) {
-			fmt.Fprintln(u.out, search.FormatInfo(info))
+			if !u.isAutoPonder.Load() {
+				u.sendLine(search.FormatInfo(info))
+			}
 		}
 
-		currentBoard := u.board
 		bestMove, ponderMove := u.engine.Search(currentBoard, limits, infoCallback)
-		if ponderMove != types.MoveNone {
-			fmt.Fprintf(u.out, "bestmove %s ponder %s\n", bestMove.String(), ponderMove.String())
-		} else {
-			fmt.Fprintf(u.out, "bestmove %s\n", bestMove.String())
+
+		// If aborted internally before emitting move, do not output bestmove
+		if u.abortSearch.Load() && !u.guiStop.Load() {
+			return
 		}
 
-		// Background calculation: look for principal variation and calculate as if opponent played it
-		for u.ponderEnabled && !u.manualStop.Load() && bestMove != types.MoveNone {
-			opponentMove := ponderMove
-			if opponentMove == types.MoveNone {
-				tempB := currentBoard.Clone()
-				if tempB.MakeMove(bestMove) {
-					if ttM, _, _, _, found := u.engine.TT.Probe(tempB.Hash); found && ttM != types.MoveNone && isLegal(tempB, ttM) {
-						opponentMove = ttM
-					}
-				}
+		// If this was an official ponder ("go ponder")
+		if limits.Ponder {
+			// UCI protocol: do not exit or send bestmove in ponder mode until "stop" or "ponderhit"
+			for u.isPonder.Load() && !u.guiStop.Load() && !u.abortSearch.Load() {
+				time.Sleep(2 * time.Millisecond)
 			}
-
-			if opponentMove == types.MoveNone {
-				break
+			if u.abortSearch.Load() && !u.guiStop.Load() {
+				return
 			}
-
-			// Apply both moves: engine's move and predicted opponent move
-			hypoBoard := currentBoard.Clone()
-			if !hypoBoard.MakeMove(bestMove) || !hypoBoard.MakeMove(opponentMove) {
-				break
-			}
-
-			u.searchMu.Lock()
-			u.isAutoPonder = true
-			u.autoPonderHash = hypoBoard.Hash
-			u.searchMu.Unlock()
-
-			autoLimits := search.SearchLimits{Infinite: true, Ponder: true}
-			nextBest, nextPonder := u.engine.Search(hypoBoard, autoLimits, infoCallback)
-
-			u.searchMu.Lock()
-			wasAuto := u.isAutoPonder
-			u.isAutoPonder = false
-			u.autoPonderHash = 0
-			u.searchMu.Unlock()
-
-			// If it transitioned from auto-ponder to a normal search via ponderhit, output and continue
-			if !wasAuto && !u.manualStop.Load() && nextBest != types.MoveNone {
-				if nextPonder != types.MoveNone {
-					fmt.Fprintf(u.out, "bestmove %s ponder %s\n", nextBest.String(), nextPonder.String())
-				} else {
-					fmt.Fprintf(u.out, "bestmove %s\n", nextBest.String())
-				}
-				currentBoard = hypoBoard
-				bestMove = nextBest
-				ponderMove = nextPonder
+			u.bestMoveSent.Store(true)
+			if ponderMove != types.MoveNone {
+				u.sendLine(fmt.Sprintf("bestmove %s ponder %s", bestMove, ponderMove))
 			} else {
-				break
+				u.sendLine(fmt.Sprintf("bestmove %s", bestMove))
+			}
+			return
+		}
+
+		// Normal search completed
+		u.bestMoveSent.Store(true)
+		if ponderMove != types.MoveNone {
+			u.sendLine(fmt.Sprintf("bestmove %s ponder %s", bestMove, ponderMove))
+		} else {
+			u.sendLine(fmt.Sprintf("bestmove %s", bestMove))
+		}
+
+		// Background calculation (auto-ponder):
+		// Check if we were told to stop or abort before starting auto-ponder
+		if u.abortSearch.Load() || u.guiStop.Load() || !u.ponderEnabled || bestMove == types.MoveNone {
+			return
+		}
+
+		opponentMove := ponderMove
+		if opponentMove == types.MoveNone {
+			tempB := currentBoard.Clone()
+			if tempB.MakeMove(bestMove) {
+				if ttM, _, _, _, found := u.engine.TT.Probe(tempB.Hash); found && ttM != types.MoveNone && isLegal(tempB, ttM) {
+					opponentMove = ttM
+				}
+			}
+		}
+
+		if opponentMove == types.MoveNone {
+			return
+		}
+
+		// Apply both moves: engine's move and predicted opponent move
+		hypoBoard := currentBoard.Clone()
+		if !hypoBoard.MakeMove(bestMove) || !hypoBoard.MakeMove(opponentMove) {
+			return
+		}
+
+		if u.abortSearch.Load() || u.guiStop.Load() {
+			return
+		}
+
+		u.engine.Stopped.Store(false)
+		u.isAutoPonder.Store(true)
+		u.autoPonderHash.Store(hypoBoard.Hash)
+
+		autoLimits := search.SearchLimits{Infinite: true, Ponder: true}
+		// Silent infoCallback during auto-ponder so GUI is not sent out-of-turn PV lines!
+		nextBest, nextPonder := u.engine.Search(hypoBoard, autoLimits, nil)
+
+		u.isAutoPonder.Store(false)
+		u.autoPonderHash.Store(0)
+
+		// If GUI sent "stop" during auto-ponder, Cutechess called stopThinking() and is waiting for bestmove!
+		if u.guiStop.Load() && !u.bestMoveSent.Load() {
+			u.bestMoveSent.Store(true)
+			if nextBest != types.MoveNone {
+				if nextPonder != types.MoveNone {
+					u.sendLine(fmt.Sprintf("bestmove %s ponder %s", nextBest, nextPonder))
+				} else {
+					u.sendLine(fmt.Sprintf("bestmove %s", nextBest))
+				}
+			} else {
+				legals := movegen.GenerateLegalMoves(hypoBoard)
+				if len(legals) > 0 {
+					u.sendLine(fmt.Sprintf("bestmove %s", legals[0]))
+				} else {
+					u.sendLine("bestmove 0000")
+				}
 			}
 		}
 	}()
 }
 
 func (u *UCI) cmdPonderHit() {
-	u.searchMu.Lock()
-	if u.isAutoPonder {
-		u.isAutoPonder = false
-	}
-	u.searchMu.Unlock()
+	u.isPonder.Store(false)
 	u.engine.PonderHit()
 }
 
 func (u *UCI) cmdStop() {
-	u.manualStop.Store(true)
-	u.searchMu.Lock()
-	searching := u.searching
-	u.searchMu.Unlock()
-
-	if searching {
-		u.engine.Stop()
-		// Wait for search routine to conclude
-		for {
-			u.searchMu.Lock()
-			stillSearching := u.searching
-			u.searchMu.Unlock()
-			if !stillSearching {
-				break
-			}
-			time.Sleep(1 * time.Millisecond)
-		}
-	}
+	u.stopSearch(true)
 }
 
 func (u *UCI) cmdPerft(args []string) {
-	u.cmdStop()
+	u.stopSearch(false)
 	depth := 1
 	if len(args) > 0 {
 		d, err := strconv.Atoi(args[0])
@@ -441,14 +488,14 @@ func (u *UCI) cmdEval() {
 		activeScore = classicalScore
 	}
 
-	fmt.Fprintf(u.out, "NNUE evaluation       : %+d cp\n", nnueScore)
-	fmt.Fprintf(u.out, "Classical evaluation  : %+d cp\n", classicalScore)
-	fmt.Fprintf(u.out, "Active evaluation (%s): %+d cp (from %s's perspective)\n", active, activeScore, u.board.SideToMove)
+	u.sendLine(fmt.Sprintf("NNUE evaluation       : %+d cp", nnueScore))
+	u.sendLine(fmt.Sprintf("Classical evaluation  : %+d cp", classicalScore))
+	u.sendLine(fmt.Sprintf("Active evaluation (%s): %+d cp (from %s's perspective)", active, activeScore, u.board.SideToMove))
 }
 
 func (u *UCI) cmdDisplay() {
-	fmt.Fprintln(u.out, u.board.String())
-	fmt.Fprintf(u.out, "FEN: %s\n", u.board.ToFEN())
+	u.sendLine(u.board.String())
+	u.sendLine(fmt.Sprintf("FEN: %s", u.board.ToFEN()))
 }
 
 var benchPositions = []string{
@@ -465,7 +512,7 @@ func (u *UCI) Bench(depth int8) {
 }
 
 func (u *UCI) cmdBench(args []string) {
-	u.cmdStop()
+	u.stopSearch(false)
 	depth := int8(7)
 	if len(args) > 0 {
 		d, err := strconv.Atoi(args[0])
@@ -474,7 +521,7 @@ func (u *UCI) cmdBench(args []string) {
 		}
 	}
 
-	fmt.Fprintf(u.out, "Running benchmark at depth %d with %d threads...\n", depth, u.engine.NumThreads)
+	u.sendLine(fmt.Sprintf("Running benchmark at depth %d with %d threads...", depth, u.engine.NumThreads))
 	totalNodes := uint64(0)
 	start := time.Now()
 
@@ -490,16 +537,16 @@ func (u *UCI) cmdBench(args []string) {
 		posElapsed := time.Since(posStart)
 		nodes := u.engine.Nodes.Load()
 		totalNodes += nodes
-		fmt.Fprintf(u.out, "Position %d/6: bestmove %s | nodes %d | time %v\n", i+1, bestMove, nodes, posElapsed)
+		u.sendLine(fmt.Sprintf("Position %d/6: bestmove %s | nodes %d | time %v", i+1, bestMove, nodes, posElapsed))
 	}
 
 	elapsed := time.Since(start)
 	nps := float64(totalNodes) / elapsed.Seconds()
-	fmt.Fprintf(u.out, "===============================================\n")
-	fmt.Fprintf(u.out, "Total nodes: %d\n", totalNodes)
-	fmt.Fprintf(u.out, "Total time : %v\n", elapsed)
-	fmt.Fprintf(u.out, "Nodes/sec  : %.0f\n", nps)
-	fmt.Fprintf(u.out, "===============================================\n")
+	u.sendLine("===============================================")
+	u.sendLine(fmt.Sprintf("Total nodes: %d", totalNodes))
+	u.sendLine(fmt.Sprintf("Total time : %v", elapsed))
+	u.sendLine(fmt.Sprintf("Nodes/sec  : %.0f", nps))
+	u.sendLine("===============================================")
 }
 
 func isLegal(b *board.Board, m types.Move) bool {
