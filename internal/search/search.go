@@ -272,6 +272,8 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	}
 
 	var bestMove types.Move
+	var bestRootMove types.Move
+	bestRootScore := -Infinity
 	var searchedMoves [256]types.Move
 	movesSearched := 0
 	legalMoves := 0
@@ -297,6 +299,8 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 			if ply == 0 {
 				w.RootMoveNodes[ttMove.From()][ttMove.To()] += w.LocalNodes - startNodes
+				bestRootMove = ttMove
+				bestRootScore = score
 			}
 
 			if w.TimeMan.Stopped.Load() {
@@ -645,6 +649,10 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		if ply == 0 {
 			w.RootMoveNodes[m.From()][m.To()] += w.LocalNodes - startNodes
+			if bestRootMove == types.MoveNone || score > bestRootScore {
+				bestRootScore = score
+				bestRootMove = m
+			}
 		}
 
 		if w.TimeMan.Stopped.Load() {
@@ -736,6 +744,12 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	if !inCheck && alpha < MateThreshold && alpha > -MateThreshold {
 		diff := alpha - staticEval
 		w.History.UpdateCorrHist(us, w.Board.PawnHash, diff, depth)
+	}
+
+	if ply == 0 && bestMove == types.MoveNone && bestRootMove != types.MoveNone {
+		bestMove = bestRootMove
+		w.PVArray[0][0] = bestRootMove
+		w.PVLength[0] = 1
 	}
 
 	w.TT.Store(w.Board.Hash, bestMove, tt.ScoreToTT(alpha, ply), depth, bestType)

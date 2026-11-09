@@ -117,6 +117,7 @@ func (e *Engine) Search(
 	var prevIterationScore int32
 	var prevIterationBestMove types.Move
 	var bestMoveStability int
+	var rootPV []types.Move
 
 	// Master iterative deepening loop
 	for depth := int8(1); depth <= maxDepth; depth++ {
@@ -183,6 +184,17 @@ func (e *Engine) Search(
 
 		// Construct PV line from TT / PVArray
 		pv := e.extractPV(b, master, depth)
+		if len(pv) > 0 {
+			rootPV = pv
+		} else if len(rootPV) > 0 {
+			pv = rootPV
+		} else if rootBestMove != types.MoveNone {
+			pv = []types.Move{rootBestMove}
+			if rootPonderMove != types.MoveNone {
+				pv = append(pv, rootPonderMove)
+			}
+		}
+
 		if len(pv) > 0 && rootBestMove == types.MoveNone {
 			rootBestMove = pv[0]
 		}
@@ -315,6 +327,18 @@ func (e *Engine) extractPV(b *board.Board, master *SearchWorker, depth int8) []t
 			break
 		}
 		pv = append(pv, m)
+	}
+
+	// Fallback to master PVArray if TT-based extraction yielded no moves
+	if len(pv) == 0 && master.PVLength[0] > 0 {
+		tempB2 := b.Clone()
+		for d := 0; d < master.PVLength[0]; d++ {
+			m := master.PVArray[0][d]
+			if m == types.MoveNone || !isLegalMove(tempB2, m) || !tempB2.MakeMove(m) {
+				break
+			}
+			pv = append(pv, m)
+		}
 	}
 
 	return pv

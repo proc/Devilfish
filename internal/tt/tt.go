@@ -139,18 +139,28 @@ func (tt *TT) Store(hash uint64, m types.Move, score int32, depth int8, nodeType
 	currData := entry.Data
 
 	if currKey == (hash ^ currData) {
-		_, _, currDepth, _, currAge := unpackData(currData)
+		existingMove, _, currDepth, _, currAge := unpackData(currData)
+
+		// Never overwrite a valid move with MoveNone (e.g. on UpperBound fail-low)
+		if m == types.MoveNone && existingMove != types.MoveNone {
+			m = existingMove
+		}
+
 		// Don't overwrite deeper entries from the current generation unless this is an exact score
 		if currAge == tt.age && currDepth > depth && nodeType != Exact {
-			// If existing entry has no move and we have one, keep everything else and update move
-			if m != types.MoveNone {
-				existingMove, existingScore, existingDepth, existingType, existingAge := unpackData(currData)
-				if existingMove == types.MoveNone {
-					newData := packData(m, existingScore, existingDepth, existingType, existingAge)
-					entry.Data = newData
-					entry.Key = hash ^ newData
-				}
+			if m != types.MoveNone && existingMove == types.MoveNone {
+				_, existingScore, existingDepth, existingType, existingAge := unpackData(currData)
+				newData := packData(m, existingScore, existingDepth, existingType, existingAge)
+				entry.Data = newData
+				entry.Key = hash ^ newData
 			}
+			return
+		}
+	} else if currData != 0 {
+		// Collision: Different position mapped to the same index.
+		// Protect deeper entries from the current search generation from being blown away by shallow subtrees.
+		_, _, currDepth, _, currAge := unpackData(currData)
+		if currAge == tt.age && currDepth > depth+2 {
 			return
 		}
 	}
