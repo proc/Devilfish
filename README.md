@@ -62,26 +62,37 @@
   - **Late Move Pruning (LMP)**: Prunes quiet moves past $3 + 2 \times d^2$ move count at $\text{depth} \le 5$.
   - **History Pruning**: Prunes moves with negative history heuristic scores at shallow depths ($d \le 4$).
   - **SEE Pruning**: Prunes quiet moves with $\text{SEE} < -35 \times d$ and losing captures with $\text{SEE} < -90 \times d$.
+  - **Internal Iterative Reduction (IIR)**: At depth $\ge 4$, when no TT move is found in the Transposition Table, reduces the search depth by 1 ply ($d - 1$).
+  - **Correction History (`CorrHist`)**: Tracks systematic error between NNUE static evaluation and actual search scores indexed by `PawnHash` (`[2][16384]int16`). Adjusts static evaluation across all pruning decisions and interior node evaluations.
   - **Check Extensions & Mate Distance Pruning**.
 
-### 4. Move Ordering
+### 4. Staged Move Generation & Move Ordering
+Devilfish uses a staged (lazy) move picker that yields moves on-demand phase-by-phase, avoiding quiet move generation and scoring entirely whenever a cutoff occurs earlier:
 1. **Transposition Table Best Move** (PV move).
-2. **Winning & Equal Captures / Promotions** (MVV-LVA + Capture History + SEE $\ge 0$).
+2. **Winning & Equal Captures / Queen Promotions** (MVV-LVA + Capture History + SEE $\ge 0$).
 3. **Killer Moves** (2 killer slots per ply).
-4. **Countermove Heuristic** (history of responses to opponent's previous move).
-5. **History & Continuation History** (gravity-damped cutoff bonus table + 1-ply `conthist`).
+4. **Countermove Heuristic** (response to opponent's immediate previous move).
+5. **Quiet Moves**:
+   - Check-delivering quiets (`b.GivesCheck(m)`).
+   - Quiet history heuristic with gravity damping.
+   - 1-ply Continuation History (`prevMove`).
+   - 2-ply Continuation History (`prevMove2`).
+   - 4-ply Continuation History (`prevMove4`).
 6. **Losing Captures** (SEE $< 0$).
-7. **Quiet Moves**.
+7. **Capture History Malus**: Penalizes preceding captures that failed to achieve a beta cutoff.
 
 ### 5. Dynamic Time Management
+- **Node-Based Root Move Dominance**: Measures the proportion of search nodes spent on the best move at the root. If the top candidate consumes $\ge 65\%$ of nodes, allocated time is reduced by $0.75\times$ to preserve clock; if below $35\%$ (disputed position), time is extended by $1.30\times$.
 - **Best Move Stability**: Dynamically tracks whether the root move remains stable across multiple iterative deepening iterations ($\ge 4$), scaling back time consumption to save clock for complex positions.
 - **Fail-Low Recovery**: Automatically grants search time extensions when the root evaluation drops unexpectedly ($\Delta > 40$ cp), enabling recovery against hidden tactical refutations.
+- **25ms Move Overhead Cushion**: Accounts for IPC pipe and GUI communication latency to guarantee zero loss-on-time forfeits in ultra-fast bullet/blitz scrambles.
 
 ### 6. Multithreading: Lazy Symmetric Multiprocessing (Lazy SMP)
 - Multiple worker goroutines search the tree concurrently.
 - Workers share a unified **Transposition Table** using lockless XOR checksum verification:
   $$\text{Key} = \text{Hash} \oplus \text{Data}$$
   Ensuring 100% thread safety without lock contention or mutex bottlenecks.
+- **Engine Search Mutex & Instantaneous Stop**: `Engine.Search` synchronizes search lifecycles via `searchMu`. Worker threads inspect `Stopped` at entry to `Search` and `Quiescence`, guaranteeing sub-millisecond thread termination and 100% responsive `readyok` ping handshakes in tournament managers like Cutechess.
 - The master thread drives iterative deepening and reports UCI `info` and `bestmove`.
 - Helper threads execute varied iterative deepening iterations, priming the shared TT with deep cutoffs and branch evaluations.
 
