@@ -76,3 +76,22 @@ func TestProbeRootKRK(t *testing.T) {
 		t.Errorf("expected winning probe root for KRK, got m=%s wdl=%d ok=%t", m, wdl, ok)
 	}
 }
+
+func TestProbeRootEliminateThreatByCapture(t *testing.T) {
+	Init("../../syzygy")
+	defer Free()
+	if !IsAvailable() {
+		t.Skip("Syzygy tables not available locally")
+	}
+
+	// King in check by undefended Bishop on e2: must capture e1e2 instead of fleeing
+	b, err := board.ParseFEN("8/8/8/8/8/8/4b3/4K2k w - - 0 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m, wdl, _, ok := ProbeRoot(b)
+	if !ok || m.String() != "e1e2" {
+		t.Errorf("expected e1e2 capturing checker, got %s (ok=%t, wdl=%d)", m, ok, wdl)
+	}
+}

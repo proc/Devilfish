@@ -3,6 +3,7 @@ package board
 import (
 	"testing"
 
+	"devilfish/internal/bitboard"
 	"devilfish/internal/types"
 )
 
@@ -110,4 +111,66 @@ func TestRepetitionDraw(t *testing.T) {
 	if !b.IsRepetition() {
 		t.Errorf("expected 3-fold repetition draw")
 	}
+}
+
+func TestRookTacticalThreats(t *testing.T) {
+	tests := []struct {
+		name       string
+		fen        string
+		color      types.Color
+		expectedSq types.Square
+	}{
+		{
+			name:       "Undefended White Rook on a1 attacked by Black Queen on a8",
+			fen:        "q5k1/5ppp/8/8/8/8/5PPP/R5K1 w - - 0 1",
+			color:      types.White,
+			expectedSq: types.A1,
+		},
+		{
+			name:       "Undefended White Rook on d1 attacked by Black Rook on d8",
+			fen:        "3r2k1/5ppp/8/8/8/8/5PPP/3R2K1 w - - 0 1",
+			color:      types.White,
+			expectedSq: types.D1,
+		},
+		{
+			name:       "Undefended White Rook on a1 attacked by Black Bishop on h8",
+			fen:        "7b/5k2/8/8/8/8/5PPP/R5K1 w - - 0 1",
+			color:      types.White,
+			expectedSq: types.A1,
+		},
+		{
+			name:       "Defended White Rook on d1 attacked by 2 Black Rooks (Rd8, Rd7)",
+			fen:        "3r2k1/3r1ppp/8/8/8/8/5PPP/3R1K2 w - - 0 1",
+			color:      types.White,
+			expectedSq: types.D1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := ParseFEN(tc.fen)
+			if err != nil {
+				t.Fatalf("failed to parse FEN: %v", err)
+			}
+			threats := b.TacticalThreatsOnPieces(tc.color)
+			if threats&bitboard.SquareBB[tc.expectedSq] == 0 {
+				t.Errorf("expected square %s to be flagged under tactical threat, got threats=0x%x",
+					tc.expectedSq, threats)
+			}
+		})
+	}
+
+	// Verify that a properly defended Rook attacked only by an equal piece (1v1) is NOT a tactical threat
+	t.Run("Defended White Rook on d1 attacked by 1 Black Rook (1v1 trade)", func(t *testing.T) {
+		// King on e2 defends d1
+		fen := "3r2k1/5ppp/8/8/8/8/4KPPP/3R4 w - - 0 1"
+		b, err := ParseFEN(fen)
+		if err != nil {
+			t.Fatalf("failed to parse FEN: %v", err)
+		}
+		threats := b.TacticalThreatsOnPieces(types.White)
+		if threats&bitboard.SquareBB[types.D1] != 0 {
+			t.Errorf("did not expect defended Rook on d1 in 1v1 trade to be flagged as tactical threat")
+		}
+	})
 }

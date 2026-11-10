@@ -75,6 +75,8 @@ func TestSaveAndLoad(t *testing.T) {
 		Syzygy50MoveRule: false,
 		SyzygyProbeLimit: 5,
 		LogFile:          "/path/to/engine.log",
+		MoveOverhead:     30,
+		MultiPV:          4,
 	}
 
 	if err := Save(configPath, origCfg); err != nil {
@@ -115,6 +117,12 @@ func TestSaveAndLoad(t *testing.T) {
 	}
 	if loadedCfg.LogFile != origCfg.LogFile {
 		t.Errorf("expected log_file %s, got %s", origCfg.LogFile, loadedCfg.LogFile)
+	}
+	if loadedCfg.MoveOverhead != origCfg.MoveOverhead {
+		t.Errorf("expected move_overhead %d, got %d", origCfg.MoveOverhead, loadedCfg.MoveOverhead)
+	}
+	if loadedCfg.MultiPV != origCfg.MultiPV {
+		t.Errorf("expected multipv %d, got %d", origCfg.MultiPV, loadedCfg.MultiPV)
 	}
 }
 
@@ -191,6 +199,44 @@ func TestLogFileInConfig(t *testing.T) {
 	c3, err := Load(p3)
 	if err != nil || c3.LogFile != "third.log" {
 		t.Errorf("failed logfile: %+v, err: %v", c3, err)
+	}
+}
+
+func TestMultiPVInConfig(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "devilfish_multipv_config_test_*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Test 1: standard "multipv"
+	p1 := filepath.Join(tmpDir, "cfg1.json")
+	if err := os.WriteFile(p1, []byte(`{"multipv": 3}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	c1, err := Load(p1)
+	if err != nil || c1.MultiPV != 3 {
+		t.Errorf("failed multipv key: %+v, err: %v", c1, err)
+	}
+
+	// Test 2: casing "MultiPV"
+	p2 := filepath.Join(tmpDir, "cfg2.json")
+	if err := os.WriteFile(p2, []byte(`{"MultiPV": 4}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := Load(p2)
+	if err != nil || c2.MultiPV != 4 {
+		t.Errorf("failed MultiPV key: %+v, err: %v", c2, err)
+	}
+
+	// Test 3: snake_case "multi_pv"
+	p3 := filepath.Join(tmpDir, "cfg3.json")
+	if err := os.WriteFile(p3, []byte(`{"multi_pv": 5}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	c3, err := Load(p3)
+	if err != nil || c3.MultiPV != 5 {
+		t.Errorf("failed multi_pv key: %+v, err: %v", c3, err)
 	}
 }
 

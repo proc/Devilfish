@@ -23,6 +23,17 @@ func TestFeatureIndex(t *testing.T) {
 	}
 }
 
+func TestTarraschPieceBlunder(t *testing.T) {
+	fenAfter2 := "r1b2rk1/rp4qp/2n1pp2/3p4/3P1b2/3B1N2/PP3PPP/R2Q1R1K b - - 1 17"
+	bAfter2, _ := board.ParseFEN(fenAfter2)
+	var accAfter2 Accumulator
+	Refresh(bAfter2, &accAfter2)
+	scoreNNUE := Evaluate(&accAfter2, bAfter2.SideToMove)
+
+	t.Logf("Position after 1...Rxa7 2.Kh1 (Black to move):")
+	t.Logf("  NNUE score from Black perspective: %d cp", scoreNNUE)
+}
+
 func TestAccumulatorRefreshAndEvaluate(t *testing.T) {
 	b, err := board.ParseFEN(board.StartFEN)
 	if err != nil {
@@ -46,6 +57,33 @@ func TestAccumulatorRefreshAndEvaluate(t *testing.T) {
 
 	if scoreQueen <= score+300 {
 		t.Errorf("expected substantial White advantage when up a queen, got %d vs %d", scoreQueen, score)
+	}
+}
+
+func TestPrintEvaluations(t *testing.T) {
+	fens := []struct {
+		desc string
+		fen  string
+	}{
+		{"Startpos (White)", board.StartFEN},
+		{"After 1. e4 (Black)", "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"},
+		{"White up Queen (White)", "rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"},
+		{"Black down Queen (Black)", "rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1"},
+		{"White up Knight (White)", "r1bqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"},
+		{"White +Rook (White)", "4k3/8/8/8/8/8/8/R3K3 w - - 0 1"},
+		{"Black -Rook (Black)", "4k3/8/8/8/8/8/8/R3K3 b - - 0 1"},
+		{"Endgame +1 pawn (White)", "8/8/8/4k3/8/4P3/4K3/8 w - - 0 1"},
+	}
+
+	for _, tc := range fens {
+		b, err := board.ParseFEN(tc.fen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var acc Accumulator
+		Refresh(b, &acc)
+		score := Evaluate(&acc, b.SideToMove)
+		t.Logf("%-25s: score=%+5d cp (stm=%s)", tc.desc, score, b.SideToMove)
 	}
 }
 

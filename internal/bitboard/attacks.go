@@ -361,6 +361,13 @@ func PawnAttacks(c types.Color, sq types.Square) Bitboard {
 	return PawnAttacksTable[c][sq]
 }
 
+func PawnAttacksBB(c types.Color, pawns Bitboard) Bitboard {
+	if c == types.White {
+		return ShiftNorthEast(pawns) | ShiftNorthWest(pawns)
+	}
+	return ShiftSouthEast(pawns) | ShiftSouthWest(pawns)
+}
+
 func BetweenSquares(sq1, sq2 types.Square) Bitboard {
 	return BetweenTable[sq1][sq2]
 }

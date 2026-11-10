@@ -29,14 +29,17 @@ func printHelp() {
 	fmt.Println("  -hash <MB>, --hash <MB>     Transposition Table size in Megabytes")
 	fmt.Println("  -c, --config <path>         Path to JSON config file (default: ./config.json or ~/.devilfish/config.json)")
 	fmt.Println("  -l, --log <path>            Path to log file for engine internal details, profiling, and Syzygy status")
+	fmt.Println("  --multipv <N>               Number of principal variations to calculate (default: 1)")
 	fmt.Println("  --eval-file <path>          Path to custom NNUE network file (default: embedded)")
 	fmt.Println("  --no-nnue                   Disable NNUE evaluation (use classical HCE)")
+	fmt.Println("  --book <path>               Path to Polyglot opening book (.bin) file (default: embedded)")
+	fmt.Println("  --no-book                   Disable opening book")
 	fmt.Println("  --syzygy-path <path>        Path to directory containing Syzygy tablebase files (.rtbw / .rtbz)")
 	fmt.Println("\nConfiguration File:")
 	fmt.Println("  If present, configuration is automatically loaded from:")
 	fmt.Println("    1. ./config.json (current working directory)")
 	fmt.Printf("    2. %s (user home)\n", config.GetDefaultConfigPath())
-	fmt.Println("  Example format: {\"threads\": 10, \"hash\": 128, \"ponder\": true, \"use_nnue\": true, \"eval_file\": \"<embedded>\", \"syzygy_path\": \"syzygy\"}")
+	fmt.Println("  Example format: {\"threads\": 10, \"hash\": 128, \"multipv\": 1, \"own_book\": true, \"book_file\": \"<embedded>\", \"ponder\": true, \"use_nnue\": true, \"eval_file\": \"<embedded>\", \"syzygy_path\": \"syzygy\"}")
 }
 
 func main() {
@@ -47,7 +50,10 @@ func main() {
 	var cliLogPath string
 	var cliThreads int
 	var cliHash int
+	var cliMultiPV int
 	var cliNoNNUE bool
+	var cliBookFile string
+	var cliNoBook bool
 	var isBench bool
 	var benchDepth int8 = 7
 
@@ -151,6 +157,26 @@ func main() {
 			continue
 		}
 
+		// Handle --book / -book
+		if arg == "-book" || arg == "--book" {
+			if i+1 < len(args) {
+				cliBookFile = args[i+1]
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--book=") || strings.HasPrefix(arg, "-book=") {
+			parts := strings.SplitN(arg, "=", 2)
+			cliBookFile = parts[1]
+			continue
+		}
+
+		// Handle --no-book
+		if arg == "--no-book" || arg == "-no-book" {
+			cliNoBook = true
+			continue
+		}
+
 		// Handle --log / -log / -l
 		if arg == "-l" || arg == "-log" || arg == "--log" {
 			if i+1 < len(args) {
@@ -180,6 +206,26 @@ func main() {
 			syzygyPathSet = true
 			continue
 		}
+
+		// Handle --multipv / -multipv
+		if arg == "-multipv" || arg == "--multipv" {
+			if i+1 < len(args) {
+				m, err := strconv.Atoi(args[i+1])
+				if err == nil && m > 0 {
+					cliMultiPV = m
+					i++
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--multipv=") || strings.HasPrefix(arg, "-multipv=") {
+			parts := strings.SplitN(arg, "=", 2)
+			m, err := strconv.Atoi(parts[1])
+			if err == nil && m > 0 {
+				cliMultiPV = m
+			}
+			continue
+		}
 	}
 
 	// 1. Load configuration from file (custom path or ~/.devilfish/config.json)
@@ -195,6 +241,9 @@ func main() {
 	if cliHash > 0 {
 		cfg.Hash = cliHash
 	}
+	if cliMultiPV > 0 {
+		cfg.MultiPV = cliMultiPV
+	}
 	if evalFilePath != "" {
 		cfg.EvalFile = evalFilePath
 	}
@@ -203,6 +252,12 @@ func main() {
 	}
 	if cliNoNNUE {
 		cfg.UseNNUE = false
+	}
+	if cliBookFile != "" {
+		cfg.BookFile = cliBookFile
+	}
+	if cliNoBook {
+		cfg.OwnBook = false
 	}
 	if cliLogPath != "" {
 		cfg.LogFile = cliLogPath
@@ -216,7 +271,7 @@ func main() {
 			defer logger.Close()
 			logger.Infof("Engine: %s %s by %s", uci.EngineName, uci.EngineVersion, uci.EngineAuthor)
 			logger.Infof("System: OS=%s Arch=%s CPUs=%d Go=%s PID=%d", runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), runtime.Version(), os.Getpid())
-			logger.Infof("Configuration: Threads=%d, Hash=%dMB, Ponder=%t, UseNNUE=%t, EvalFile=%s", cfg.Threads, cfg.Hash, cfg.Ponder, cfg.UseNNUE, cfg.EvalFile)
+			logger.Infof("Configuration: Threads=%d, Hash=%dMB, MultiPV=%d, Ponder=%t, UseNNUE=%t, EvalFile=%s, OwnBook=%t, BookFile=%s", cfg.Threads, cfg.Hash, cfg.MultiPV, cfg.Ponder, cfg.UseNNUE, cfg.EvalFile, cfg.OwnBook, cfg.BookFile)
 			logger.Infof("Syzygy Settings: ConfiguredPath=%q, ProbeDepth=%d, 50MoveRule=%t, ProbeLimit=%d", cfg.SyzygyPath, cfg.SyzygyProbeDepth, cfg.Syzygy50MoveRule, cfg.SyzygyProbeLimit)
 		}
 	}

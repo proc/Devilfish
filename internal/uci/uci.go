@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"devilfish/internal/board"
+	"devilfish/internal/book"
 	"devilfish/internal/config"
 	"devilfish/internal/eval"
 	"devilfish/internal/logger"
@@ -40,7 +41,9 @@ type UCI struct {
 	abortSearch      atomic.Bool
 	bestMoveSent     atomic.Bool
 	ponderEnabled    bool
+	moveOverhead     int
 	evalFile         string
+	bookFile         string
 	outMu            sync.Mutex
 	in               *bufio.Reader
 	out              io.Writer
@@ -60,17 +63,42 @@ func New(in io.Reader, out io.Writer, cfg config.Config) *UCI {
 	if evalFile == "" {
 		evalFile = "<embedded>"
 	}
+	bookFile := cfg.BookFile
+	if bookFile == "" {
+		bookFile = "<embedded>"
+	}
+	moveOverhead := cfg.MoveOverhead
+	if moveOverhead <= 0 {
+		moveOverhead = 20
+	}
 	if cfg.SyzygyPath != "" {
 		syzygy.Init(cfg.SyzygyPath)
 		syzygy.ProbeDepth = cfg.SyzygyProbeDepth
 		syzygy.Use50MoveRule = cfg.Syzygy50MoveRule
 		syzygy.ProbeLimit = cfg.SyzygyProbeLimit
 	}
+	eng := search.NewEngine(hash, threads)
+	if cfg.MultiPV >= 1 {
+		eng.SetMultiPV(cfg.MultiPV)
+	}
+	eng.SetUseBook(cfg.OwnBook)
+	if bookFile != "<embedded>" {
+		if bk, err := book.LoadFile(bookFile); err == nil {
+			eng.SetBook(bk)
+		} else {
+			logger.Warnf("UCI Init: failed to load opening book %s: %v, falling back to embedded book", bookFile, err)
+			eng.SetBook(book.DefaultBook())
+		}
+	} else {
+		eng.SetBook(book.DefaultBook())
+	}
 	return &UCI{
 		board:         b,
-		engine:        search.NewEngine(hash, threads),
+		engine:        eng,
 		ponderEnabled: cfg.Ponder,
+		moveOverhead:  moveOverhead,
 		evalFile:      evalFile,
+		bookFile:      bookFile,
 		in:            bufio.NewReader(in),
 		out:           out,
 	}
@@ -156,103 +184,184 @@ func (u *UCI) cmdUCI() {
 	u.sendLine(fmt.Sprintf("option name Syzygy50MoveRule type check default %t", syzygy.Use50MoveRule))
 	u.sendLine(fmt.Sprintf("option name SyzygyProbeLimit type spin default %d min 0 max 7", syzygy.ProbeLimit))
 	u.sendLine(fmt.Sprintf("option name LogFile type string default %s", logger.Path()))
+	u.sendLine(fmt.Sprintf("option name Move Overhead type spin default %d min 0 max 5000", u.moveOverhead))
+	u.sendLine(fmt.Sprintf("option name MultiPV type spin default %d min 1 max 256", u.engine.MultiPV))
+	u.sendLine(fmt.Sprintf("option name OwnBook type check default %t", u.engine.UseBook))
+	bookFile := u.bookFile
+	if bookFile == "" {
+		bookFile = "<embedded>"
+	}
+	u.sendLine(fmt.Sprintf("option name BookFile type string default %s", bookFile))
 	u.sendLine("uciok")
 }
 
+var syzygyReported bool
+
 func (u *UCI) cmdIsReady() {
-	if syzygy.IsAvailable() {
+	if syzygy.IsAvailable() && !syzygyReported {
 		u.sendLine(fmt.Sprintf("info string found %d-piece Syzygy tablebases", syzygy.MaxPieces()))
+		syzygyReported = true
 	}
 	u.sendLine("readyok")
 }
 
 func (u *UCI) cmdSetOption(args []string) {
+	if len(args) == 0 {
+		return
+	}
+
+	nameIdx := -1
+	valIdx := -1
 	for i := 0; i < len(args); i++ {
-		if strings.ToLower(args[i]) == "name" && i+1 < len(args) {
-			optName := strings.ToLower(args[i+1])
-			if i+3 < len(args) && strings.ToLower(args[i+2]) == "value" {
-				valStr := args[i+3]
-				switch optName {
-				case "hash":
-					sizeMB, err := strconv.Atoi(valStr)
-					if err == nil && sizeMB > 0 {
-						u.engine.SetHash(sizeMB)
-					}
-				case "threads":
-					threads, err := strconv.Atoi(valStr)
-					if err == nil && threads > 0 {
-						u.engine.SetThreads(threads)
-					}
-				case "ponder":
-					valLower := strings.ToLower(valStr)
-					if valLower == "true" || valLower == "1" {
-						u.ponderEnabled = true
-					} else if valLower == "false" || valLower == "0" {
-						u.ponderEnabled = false
-						u.stopSearch(false)
-					}
-				case "usennue":
-					valLower := strings.ToLower(valStr)
-					if valLower == "true" || valLower == "1" {
-						nnue.Enabled = true
-					} else if valLower == "false" || valLower == "0" {
-						nnue.Enabled = false
-					}
-					logger.Infof("UCI Option Set: UseNNUE=%t", nnue.Enabled)
-				case "evalfile":
-					if valStr != "" && valStr != "<embedded>" {
-						err := nnue.LoadFile(valStr)
-						if err != nil {
-							logger.Warnf("UCI Option Failed: EvalFile=%s err=%v", valStr, err)
-							u.sendLine(fmt.Sprintf("info string failed to load nnue file: %v", err))
-						} else {
-							u.evalFile = valStr
-							logger.Infof("UCI Option Set: EvalFile=%s (successfully loaded)", valStr)
-							u.sendLine(fmt.Sprintf("info string loaded nnue file %s", valStr))
-						}
-					} else if valStr == "<embedded>" {
-						u.evalFile = "<embedded>"
-						nnue.ResetToDefault()
-						logger.Infof("UCI Option Set: EvalFile=<embedded> (reset to embedded network)")
-						u.sendLine("info string reset to embedded nnue network")
-					}
-				case "syzygypath":
-					valPath := strings.TrimSpace(strings.Join(args[i+3:], " "))
-					syzygy.Init(valPath)
-					if syzygy.IsAvailable() {
-						u.sendLine(fmt.Sprintf("info string found %d-piece Syzygy tablebases", syzygy.MaxPieces()))
-					}
-				case "syzygyprobedepth":
-					d, err := strconv.Atoi(valStr)
-					if err == nil && d >= 1 && d <= 64 {
-						syzygy.ProbeDepth = d
-					}
-				case "syzygy50moverule":
-					valLower := strings.ToLower(valStr)
-					if valLower == "true" || valLower == "1" {
-						syzygy.Use50MoveRule = true
-					} else if valLower == "false" || valLower == "0" {
-						syzygy.Use50MoveRule = false
-					}
-				case "syzygyprobelimit":
-					lim, err := strconv.Atoi(valStr)
-					if err == nil && lim >= 0 && lim <= 7 {
-						syzygy.ProbeLimit = lim
-					}
-				case "logfile", "log":
-					valPath := strings.TrimSpace(strings.Join(args[i+3:], " "))
-					if valPath == "<empty>" || valPath == "" {
-						_ = logger.Close()
-						u.sendLine("info string logging disabled")
-					} else {
-						if err := logger.Init(valPath); err != nil {
-							u.sendLine(fmt.Sprintf("info string failed to open log file: %v", err))
-						} else {
-							u.sendLine(fmt.Sprintf("info string logging to %s", valPath))
-						}
-					}
-				}
+		lower := strings.ToLower(args[i])
+		if lower == "name" && nameIdx == -1 {
+			nameIdx = i
+		} else if lower == "value" && valIdx == -1 {
+			valIdx = i
+		}
+	}
+
+	if nameIdx == -1 || nameIdx+1 >= len(args) {
+		return
+	}
+
+	var optName, valStr string
+	if valIdx != -1 && valIdx > nameIdx {
+		optName = strings.Join(args[nameIdx+1:valIdx], " ")
+		if valIdx+1 < len(args) {
+			valStr = strings.Join(args[valIdx+1:], " ")
+		}
+	} else {
+		optName = strings.Join(args[nameIdx+1:], " ")
+	}
+
+	normName := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(optName, " ", ""), "_", ""))
+
+	switch normName {
+	case "hash":
+		sizeMB, err := strconv.Atoi(strings.TrimSpace(valStr))
+		if err == nil && sizeMB > 0 {
+			u.engine.SetHash(sizeMB)
+		}
+	case "threads":
+		threads, err := strconv.Atoi(strings.TrimSpace(valStr))
+		if err == nil && threads > 0 {
+			u.engine.SetThreads(threads)
+		}
+	case "ponder":
+		valLower := strings.ToLower(strings.TrimSpace(valStr))
+		if valLower == "true" || valLower == "1" {
+			u.ponderEnabled = true
+		} else if valLower == "false" || valLower == "0" {
+			u.ponderEnabled = false
+			u.stopSearch(false)
+		}
+	case "usennue":
+		valLower := strings.ToLower(strings.TrimSpace(valStr))
+		if valLower == "true" || valLower == "1" {
+			nnue.Enabled = true
+		} else if valLower == "false" || valLower == "0" {
+			nnue.Enabled = false
+		}
+		logger.Infof("UCI Option Set: UseNNUE=%t", nnue.Enabled)
+	case "evalfile":
+		trimmedVal := strings.TrimSpace(valStr)
+		if trimmedVal != "" && trimmedVal != "<embedded>" {
+			err := nnue.LoadFile(trimmedVal)
+			if err != nil {
+				logger.Warnf("UCI Option Failed: EvalFile=%s err=%v", trimmedVal, err)
+				u.sendLine(fmt.Sprintf("info string failed to load nnue file: %v", err))
+			} else {
+				u.evalFile = trimmedVal
+				logger.Infof("UCI Option Set: EvalFile=%s (successfully loaded)", trimmedVal)
+				u.sendLine(fmt.Sprintf("info string loaded nnue file %s", trimmedVal))
 			}
+		} else if trimmedVal == "<embedded>" {
+			u.evalFile = "<embedded>"
+			nnue.ResetToDefault()
+			logger.Infof("UCI Option Set: EvalFile=<embedded> (reset to embedded network)")
+			u.sendLine("info string reset to embedded nnue network")
+		}
+	case "syzygypath":
+		valPath := strings.TrimSpace(valStr)
+		if valPath == "<empty>" || valPath == "" {
+			syzygy.Free()
+			u.sendLine("info string syzygy tablebases disabled")
+		} else {
+			syzygy.Init(valPath)
+			if syzygy.IsAvailable() {
+				u.sendLine(fmt.Sprintf("info string found %d-piece Syzygy tablebases", syzygy.MaxPieces()))
+			} else {
+				u.sendLine("info string no Syzygy tablebases found at specified path")
+			}
+		}
+	case "syzygyprobedepth":
+		d, err := strconv.Atoi(strings.TrimSpace(valStr))
+		if err == nil && d >= 1 && d <= 64 {
+			syzygy.ProbeDepth = d
+		}
+	case "syzygy50moverule":
+		valLower := strings.ToLower(strings.TrimSpace(valStr))
+		if valLower == "true" || valLower == "1" {
+			syzygy.Use50MoveRule = true
+		} else if valLower == "false" || valLower == "0" {
+			syzygy.Use50MoveRule = false
+		}
+	case "syzygyprobelimit":
+		lim, err := strconv.Atoi(strings.TrimSpace(valStr))
+		if err == nil && lim >= 0 && lim <= 7 {
+			syzygy.ProbeLimit = lim
+		}
+	case "logfile", "log":
+		valPath := strings.TrimSpace(valStr)
+		if valPath == "<empty>" || valPath == "" {
+			_ = logger.Close()
+			u.sendLine("info string logging disabled")
+		} else {
+			if err := logger.Init(valPath); err != nil {
+				u.sendLine(fmt.Sprintf("info string failed to open log file: %v", err))
+			} else {
+				u.sendLine(fmt.Sprintf("info string logging to %s", valPath))
+			}
+		}
+	case "moveoverhead", "overhead":
+		val, err := strconv.Atoi(strings.TrimSpace(valStr))
+		if err == nil && val >= 0 && val <= 5000 {
+			u.moveOverhead = val
+			logger.Infof("UCI Option Set: Move Overhead=%d ms", val)
+		}
+	case "multipv":
+		val, err := strconv.Atoi(strings.TrimSpace(valStr))
+		if err == nil && val >= 1 && val <= 256 {
+			u.engine.SetMultiPV(val)
+			logger.Infof("UCI Option Set: MultiPV=%d", val)
+		}
+	case "ownbook", "usebook":
+		valLower := strings.ToLower(strings.TrimSpace(valStr))
+		if valLower == "true" || valLower == "1" {
+			u.engine.SetUseBook(true)
+		} else if valLower == "false" || valLower == "0" {
+			u.engine.SetUseBook(false)
+		}
+		logger.Infof("UCI Option Set: OwnBook=%t", u.engine.UseBook)
+	case "bookfile", "bookpath", "book":
+		trimmedVal := strings.TrimSpace(valStr)
+		if trimmedVal != "" && trimmedVal != "<embedded>" {
+			bk, err := book.LoadFile(trimmedVal)
+			if err != nil {
+				logger.Warnf("UCI Option Failed: BookFile=%s err=%v", trimmedVal, err)
+				u.sendLine(fmt.Sprintf("info string failed to load book file: %v", err))
+			} else {
+				u.bookFile = trimmedVal
+				u.engine.SetBook(bk)
+				logger.Infof("UCI Option Set: BookFile=%s (loaded %d entries)", trimmedVal, bk.EntryCount())
+				u.sendLine(fmt.Sprintf("info string loaded book file %s (%d entries)", trimmedVal, bk.EntryCount()))
+			}
+		} else if trimmedVal == "<embedded>" || trimmedVal == "" {
+			u.bookFile = "<embedded>"
+			u.engine.SetBook(book.DefaultBook())
+			logger.Infof("UCI Option Set: BookFile=<embedded> (reset to embedded book)")
+			u.sendLine("info string reset to embedded opening book")
 		}
 	}
 }
@@ -272,19 +381,37 @@ func (u *UCI) stopSearch(requestedByGUI bool) {
 	u.autoPonderCancel.Store(true)
 	u.engine.Stop()
 
-	// Wait up to 50ms for official search or auto-ponder to stop cleanly without blocking the UCI loop indefinitely
-	for i := 0; i < 50 && (u.searching.Load() || u.isAutoPonder.Load()); i++ {
+	// Wait for official search or auto-ponder to stop cleanly (up to 3 seconds)
+	for i := 0; i < 3000 && (u.searching.Load() || u.isAutoPonder.Load()); i++ {
 		time.Sleep(1 * time.Millisecond)
 	}
 
-	// If GUI sent "stop" and no bestmove was emitted, emit one to satisfy ping
+	// If GUI sent "stop" and no search was running to emit bestmove, emit best move from TT or position
 	if requestedByGUI && !u.bestMoveSent.Load() {
 		u.bestMoveSent.Store(true)
-		legals := movegen.GenerateLegalMoves(u.board)
-		if len(legals) > 0 {
-			u.sendLine(fmt.Sprintf("bestmove %s", legals[0]))
+		if ttM, _, _, _, found := u.engine.TT.Probe(u.board.Hash); found && ttM != types.MoveNone && isLegal(u.board, ttM) {
+			u.sendLine(fmt.Sprintf("bestmove %s", ttM))
 		} else {
-			u.sendLine("bestmove 0000")
+			legals := movegen.GenerateLegalMoves(u.board)
+			if len(legals) > 0 {
+				bestIdx := 0
+				bestVal := int32(-1000000)
+				for i, m := range legals {
+					val := int32(0)
+					if m.IsCapture() {
+						val = 10000 + eval.SEE(u.board, m)
+					} else if u.board.GivesCheck(m) {
+						val = 5000
+					}
+					if val > bestVal {
+						bestVal = val
+						bestIdx = i
+					}
+				}
+				u.sendLine(fmt.Sprintf("bestmove %s", legals[bestIdx]))
+			} else {
+				u.sendLine("bestmove 0000")
+			}
 		}
 	}
 }
@@ -342,6 +469,7 @@ func (u *UCI) cmdGo(args []string) {
 	u.bestMoveSent.Store(false)
 
 	var limits search.SearchLimits
+	limits.MoveOverhead = int64(u.moveOverhead)
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -474,6 +602,11 @@ func (u *UCI) startAutoPonder(currentBoard *board.Board, bestMove, ponderMove ty
 		if tempB.MakeMove(bestMove) {
 			if ttM, _, _, _, found := u.engine.TT.Probe(tempB.Hash); found && ttM != types.MoveNone && isLegal(tempB, ttM) {
 				opponentMove = ttM
+			} else {
+				oppLegals := movegen.GenerateLegalMoves(tempB)
+				if len(oppLegals) > 0 {
+					opponentMove = oppLegals[0]
+				}
 			}
 		}
 	}
@@ -492,8 +625,8 @@ func (u *UCI) startAutoPonder(currentBoard *board.Board, bestMove, ponderMove ty
 		return
 	}
 
-	u.isAutoPonder.Store(true)
 	u.autoPonderHash.Store(hypoBoard.Hash)
+	u.isAutoPonder.Store(true)
 	defer func() {
 		u.isAutoPonder.Store(false)
 		u.autoPonderHash.Store(0)
@@ -566,6 +699,11 @@ func (u *UCI) Bench(depth int8) {
 func (u *UCI) cmdBench(args []string) {
 	u.stopSearch(false)
 	u.abortSearch.Store(false)
+	oldBook := u.engine.UseBook
+	u.engine.UseBook = false
+	defer func() {
+		u.engine.UseBook = oldBook
+	}()
 	depth := int8(7)
 	if len(args) > 0 {
 		d, err := strconv.Atoi(args[0])

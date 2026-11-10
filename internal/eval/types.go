@@ -52,10 +52,10 @@ var PieceValues = [7]Score{
 
 var SEEPieceValues = [7]int32{
 	0,
-	100,  // Pawn
-	320,  // Knight
-	330,  // Bishop
-	500,  // Rook
-	950,  // Queen
+	100,   // Pawn
+	300,   // Knight
+	300,   // Bishop
+	500,   // Rook
+	900,   // Queen
 	20000, // King
 }

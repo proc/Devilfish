@@ -261,6 +261,8 @@ func ProbeRoot(b *board.Board) (bestMove types.Move, wdl int, dtz int, ok bool) 
 
 	white, black, kings, queens, rooks, bishops, knights, pawns, ep := extractBitboards(b)
 
+	var results [C.TB_MAX_MOVES]C.uint
+
 	res := C.tb_probe_root(
 		C.uint64_t(white),
 		C.uint64_t(black),
@@ -274,13 +276,131 @@ func ProbeRoot(b *board.Board) (bestMove types.Move, wdl int, dtz int, ok bool) 
 		C.uint(0),
 		C.uint(ep),
 		C.bool(b.SideToMove == types.White),
-		nil,
+		&results[0],
 	)
 
 	if res == C.TB_RESULT_FAILED || res == C.TB_RESULT_CHECKMATE || res == C.TB_RESULT_STALEMATE {
 		return types.MoveNone, 0, 0, false
 	}
 
+	legalMoves := movegen.GenerateLegalMoves(b)
+	if len(legalMoves) == 0 {
+		return types.MoveNone, 0, 0, false
+	}
+
+	type candMove struct {
+		m   types.Move
+		wdl int
+		dtz int
+	}
+
+	var candidates []candMove
+	maxWdl := -1
+
+	for i := 0; i < int(C.TB_MAX_MOVES); i++ {
+		r := results[i]
+		if r == C.TB_RESULT_FAILED {
+			break
+		}
+
+		w := int(C.tb_get_wdl_go(r))
+		d := int(C.tb_get_dtz_go(r))
+		from := types.Square(C.tb_get_from_go(r))
+		to := types.Square(C.tb_get_to_go(r))
+		prom := uint(C.tb_get_promotes_go(r))
+		isEp := C.tb_get_ep_go(r) != 0
+
+		var promoType types.PieceType = types.PieceTypeNone
+		switch prom {
+		case 1:
+			promoType = types.Queen
+		case 2:
+			promoType = types.Rook
+		case 3:
+			promoType = types.Bishop
+		case 4:
+			promoType = types.Knight
+		}
+
+		for _, m := range legalMoves {
+			if m.From() == from && m.To() == to {
+				match := false
+				if promoType != types.PieceTypeNone {
+					match = m.IsPromotion() && m.PromotionType() == promoType
+				} else if isEp {
+					match = m.IsEnPassant()
+				} else {
+					match = !m.IsPromotion() && !m.IsEnPassant()
+				}
+				if match {
+					candidates = append(candidates, candMove{m: m, wdl: w, dtz: d})
+					if w > maxWdl {
+						maxWdl = w
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// If we have candidates from results, pick the highest quality move matching maxWdl
+	if len(candidates) > 0 && maxWdl >= 0 {
+		inCheck := b.IsInCheck(b.SideToMove)
+		checkers := b.Checkers(b.SideToMove)
+
+		var best candMove
+		bestScore := int32(-1_000_000_000)
+
+		for _, c := range candidates {
+			if c.wdl != maxWdl {
+				continue
+			}
+
+			m := c.m
+			score := int32(0)
+
+			// 1. If in check, CAPTURING THE CHECKER IS TOP PRIORITY!
+			// Eliminates the checking piece to safely resolve the threat.
+			if inCheck && (bitboard.SquareBB[m.To()]&checkers) != 0 {
+				score += 50_000_000
+			}
+
+			// 2. Material capture bonus: prefer eliminating enemy pieces over quiet moves
+			if m.IsCapture() {
+				attacker := b.Pieces[m.From()].Type()
+				victim := b.Pieces[m.To()].Type()
+				if m.IsEnPassant() {
+					victim = types.Pawn
+				}
+				score += 10_000_000 + int32(victim)*1000 - int32(attacker)*100
+			}
+
+			// 3. Queen promotion
+			if m.IsPromotion() && m.PromotionType() == types.Queen {
+				score += 5_000_000
+			}
+
+			// 4. DTZ distance:
+			// For Win: lower DTZ is faster win
+			// For Loss: higher DTZ prolongs the game
+			if maxWdl >= Win {
+				score += int32(1000-c.dtz) * 1000
+			} else if maxWdl <= Loss {
+				score += int32(c.dtz) * 1000
+			}
+
+			if score > bestScore {
+				bestScore = score
+				best = c
+			}
+		}
+
+		if best.m != types.MoveNone {
+			return best.m, best.wdl, best.dtz, true
+		}
+	}
+
+	// Fallback to single move decoded from res
 	wdlVal := int(C.tb_get_wdl_go(res))
 	dtzVal := int(C.tb_get_dtz_go(res))
 	fromSq := types.Square(C.tb_get_from_go(res))
@@ -300,7 +420,6 @@ func ProbeRoot(b *board.Board) (bestMove types.Move, wdl int, dtz int, ok bool) 
 		promoType = types.Knight
 	}
 
-	legalMoves := movegen.GenerateLegalMoves(b)
 	for _, m := range legalMoves {
 		if m.From() == fromSq && m.To() == toSq {
 			if promoType != types.PieceTypeNone {

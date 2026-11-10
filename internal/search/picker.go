@@ -1,6 +1,7 @@
 package search
 
 import (
+	"devilfish/internal/bitboard"
 	"devilfish/internal/board"
 	"devilfish/internal/eval"
 	"devilfish/internal/movegen"
@@ -96,6 +97,19 @@ func (mp *MovePicker) Next() types.Move {
 		case StageGenCaptures:
 			mp.stage = StageGoodCaptures
 			movegen.GenerateMovesByType(mp.board, movegen.GenCaptures, &mp.captures)
+			checkers := mp.board.Checkers(mp.board.SideToMove)
+			them := mp.board.SideToMove.Other()
+			kSq := mp.board.KingSquare(them)
+			kingRing := bitboard.Bitboard(0)
+			if kSq < types.SquareNone {
+				kingRing = bitboard.KingAttacks(kSq) | bitboard.SquareBB[kSq]
+				if them == types.White {
+					kingRing |= (kingRing << 8) | (kingRing << 16)
+				} else {
+					kingRing |= (kingRing >> 8) | (kingRing >> 16)
+				}
+			}
+
 			for i := 0; i < mp.captures.Count; i++ {
 				m := mp.captures.Moves[i]
 				attacker := mp.board.Pieces[m.From()].Type()
@@ -110,23 +124,42 @@ func (mp *MovePicker) Next() types.Move {
 				}
 				see := eval.SEE(mp.board, m)
 				givesCheck := mp.board.GivesCheck(m)
+				isCheckerCapture := checkers != 0 && (bitboard.SquareBB[m.To()]&checkers) != 0
+				isKingZoneCapture := (bitboard.SquareBB[m.To()] & kingRing) != 0
+
 				if m.IsPromotion() && m.PromotionType() == types.Queen {
 					mp.capScores[i] = ScoreQueenPromotion + see
-				} else if givesCheck {
-					if see >= 0 {
-						mp.capScores[i] = ScoreGoodCapture + 20_000_000 + see*100 + mvvLva*10 + capHist
-					} else {
-						mp.capScores[i] = ScoreGoodCapture + 10_000_000 + see*100 + mvvLva*10 + capHist
+				} else if givesCheck && see >= 0 {
+					mp.capScores[i] = ScoreGoodCapture + 20_000_000 + see*100 + mvvLva*10 + capHist
+				} else if isCheckerCapture {
+					// Capturing the checking piece eliminates the check threat!
+					// Must be prioritized in StageGoodCaptures ahead of quiet king evasions.
+					bonus := int32(15_000_000)
+					if see < 0 {
+						bonus = 12_000_000
 					}
-				} else if see >= 0 || victim >= types.Knight {
-					if see >= 0 {
-						mp.capScores[i] = ScoreGoodCapture + see*100 + mvvLva*10 + capHist
-					} else {
-						// Piece sacrifice / deflection (e.g. Qxd7): search before quiets
-						mp.capScores[i] = ScoreGoodCapture + 5_000_000 + see*100 + mvvLva*10 + capHist
+					mp.capScores[i] = ScoreGoodCapture + bonus + see*100 + mvvLva*10 + capHist
+				} else if see > 0 {
+					// Winning capture: free/hanging piece or gaining material
+					bonus := int32(0)
+					if isKingZoneCapture {
+						bonus = 2_000_000 // High urgency on captures near the enemy king
 					}
+					mp.capScores[i] = ScoreGoodCapture + 10_000_000 + bonus + see*100 + mvvLva*10 + capHist
+				} else if see == 0 {
+					// Equal trade
+					bonus := int32(0)
+					if isKingZoneCapture {
+						bonus = 1_000_000
+					}
+					mp.capScores[i] = ScoreGoodCapture + bonus + mvvLva*10 + capHist
 				} else {
-					mp.capScores[i] = ScoreBadCapture + see*100 + mvvLva*10 + capHist
+					// Losing capture (SEE < 0): strictly saved for StageBadCaptures after quiet moves
+					bonus := int32(0)
+					if givesCheck {
+						bonus = 10_000_000
+					}
+					mp.capScores[i] = ScoreBadCapture + bonus + see*100 + mvvLva*10 + capHist
 				}
 			}
 
@@ -140,12 +173,12 @@ func (mp *MovePicker) Next() types.Move {
 					continue
 				}
 
-				// Only return good/equal captures & queen promotions in this stage
-				if score >= ScoreGoodCapture {
+				// Return good/equal captures, queen promotions, and forcing checking captures in this stage
+				if score >= ScoreQuietCheck {
 					return m
 				}
 
-				// Save losing captures for StageBadCaptures
+				// Save remaining losing captures for StageBadCaptures
 				if mp.badCapCount < 64 {
 					mp.badCaps[mp.badCapCount] = m
 					mp.badCapScores[mp.badCapCount] = score
@@ -184,6 +217,22 @@ func (mp *MovePicker) Next() types.Move {
 			mp.stage = StageQuiets
 			movegen.GenerateMovesByType(mp.board, movegen.GenQuiets, &mp.quiets)
 			side := mp.board.SideToMove
+			pawnThreats := mp.board.PawnThreatsOnPieces(side)
+			kAttackers, _ := mp.board.KingAttackersCount(side)
+			kingInDanger := kAttackers >= 2
+			them := side.Other()
+			enemyAttackers, enemyUnits := mp.board.KingAttackersCount(them)
+			hasActiveAttack := enemyAttackers >= 2 || enemyUnits >= 4
+			enemyKingSq := mp.board.KingSquare(them)
+			enemyKingRing := bitboard.Bitboard(0)
+			if enemyKingSq < types.SquareNone {
+				enemyKingRing = bitboard.KingAttacks(enemyKingSq) | bitboard.SquareBB[enemyKingSq]
+				if them == types.White {
+					enemyKingRing |= (enemyKingRing << 8) | (enemyKingRing << 16)
+				} else {
+					enemyKingRing |= (enemyKingRing >> 8) | (enemyKingRing >> 16)
+				}
+			}
 
 			for i := 0; i < mp.quiets.Count; i++ {
 				m := mp.quiets.Moves[i]
@@ -200,9 +249,21 @@ func (mp *MovePicker) Next() types.Move {
 				isPawnPush := mp.board.Pieces[m.From()].Type() == types.Pawn
 				toSq := m.To()
 				isAdvancedPawn := isPawnPush && ((side == types.White && toSq >= types.A6) || (side == types.Black && toSq <= types.H3))
+				isKingZoneQuiet := (bitboard.SquareBB[toSq] & enemyKingRing) != 0
 
-				if mp.board.GivesCheck(m) {
+				if pawnThreats != 0 && (bitboard.SquareBB[m.From()]&pawnThreats) != 0 && eval.SEE(mp.board, m) >= 0 {
+					mp.quietScores[i] = ScorePawnThreatEvasion + histScore/10
+				} else if kingInDanger && IsKingDefenseMove(mp.board, m, side) {
+					mp.quietScores[i] = ScoreKingDefense + histScore/10
+				} else if mp.board.GivesCheck(m) {
 					mp.quietScores[i] = ScoreQuietCheck + histScore/10
+				} else if hasActiveAttack && (IsKingAttack(mp.board, m) || isKingZoneQuiet) {
+					// Aggressive quiet move towards enemy King during an active attack
+					mp.quietScores[i] = ScoreQuietCheck + 1_000_000 + histScore/10
+				} else if pawnThreats == 0 && IsTacticalThreat(mp.board, m) {
+					mp.quietScores[i] = ScoreThreatMove + histScore/10
+				} else if pawnThreats == 0 && IsKingAttack(mp.board, m) {
+					mp.quietScores[i] = ScoreKingThreat + histScore/10
 				} else if isAdvancedPawn {
 					mp.quietScores[i] = ScorePassedPawnPush + histScore/10
 				} else {
@@ -224,6 +285,18 @@ func (mp *MovePicker) Next() types.Move {
 
 		case StageBadCaptures:
 			if mp.badCapIndex < mp.badCapCount {
+				bestIdx := mp.badCapIndex
+				bestScore := mp.badCapScores[bestIdx]
+				for j := mp.badCapIndex + 1; j < mp.badCapCount; j++ {
+					if mp.badCapScores[j] > bestScore {
+						bestScore = mp.badCapScores[j]
+						bestIdx = j
+					}
+				}
+				if bestIdx != mp.badCapIndex {
+					mp.badCaps[mp.badCapIndex], mp.badCaps[bestIdx] = mp.badCaps[bestIdx], mp.badCaps[mp.badCapIndex]
+					mp.badCapScores[mp.badCapIndex], mp.badCapScores[bestIdx] = mp.badCapScores[bestIdx], mp.badCapScores[mp.badCapIndex]
+				}
 				m := mp.badCaps[mp.badCapIndex]
 				mp.badCapIndex++
 				return m

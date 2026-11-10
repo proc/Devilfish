@@ -61,7 +61,7 @@ func TestAutoPonderPositionMatch(t *testing.T) {
 	// Wait for auto-ponder to kick in
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if u.isAutoPonder.Load() {
+		if u.isAutoPonder.Load() && u.autoPonderHash.Load() != 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -95,7 +95,7 @@ func TestAutoPonderPonderHit(t *testing.T) {
 	// Wait for auto-ponder to kick in
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if u.isAutoPonder.Load() {
+		if u.isAutoPonder.Load() && u.autoPonderHash.Load() != 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -123,6 +123,7 @@ func TestConfigUCIOptions(t *testing.T) {
 		Ponder:   false,
 		UseNNUE:  false,
 		EvalFile: "my_custom.nnue",
+		OwnBook:  true,
 	}
 	u := New(bytes.NewBuffer(nil), out, cfg)
 	u.cmdUCI()
@@ -152,6 +153,18 @@ func TestConfigUCIOptions(t *testing.T) {
 	if !strings.Contains(output, "option name SyzygyProbeLimit type spin default 6") {
 		t.Errorf("expected SyzygyProbeLimit option in output:\n%s", output)
 	}
+	if !strings.Contains(output, "option name Move Overhead type spin default 20") {
+		t.Errorf("expected Move Overhead option in output:\n%s", output)
+	}
+	if !strings.Contains(output, "option name MultiPV type spin default 1 min 1 max 256") {
+		t.Errorf("expected MultiPV option in output:\n%s", output)
+	}
+	if !strings.Contains(output, "option name OwnBook type check default true") {
+		t.Errorf("expected OwnBook option in output:\n%s", output)
+	}
+	if !strings.Contains(output, "option name BookFile type string default <embedded>") {
+		t.Errorf("expected BookFile option in output:\n%s", output)
+	}
 }
 
 func TestSyzygySetOptions(t *testing.T) {
@@ -163,4 +176,24 @@ func TestSyzygySetOptions(t *testing.T) {
 	u.cmdSetOption([]string{"name", "Syzygy50MoveRule", "value", "false"})
 	u.cmdSetOption([]string{"name", "SyzygyProbeLimit", "value", "5"})
 	u.cmdSetOption([]string{"name", "SyzygyPath", "value", "/tmp/nonexistent/tb"})
+	u.cmdSetOption([]string{"name", "Move", "Overhead", "value", "35"})
+	if u.moveOverhead != 35 {
+		t.Errorf("expected moveOverhead 35, got %d", u.moveOverhead)
+	}
+	u.cmdSetOption([]string{"name", "MultiPV", "value", "4"})
+	if u.engine.MultiPV != 4 {
+		t.Errorf("expected MultiPV 4, got %d", u.engine.MultiPV)
+	}
+	u.cmdSetOption([]string{"name", "OwnBook", "value", "false"})
+	if u.engine.UseBook {
+		t.Errorf("expected UseBook to be false")
+	}
+	u.cmdSetOption([]string{"name", "OwnBook", "value", "true"})
+	if !u.engine.UseBook {
+		t.Errorf("expected UseBook to be true")
+	}
+	u.cmdSetOption([]string{"name", "BookFile", "value", "<embedded>"})
+	if u.bookFile != "<embedded>" {
+		t.Errorf("expected BookFile to be <embedded>, got %s", u.bookFile)
+	}
 }

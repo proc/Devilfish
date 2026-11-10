@@ -19,6 +19,10 @@ type Config struct {
 	Syzygy50MoveRule bool   `json:"syzygy_50_move_rule"`
 	SyzygyProbeLimit int    `json:"syzygy_probe_limit"`
 	LogFile          string `json:"log_file"`
+	MoveOverhead     int    `json:"move_overhead"`
+	MultiPV          int    `json:"multipv"`
+	OwnBook          bool   `json:"own_book"`
+	BookFile         string `json:"book_file"`
 }
 
 func DefaultConfig() Config {
@@ -33,6 +37,10 @@ func DefaultConfig() Config {
 		Syzygy50MoveRule: true,
 		SyzygyProbeLimit: 6,
 		LogFile:          "",
+		MoveOverhead:     20,
+		MultiPV:          1,
+		OwnBook:          true,
+		BookFile:         "<embedded>",
 	}
 }
 
@@ -88,6 +96,16 @@ type rawConfig struct {
 	AltLogFile       *string     `json:"logfile"`
 	LogPath          *string     `json:"log_path"`
 	AltLogPath       *string     `json:"logpath"`
+	MoveOverhead     *int        `json:"move_overhead"`
+	AltMoveOverhead  *int        `json:"moveoverhead"`
+	MultiPV          *int        `json:"multipv"`
+	AltMultiPV       *int        `json:"multi_pv"`
+	OwnBook          *bool       `json:"own_book"`
+	AltOwnBook       *bool       `json:"ownbook"`
+	BookFile         *string     `json:"book_file"`
+	AltBookFile      *string     `json:"bookfile"`
+	BookPath         *string     `json:"book_path"`
+	AltBookPath      *string     `json:"book"`
 }
 
 func parseSyzygyPath(val interface{}) string {
@@ -189,8 +207,40 @@ func Load(path string) (Config, error) {
 				if s, ok := v.(string); ok && cfg.LogFile == "" {
 					cfg.LogFile = strings.TrimSpace(s)
 				}
+			case "moveoverhead", "overhead":
+				if n, ok := v.(float64); ok && int(n) >= 0 {
+					cfg.MoveOverhead = int(n)
+				}
+			case "multipv", "multi_pv":
+				if n, ok := v.(float64); ok && int(n) >= 1 {
+					cfg.MultiPV = int(n)
+				}
+			case "ownbook", "usebook":
+				if b, ok := v.(bool); ok {
+					cfg.OwnBook = b
+				}
+			case "bookfile", "bookpath", "book":
+				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+					cfg.BookFile = strings.TrimSpace(s)
+				}
 			}
 		}
+	}
+
+	if raw.OwnBook != nil {
+		cfg.OwnBook = *raw.OwnBook
+	} else if raw.AltOwnBook != nil {
+		cfg.OwnBook = *raw.AltOwnBook
+	}
+
+	if raw.BookFile != nil && *raw.BookFile != "" {
+		cfg.BookFile = strings.TrimSpace(*raw.BookFile)
+	} else if raw.AltBookFile != nil && *raw.AltBookFile != "" {
+		cfg.BookFile = strings.TrimSpace(*raw.AltBookFile)
+	} else if raw.BookPath != nil && *raw.BookPath != "" {
+		cfg.BookFile = strings.TrimSpace(*raw.BookPath)
+	} else if raw.AltBookPath != nil && *raw.AltBookPath != "" {
+		cfg.BookFile = strings.TrimSpace(*raw.AltBookPath)
 	}
 
 	if raw.LogFile != nil && *raw.LogFile != "" {
@@ -201,6 +251,18 @@ func Load(path string) (Config, error) {
 		cfg.LogFile = strings.TrimSpace(*raw.LogPath)
 	} else if raw.AltLogPath != nil && *raw.AltLogPath != "" {
 		cfg.LogFile = strings.TrimSpace(*raw.AltLogPath)
+	}
+
+	if raw.MoveOverhead != nil && *raw.MoveOverhead >= 0 {
+		cfg.MoveOverhead = *raw.MoveOverhead
+	} else if raw.AltMoveOverhead != nil && *raw.AltMoveOverhead >= 0 {
+		cfg.MoveOverhead = *raw.AltMoveOverhead
+	}
+
+	if raw.MultiPV != nil && *raw.MultiPV >= 1 {
+		cfg.MultiPV = *raw.MultiPV
+	} else if raw.AltMultiPV != nil && *raw.AltMultiPV >= 1 {
+		cfg.MultiPV = *raw.AltMultiPV
 	}
 
 	if raw.SyzygyProbeDepth != nil && *raw.SyzygyProbeDepth >= 1 {

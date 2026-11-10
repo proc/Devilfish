@@ -69,6 +69,159 @@ func (b *Board) PieceAt(sq types.Square) types.Piece {
 	return b.Pieces[sq]
 }
 
+// Attackers returns a bitboard of all pieces (both colors) attacking the given square with occupied bitboard occ.
+func (b *Board) Attackers(sq types.Square, occ bitboard.Bitboard) bitboard.Bitboard {
+	return (bitboard.PawnAttacks(types.White, sq) & b.PieceBB[types.BlackPawn]) |
+		(bitboard.PawnAttacks(types.Black, sq) & b.PieceBB[types.WhitePawn]) |
+		(bitboard.KnightAttacks(sq) & (b.PieceBB[types.WhiteKnight] | b.PieceBB[types.BlackKnight])) |
+		(bitboard.BishopAttacks(sq, occ) & (b.PieceBB[types.WhiteBishop] | b.PieceBB[types.BlackBishop] | b.PieceBB[types.WhiteQueen] | b.PieceBB[types.BlackQueen])) |
+		(bitboard.RookAttacks(sq, occ) & (b.PieceBB[types.WhiteRook] | b.PieceBB[types.BlackRook] | b.PieceBB[types.WhiteQueen] | b.PieceBB[types.BlackQueen])) |
+		(bitboard.KingAttacks(sq) & (b.PieceBB[types.WhiteKing] | b.PieceBB[types.BlackKing]))
+}
+
+// TacticalThreatsOnPieces returns a bitboard of friendly pieces (Knight, Bishop, Rook, Queen)
+// that are under tactical threat:
+// 1. Lower-value enemy pieces attacking higher-value friendly pieces:
+//    - Enemy Pawns attacking friendly Minors, Rooks, Queens
+//    - Enemy Knights/Bishops attacking friendly Rooks, Queens
+//    - Enemy Rooks attacking friendly Queens
+// 2. Enemy pieces attacking undefended friendly pieces (hanging piece / en prise).
+// 3. Enemy pieces attacking friendly pieces of equal/higher value where enemy attackers outnumber friendly defenders.
+func (b *Board) TacticalThreatsOnPieces(us types.Color) bitboard.Bitboard {
+	them := us.Other()
+	themPawns := b.PieceBB[types.MakePiece(them, types.Pawn)]
+	themKnights := b.PieceBB[types.MakePiece(them, types.Knight)]
+	themBishops := b.PieceBB[types.MakePiece(them, types.Bishop)]
+	themRooks := b.PieceBB[types.MakePiece(them, types.Rook)]
+
+	ourKnights := b.PieceBB[types.MakePiece(us, types.Knight)]
+	ourBishops := b.PieceBB[types.MakePiece(us, types.Bishop)]
+	ourRooks := b.PieceBB[types.MakePiece(us, types.Rook)]
+	ourQueens := b.PieceBB[types.MakePiece(us, types.Queen)]
+	ourMinors := ourKnights | ourBishops
+	ourPieces := ourMinors | ourRooks | ourQueens
+
+	var threats bitboard.Bitboard
+
+	// 1. Pawn threats on minors, rooks, queens
+	if themPawns != 0 {
+		pawnAttacks := bitboard.PawnAttacksBB(them, themPawns)
+		threats |= ourPieces & pawnAttacks
+	}
+
+	occ := b.Occupied()
+
+	// 2. Minor piece threats on rooks and queens
+	if (themKnights|themBishops) != 0 && (ourRooks|ourQueens) != 0 {
+		tk := themKnights
+		for tk != 0 {
+			sq := bitboard.PopLSB(&tk)
+			threats |= (ourRooks | ourQueens) & bitboard.KnightAttacks(sq)
+		}
+		tb := themBishops
+		for tb != 0 {
+			sq := bitboard.PopLSB(&tb)
+			threats |= (ourRooks | ourQueens) & bitboard.BishopAttacks(sq, occ)
+		}
+	}
+
+	// 3. Rook threats on queens
+	if themRooks != 0 && ourQueens != 0 {
+		tr := themRooks
+		for tr != 0 {
+			sq := bitboard.PopLSB(&tr)
+			threats |= ourQueens & bitboard.RookAttacks(sq, occ)
+		}
+	}
+
+	// 4. Undefended friendly pieces attacked by ANY enemy piece (hanging / en prise),
+	// or where enemy attackers outnumber friendly defenders.
+	unflagged := ourPieces &^ threats
+	for unflagged != 0 {
+		sq := bitboard.PopLSB(&unflagged)
+		if !b.IsSquareAttacked(sq, them) {
+			continue
+		}
+		if !b.IsSquareAttacked(sq, us) {
+			threats |= bitboard.SquareBB[sq]
+			continue
+		}
+		allAtt := b.Attackers(sq, occ)
+		themAtt := allAtt & b.ColorBB[them]
+		usDef := allAtt & b.ColorBB[us]
+		if bitboard.Count(themAtt) > bitboard.Count(usDef) {
+			threats |= bitboard.SquareBB[sq]
+		}
+	}
+
+	return threats
+}
+
+// PawnThreatsOnPieces returns a bitboard of friendly pieces attacked by enemy pieces (aliased to TacticalThreatsOnPieces).
+func (b *Board) PawnThreatsOnPieces(us types.Color) bitboard.Bitboard {
+	return b.TacticalThreatsOnPieces(us)
+}
+
+// KingAttackersCount returns the number of enemy pieces attacking the King zone of color `us`.
+func (b *Board) KingAttackersCount(us types.Color) (int, int32) {
+	kSq := b.KingSquare(us)
+	if kSq >= types.SquareNone {
+		return 0, 0
+	}
+	them := us.Other()
+	kZone := bitboard.KingAttacks(kSq) | bitboard.SquareBB[kSq]
+	occ := b.Occupied()
+
+	attackersCount := 0
+	attackUnits := int32(0)
+
+	// Queens
+	tq := b.PieceBB[types.MakePiece(them, types.Queen)]
+	for tq != 0 {
+		sq := bitboard.PopLSB(&tq)
+		att := bitboard.QueenAttacks(sq, occ) & kZone
+		if att != 0 {
+			attackersCount++
+			attackUnits += 4 * int32(bitboard.Count(att))
+		}
+	}
+
+	// Rooks
+	tr := b.PieceBB[types.MakePiece(them, types.Rook)]
+	for tr != 0 {
+		sq := bitboard.PopLSB(&tr)
+		att := bitboard.RookAttacks(sq, occ) & kZone
+		if att != 0 {
+			attackersCount++
+			attackUnits += 3 * int32(bitboard.Count(att))
+		}
+	}
+
+	// Bishops
+	tb := b.PieceBB[types.MakePiece(them, types.Bishop)]
+	for tb != 0 {
+		sq := bitboard.PopLSB(&tb)
+		att := bitboard.BishopAttacks(sq, occ) & kZone
+		if att != 0 {
+			attackersCount++
+			attackUnits += 2 * int32(bitboard.Count(att))
+		}
+	}
+
+	// Knights
+	tk := b.PieceBB[types.MakePiece(them, types.Knight)]
+	for tk != 0 {
+		sq := bitboard.PopLSB(&tk)
+		att := bitboard.KnightAttacks(sq) & kZone
+		if att != 0 {
+			attackersCount++
+			attackUnits += 2 * int32(bitboard.Count(att))
+		}
+	}
+
+	return attackersCount, attackUnits
+}
+
 func (b *Board) KingSquare(c types.Color) types.Square {
 	kPiece := types.MakePiece(c, types.King)
 	bb := b.PieceBB[kPiece]
@@ -183,6 +336,20 @@ func (b *Board) IsInCheck(c types.Color) bool {
 	return b.IsSquareAttacked(kSq, c.Other())
 }
 
+// Checkers returns the bitboard of enemy pieces directly giving check to king of color c.
+func (b *Board) Checkers(c types.Color) bitboard.Bitboard {
+	kSq := b.KingSquare(c)
+	if kSq >= types.SquareNone {
+		return 0
+	}
+	them := c.Other()
+	occ := b.Occupied()
+	return (bitboard.PawnAttacks(c, kSq) & b.PieceBB[types.MakePiece(them, types.Pawn)]) |
+		(bitboard.KnightAttacks(kSq) & b.PieceBB[types.MakePiece(them, types.Knight)]) |
+		(bitboard.BishopAttacks(kSq, occ) & (b.PieceBB[types.MakePiece(them, types.Bishop)] | b.PieceBB[types.MakePiece(them, types.Queen)])) |
+		(bitboard.RookAttacks(kSq, occ) & (b.PieceBB[types.MakePiece(them, types.Rook)] | b.PieceBB[types.MakePiece(them, types.Queen)]))
+}
+
 func (b *Board) GivesCheck(m types.Move) bool {
 	if !b.MakeMove(m) {
 		return false
@@ -228,15 +395,34 @@ func (b *Board) Clone() *Board {
 	return &newB
 }
 
+// IsRepetition returns true if the current position has appeared at least once before
+// in the game history within the halfmove clock limit (2-fold repetition / cycle).
+// In tree search, any repeated position along the search line is a cycle and treated as a draw.
 func (b *Board) IsRepetition() bool {
-	count := 0
 	currHash := b.Hash
 	// Search back until the last reversible boundary (or up to halfmove clock)
 	limit := len(b.UndoStack) - int(b.HalfmoveClock)
 	if limit < 0 {
 		limit = 0
 	}
-	for i := len(b.UndoStack) - 1; i >= limit; i-- {
+	for i := len(b.UndoStack) - 2; i >= limit; i -= 2 {
+		if b.UndoStack[i].Hash == currHash {
+			return true
+		}
+	}
+	return false
+}
+
+// IsThreefoldRepetition returns true if the current position has appeared at least twice before
+// in the game history (3-fold repetition), satisfying the FIDE draw claim rule.
+func (b *Board) IsThreefoldRepetition() bool {
+	count := 0
+	currHash := b.Hash
+	limit := len(b.UndoStack) - int(b.HalfmoveClock)
+	if limit < 0 {
+		limit = 0
+	}
+	for i := len(b.UndoStack) - 2; i >= limit; i -= 2 {
 		if b.UndoStack[i].Hash == currHash {
 			count++
 			if count >= 2 {

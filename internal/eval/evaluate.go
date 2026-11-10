@@ -10,12 +10,19 @@ import (
 var PassedPawnBonus = [8]Score{
 	{mg: 0, eg: 0},
 	{mg: 0, eg: 0},
-	{mg: 10, eg: 15},
-	{mg: 20, eg: 30},
-	{mg: 35, eg: 60},
-	{mg: 60, eg: 110},
-	{mg: 100, eg: 180},
+	{mg: 10, eg: 20},
+	{mg: 20, eg: 40},
+	{mg: 35, eg: 80},
+	{mg: 60, eg: 140},
+	{mg: 100, eg: 240},
 	{mg: 0, eg: 0},
+}
+
+func absVal(x int32) int32 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 func Evaluate(b *board.Board) int32 {
@@ -110,6 +117,9 @@ func EvaluateClassical(b *board.Board) int32 {
 	}
 
 	// 4. Pawn Structure: Doubled, Isolated, Passed Pawns
+	wKingSq := b.KingSquare(types.White)
+	bKingSq := b.KingSquare(types.Black)
+
 	// White pawns
 	wpCopy := whitePawns
 	for wpCopy != 0 {
@@ -148,6 +158,13 @@ func EvaluateClassical(b *board.Board) int32 {
 			if bitboard.PawnAttacks(types.Black, sq)&whitePawns != 0 {
 				bonus.mg = bonus.mg * 5 / 4
 				bonus.eg = bonus.eg * 5 / 4
+			}
+			// In endgame, King proximity to passed pawns
+			if wKingSq < types.SquareNone && bKingSq < types.SquareNone && phase < TotalPhase {
+				wDist := max(absVal(int32(wKingSq.File())-int32(f)), absVal(int32(wKingSq.Rank())-int32(r)))
+				bDist := max(absVal(int32(bKingSq.File())-int32(f)), absVal(int32(bKingSq.Rank())-int32(r)))
+				bonus.eg += (5 - wDist) * 5
+				bonus.eg += (bDist - 3) * 5
 			}
 			whiteScore = whiteScore.Add(bonus)
 		}
@@ -191,6 +208,13 @@ func EvaluateClassical(b *board.Board) int32 {
 				bonus.mg = bonus.mg * 5 / 4
 				bonus.eg = bonus.eg * 5 / 4
 			}
+			// In endgame, King proximity to passed pawns
+			if wKingSq < types.SquareNone && bKingSq < types.SquareNone && phase < TotalPhase {
+				bDist := max(absVal(int32(bKingSq.File())-int32(f)), absVal(int32(bKingSq.Rank())-int32(r)))
+				wDist := max(absVal(int32(wKingSq.File())-int32(f)), absVal(int32(wKingSq.Rank())-int32(r)))
+				bonus.eg += (5 - bDist) * 5
+				bonus.eg += (wDist - 3) * 5
+			}
 			blackScore = blackScore.Add(bonus)
 		}
 	}
@@ -232,24 +256,30 @@ func EvaluateClassical(b *board.Board) int32 {
 	}
 
 	// 6. King Safety (Midgame)
-	wKingSq := b.KingSquare(types.White)
 	if wKingSq < types.SquareNone {
 		// Pawn shield
 		wKingFile := wKingSq.File()
 		if wKingFile >= types.FileF || wKingFile <= types.FileC {
 			shieldMask := (bitboard.SquareBB[wKingSq] | bitboard.KnightAttacks(wKingSq) | bitboard.KingAttacks(wKingSq)) & (bitboard.Rank2BB | bitboard.Rank3BB)
 			shieldCount := int32(bitboard.Count(shieldMask & whitePawns))
-			whiteScore.mg += (shieldCount - 3) * 15
+			whiteScore.mg += (shieldCount - 3) * 25
+		}
+		// Penalty for enemy attackers aiming at White King
+		if wAttackers, wUnits := b.KingAttackersCount(types.White); wAttackers >= 2 {
+			whiteScore.mg -= (wUnits * (wUnits + 2)) / 2
 		}
 	}
 
-	bKingSq := b.KingSquare(types.Black)
 	if bKingSq < types.SquareNone {
 		bKingFile := bKingSq.File()
 		if bKingFile >= types.FileF || bKingFile <= types.FileC {
 			shieldMask := (bitboard.SquareBB[bKingSq] | bitboard.KnightAttacks(bKingSq) | bitboard.KingAttacks(bKingSq)) & (bitboard.Rank7BB | bitboard.Rank6BB)
 			shieldCount := int32(bitboard.Count(shieldMask & blackPawns))
-			blackScore.mg += (shieldCount - 3) * 15
+			blackScore.mg += (shieldCount - 3) * 25
+		}
+		// Penalty for enemy attackers aiming at Black King
+		if bAttackers, bUnits := b.KingAttackersCount(types.Black); bAttackers >= 2 {
+			blackScore.mg -= (bUnits * (bUnits + 2)) / 2
 		}
 	}
 

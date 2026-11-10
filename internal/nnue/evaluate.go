@@ -47,32 +47,30 @@ func Evaluate(acc *Accumulator, stm types.Color) int32 {
 		themAcc = &acc.White
 	}
 
-	// Midgame average across channels 0..63
-	var mgSum int32
-	for i := 0; i < 64; i++ {
-		mgSum += int32(usAcc[i]) - int32(themAcc[i])
+	// 1. Quantized Clipped ReLU activation on accumulator (512 inputs: 256 us, 256 them)
+	var input [2 * HiddenSize]int8
+	for i := 0; i < HiddenSize; i++ {
+		input[i] = clamp8(usAcc[i])
+		input[HiddenSize+i] = clamp8(themAcc[i])
 	}
-	mgScore := mgSum / (64 * 2)
 
-	// Endgame average across channels 64..127
-	var egSum int32
-	for i := 64; i < 128; i++ {
-		egSum += int32(usAcc[i]) - int32(themAcc[i])
+	// 2. Hidden Layer 1 (512 -> 32)
+	var l1Out [Layer1Size]int8
+	for i := 0; i < Layer1Size; i++ {
+		sum := ActiveNetwork.L1Biases[i]
+		weights := &ActiveNetwork.L1Weights[i]
+		for j := 0; j < 2*HiddenSize; j++ {
+			sum += int32(input[j]) * int32(weights[j])
+		}
+		// Clipped ReLU on Layer 1 output (scaled down by 128)
+		l1Out[i] = clamp32(sum / 128)
 	}
-	egScore := egSum / (64 * 2)
 
-	// Mobility & Center control average across channels 128..191
-	var mobSum int32
-	for i := 128; i < 192; i++ {
-		mobSum += int32(usAcc[i]) - int32(themAcc[i])
+	// 3. Output Layer (32 -> 1)
+	out := ActiveNetwork.OutBias
+	for i := 0; i < Layer1Size; i++ {
+		out += int32(l1Out[i]) * int32(ActiveNetwork.OutWeights[i])
 	}
-	mobScore := mobSum / (64 * 2)
 
-	// Combine components: 50% MG, 30% EG, 20% Positional
-	finalScore := (mgScore*50 + egScore*30 + mobScore*20) / 100
-
-	// Tempo bonus (15 cp)
-	finalScore += 15
-
-	return finalScore
+	return out / OutputScale
 }

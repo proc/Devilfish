@@ -1,8 +1,12 @@
 package nnue
 
 import (
+	_ "embed"
 	"devilfish/internal/types"
 )
+
+//go:embed default.nnue
+var embeddedDefaultNNUE []byte
 
 var defaultPST = [7][64]int32{
 	0: {}, // None
@@ -75,12 +79,20 @@ var defaultPST = [7][64]int32{
 }
 
 func init() {
-	ActiveNetwork = generateDefaultNetwork()
+	ResetToDefault()
 }
 
 func ResetToDefault() {
+	if len(embeddedDefaultNNUE) > 0 {
+		net, err := LoadBytes(embeddedDefaultNNUE)
+		if err == nil {
+			ActiveNetwork = net
+			CurrentFilePath = "<embedded>"
+			return
+		}
+	}
 	ActiveNetwork = generateDefaultNetwork()
-	CurrentFilePath = "<embedded>"
+	CurrentFilePath = "<embedded (synthetic)>"
 }
 
 func generateDefaultNetwork() *Network {
@@ -94,19 +106,18 @@ func generateDefaultNetwork() *Network {
 		sq := types.Square(f % 64)
 
 		isEnemy := ptIdx >= 6
-		var pt types.PieceType
-		if !isEnemy {
-			pt = types.PieceType(ptIdx + 1)
-		} else {
-			pt = types.PieceType(ptIdx - 6 + 1)
+		if isEnemy {
+			continue // L1 layer already performs us - them subtraction; enemy features remain 0 in synthetic baseline
 		}
+		pt := types.PieceType(ptIdx + 1)
 
 		scoreMG := pieceValsMG[pt]
 		scoreEG := pieceValsEG[pt]
 
 		if pt <= types.King {
-			scoreMG += defaultPST[pt][sq]
-			scoreEG += defaultPST[pt][sq]
+			tableSq := sq ^ 56
+			scoreMG += defaultPST[pt][tableSq]
+			scoreEG += defaultPST[pt][tableSq]
 		}
 
 		sign := int32(1)
@@ -141,9 +152,19 @@ func generateDefaultNetwork() *Network {
 		}
 	}
 
-	// Layer 1 and Output weights
-	for j := 0; j < Layer1Size; j++ {
-		net.OutWeights[j] = 1
+	// Layer 1 and Output weights with anti-symmetric advantage detection
+	for i := 0; i < 16; i++ {
+		// Neurons 0..15: positive advantage (us > them)
+		net.L1Weights[i][i] = 127
+		net.L1Weights[i][256+i] = -127
+		net.L1Biases[i] = 0
+		net.OutWeights[i] = 1
+
+		// Neurons 16..31: negative advantage (them > us)
+		net.L1Weights[16+i][i] = -127
+		net.L1Weights[16+i][256+i] = 127
+		net.L1Biases[16+i] = 0
+		net.OutWeights[16+i] = -1
 	}
 
 	return net

@@ -202,3 +202,31 @@ go test -v ./...
 
 ### Use with a Chess GUI
 Point your favorite chess GUI (e.g. Cutechess, Arena, Banksia) to the compiled `./devilfish` executable.
+
+---
+
+## NNUE Training from PGN
+
+Devilfish includes a high-performance training script [`scripts/train_from_pgn.py`](file:///Users/proc/src/devilfish/scripts/train_from_pgn.py) powered by Apple Silicon Metal GPU acceleration (via MLX) and parallel multiprocessing:
+
+```bash
+# Basic training from any PGN file (outputs to internal/nnue/default.nnue)
+python3 scripts/train_from_pgn.py games.pgn
+
+# Train with custom parameters and compressed PGN (.pgn or .pgn.gz)
+python3 scripts/train_from_pgn.py master_games.pgn.gz \
+  -o custom.nnue \
+  --epochs 50 \
+  --max-positions 250000 \
+  --workers 10
+
+# Cache dataset to .npz for fast multi-run experimentation
+python3 scripts/train_from_pgn.py master_games.pgn --save-dataset data.npz
+python3 scripts/train_from_pgn.py --load-dataset data.npz --epochs 60 -o fine_tuned.nnue
+
+# Fine-tune starting from an existing network
+python3 scripts/train_from_pgn.py games.pgn --init-weights internal/nnue/default.nnue
+```
+
+After training, recompile Devilfish with `go build -o devilfish ./cmd/devilfish` to embed the newly trained default weights, or load external weights dynamically using `./devilfish --eval-file custom.nnue`.
+
