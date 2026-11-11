@@ -707,6 +707,21 @@ func (e *Engine) Search(
 	logger.Profilef("NNUE Statistics: Evals=%d (%.1f%% of nodes), ClassicalEvals=%d, Accumulator Updates=%d, Accumulator Refreshes=%d, Incremental Hit Rate=%.2f%%",
 		totalNnueEvals, evalPct, totalClassicalEvals, totalNnueUpdates, totalNnueRefreshes, incHitRate)
 
+	if master.Eight != nil {
+		var accs, rowOps, scratchOps uint64
+		for _, w := range append([]*SearchWorker{master}, helpers...) {
+			if w.Eight != nil {
+				accs += w.Eight.Evals
+				rowOps += w.Eight.RowOps
+				scratchOps += w.Eight.ScratchOps
+			}
+		}
+		if accs > 0 && rowOps > 0 {
+			logger.Profilef("8Chess Accumulators: Built=%d, RowOps=%d (%.1f per accumulator; from scratch would be %.1f, %.1fx more)",
+				accs, rowOps, float64(rowOps)/float64(accs), float64(scratchOps)/float64(accs), float64(scratchOps)/float64(rowOps))
+		}
+	}
+
 	return rootBestMove, rootPonderMove
 }
 

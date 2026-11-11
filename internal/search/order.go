@@ -185,6 +185,7 @@ func ScoreMoves(
 	pawnThreats := b.PawnThreatsOnPieces(side)
 	kAttackers, _ := b.KingAttackersCount(side)
 	kingInDanger := kAttackers >= 2
+	checkers := b.Checkers(side)
 
 	var killer1, killer2, counterMove types.Move
 	if ply < MaxPly {
@@ -225,7 +226,6 @@ func ScoreMoves(
 
 			seeScore := eval.SEE(b, m)
 			givesCheck := b.GivesCheck(m)
-			checkers := b.Checkers(side)
 			isCheckerCapture := checkers != 0 && (bitboard.SquareBB[m.To()]&checkers) != 0
 
 			if givesCheck && seeScore >= 0 {

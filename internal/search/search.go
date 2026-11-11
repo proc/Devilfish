@@ -19,6 +19,10 @@ const (
 	MateThreshold int32 = 29000
 )
 
+// evalCacheSize is the number of entries in each worker's static-eval cache
+// (16 bytes each). Must be a power of two.
+const evalCacheSize = 1 << 17
+
 // LMRTable is built from P.LMRBase / P.LMRDivisor by rebuildLMRTable (params.go).
 var LMRTable [128][128]int8
 
@@ -40,10 +44,12 @@ type SearchWorker struct {
 	PVLength          [MaxPly]int
 	StaticEvalHistory [MaxPly]int32
 	Accumulators      [MaxPly]nnue.Accumulator
-	EvalCache         [32768]struct {
+	EvalCache         [evalCacheSize]struct {
 		hash uint64
 		eval int32
 	}
+	Eight             *nnue.EightState // incremental 8Chess accumulators (nil unless that net is active)
+	useAcc            bool             // the 768->256 accumulator stack is in use this search
 	RootBestMove      types.Move
 	RootScore         int32
 	RootMoveNodes     [64][64]uint64
@@ -65,9 +71,13 @@ func (w *SearchWorker) Evaluate(ply int) int32 {
 		if nnue.ActiveEightNetwork != nil {
 			w.NnueEvals++
 			h := w.Board.Hash
-			idx := h & 32767
+			idx := h & (evalCacheSize - 1)
 			if w.EvalCache[idx].hash == h {
 				staticEval = w.EvalCache[idx].eval
+			} else if w.Eight != nil {
+				staticEval = w.evaluateEight(ply)
+				w.EvalCache[idx].hash = h
+				w.EvalCache[idx].eval = staticEval
 			} else {
 				staticEval = nnue.EvaluateEight(nnue.ActiveEightNetwork, w.Board)
 				w.EvalCache[idx].hash = h
@@ -98,9 +108,66 @@ func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *a
 		Nodes:   nodes,
 		TBHits:  tbHits,
 	}
-	w.NnueRefreshes++
-	nnue.Refresh(w.Board, &w.Accumulators[0])
+	w.useAcc = nnue.UsesAccumulator()
+	if nnue.Enabled && nnue.ActiveEightNetwork != nil {
+		w.Eight = nnue.NewEightState(MaxPly)
+	}
+	if w.useAcc {
+		w.NnueRefreshes++
+		nnue.Refresh(w.Board, &w.Accumulators[0])
+	}
 	return w
+}
+
+// parentHash returns the hash of the position one move up the search path.
+func (w *SearchWorker) parentHash(ply int) (uint64, bool) {
+	if n := len(w.Board.UndoStack); ply > 0 && n > 0 {
+		return w.Board.UndoStack[n-1].Hash, true
+	}
+	return 0, false
+}
+
+// evaluateEight runs the 8Chess network on the current position using the
+// incremental accumulator stack.
+//
+// The cheapest way to build this position's accumulator is from its parent's,
+// one move away. The parent's is normally there, left behind by the parent's
+// own evaluation, but not if the parent was in check (never evaluated) or its
+// eval came from the cache. In that case the last move is taken back for a
+// moment so the parent's accumulator can be built first: that costs about the
+// same for this child as building it from a less related position would, and
+// every later sibling then gets the one-move path too.
+func (w *SearchWorker) evaluateEight(ply int) int32 {
+	net := nnue.ActiveEightNetwork
+	parentHash, hasParent := w.parentHash(ply)
+	if hasParent && !w.Eight.Has(ply-1, parentHash) && !w.Eight.Has(ply, w.Board.Hash) {
+		b := w.Board
+		last := b.UndoStack[len(b.UndoStack)-1].Move
+		var grandHash uint64
+		hasGrand := false
+		if n := len(b.UndoStack); ply > 1 && n > 1 {
+			grandHash, hasGrand = b.UndoStack[n-2].Hash, true
+		}
+		if last == types.MoveNone {
+			b.UnmakeNullMove()
+			w.Eight.Prepare(net, b, ply-1, grandHash, hasGrand)
+			b.MakeNullMove()
+		} else {
+			b.UnmakeMove(last)
+			w.Eight.Prepare(net, b, ply-1, grandHash, hasGrand)
+			b.MakeMove(last)
+		}
+	}
+	return w.Eight.Evaluate(net, w.Board, ply, parentHash, hasParent)
+}
+
+// pushAccumulator prepares the 768->256 accumulator for the position after m.
+// It does nothing when that network is not the one being evaluated.
+func (w *SearchWorker) pushAccumulator(ply int, m types.Move) {
+	if w.useAcc && ply+1 < MaxPly {
+		w.NnueUpdates++
+		nnue.Update(&w.Accumulators[ply], &w.Accumulators[ply+1], m, w.Board)
+	}
 }
 
 func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode bool, canMultiCut bool, excludedMove types.Move, prevMove types.Move, prevMove2 types.Move, prevMove4 types.Move) int32 {
@@ -108,7 +175,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		return 0
 	}
 
-	if ply == 0 {
+	if ply == 0 && w.useAcc {
 		w.NnueRefreshes++
 		nnue.Refresh(w.Board, &w.Accumulators[0])
 	}
@@ -339,7 +406,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			}
 			r += int8(evalR)
 		}
-		if ply+1 < MaxPly {
+		if w.useAcc && ply+1 < MaxPly {
 			w.Accumulators[ply+1] = w.Accumulators[ply]
 		}
 		w.Board.MakeNullMove()
@@ -400,10 +467,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 	// Staged Move Generation: Search TT move first before generating all moves
 	if ttMove != types.MoveNone && ttMove != excludedMove && (ply > 0 || !w.isRootExcluded(ttMove)) && movegen.IsPseudoLegal(w.Board, ttMove) {
-		if ply+1 < MaxPly {
-			w.NnueUpdates++
-			nnue.Update(&w.Accumulators[ply], &w.Accumulators[ply+1], ttMove, w.Board)
-		}
+		w.pushAccumulator(ply, ttMove)
 		if w.Board.MakeMove(ttMove) {
 			legalMoves++
 			searchedMoves[movesSearched] = ttMove
@@ -499,10 +563,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			if eval.SEE(w.Board, m) < probBeta-staticEval {
 				continue
 			}
-			if ply+1 < MaxPly {
-				w.NnueUpdates++
-				nnue.Update(&w.Accumulators[ply], &w.Accumulators[ply+1], m, w.Board)
-			}
+			w.pushAccumulator(ply, m)
 			if !w.Board.MakeMove(m) {
 				continue
 			}
@@ -524,6 +585,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	// 8. Staged Move Generation & Search Loop
 	mp := NewMovePicker(w.Board, ttMove, excludedMove, ply, prevMove, prevMove2, prevMove4, w.History)
 	mp.stage = StageGenCaptures
+	mp.SetNodeInfo(threatenedPieces, kingInDanger, hasActiveAttack, themKingRing)
 
 	for {
 		m := mp.Next()
@@ -547,14 +609,26 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		if m.IsEnPassant() {
 			victim = types.Pawn
 		}
-		moveSEE := eval.SEE(w.Board, m)
-		givesCheck := w.Board.GivesCheck(m)
+		// SEE: captures and promotions carry the value the picker already
+		// computed; quiet moves get one only if a rule below asks for it.
+		moveSEE, seeKnown := mp.LastSEE()
+		// givesCheck is only read by the pruning rules and by LMR.
+		givesCheck := false
+		if !inCheck && movesSearched > 0 && ((!isPVNode && depth <= 4) || (depth >= 3 && movesSearched >= 2)) {
+			givesCheck = w.Board.GivesCheck(m)
+		}
 		isAdvancedPawnPush := isQuiet && attacker == types.Pawn &&
 			((us == types.White && toSq >= types.A6) || (us == types.Black && toSq <= types.H3))
 		is7thRankPawnPush := attacker == types.Pawn &&
 			((us == types.White && toSq.Rank() == types.Rank7) || (us == types.Black && toSq.Rank() == types.Rank2))
 
-		isThreatEvasion := isQuiet && threatenedPieces != 0 && (bitboard.SquareBB[fromSq]&threatenedPieces) != 0 && moveSEE >= 0
+		isThreatEvasion := false
+		if isQuiet && threatenedPieces != 0 && (bitboard.SquareBB[fromSq]&threatenedPieces) != 0 {
+			if !seeKnown {
+				moveSEE, seeKnown = eval.SEE(w.Board, m), true
+			}
+			isThreatEvasion = moveSEE >= 0
+		}
 		isThreatMove := isQuiet && threatenedPieces == 0 && IsTacticalThreat(w.Board, m)
 		isKingThreat := threatenedPieces == 0 && IsKingAttack(w.Board, m)
 		isKingZoneMove := (bitboard.SquareBB[toSq] & themKingRing) != 0
@@ -609,9 +683,12 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		// SEE Pruning
 		// Do not prune tactical/killer moves, countermoves, advanced pawn pushes, or moves that give check
 		if !isPVNode && !inCheck && depth <= 3 && movesSearched > 0 && m != killer1 && m != killer2 && m != counterMove && !isAdvancedPawnPush && !isThreatMove && !isThreatEvasion {
-			if !givesCheck {
+			if !givesCheck && (!isQuiet || depth <= 2) {
+				if !seeKnown {
+					moveSEE, seeKnown = eval.SEE(w.Board, m), true
+				}
 				if isQuiet {
-					if depth <= 2 && moveSEE < -int32(depth)*P.SEEQuietMul {
+					if moveSEE < -int32(depth)*P.SEEQuietMul {
 						continue
 					}
 				} else {
@@ -622,10 +699,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			}
 		}
 
-		if ply+1 < MaxPly {
-			w.NnueUpdates++
-			nnue.Update(&w.Accumulators[ply], &w.Accumulators[ply+1], m, w.Board)
-		}
+		w.pushAccumulator(ply, m)
 		if !w.Board.MakeMove(m) {
 			continue
 		}
@@ -723,6 +797,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					} else if depth >= 4 && movesSearched >= 4 {
 						reduction /= 2
 
+						if !seeKnown {
+							moveSEE, seeKnown = eval.SEE(w.Board, m), true
+						}
 						if moveSEE < 0 {
 							reduction++
 						} else if moveSEE > 100 {
@@ -987,14 +1064,12 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 		m := PickNextMove(&ml, scores[:ml.Count], i)
 
 		// SEE pruning in quiescence: skip losing captures if not in check and move does not give check
-		if !inCheck && !w.Board.GivesCheck(m) && eval.SEE(w.Board, m) < 0 {
+		// SEE first: GivesCheck then only runs for the losing captures.
+		if !inCheck && eval.SEE(w.Board, m) < 0 && !w.Board.GivesCheck(m) {
 			continue
 		}
 
-		if ply+1 < MaxPly {
-			w.NnueUpdates++
-			nnue.Update(&w.Accumulators[ply], &w.Accumulators[ply+1], m, w.Board)
-		}
+		w.pushAccumulator(ply, m)
 		if !w.Board.MakeMove(m) {
 			continue
 		}

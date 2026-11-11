@@ -39,6 +39,7 @@ type MovePicker struct {
 
 	captures     movegen.MoveList
 	capScores    [256]int32
+	capSEE       [256]int32
 	capIndex     int
 
 	quiets       movegen.MoveList
@@ -47,8 +48,79 @@ type MovePicker struct {
 
 	badCaps      [64]types.Move
 	badCapScores [64]int32
+	badCapSEE    [64]int32
 	badCapCount  int
 	badCapIndex  int
+
+	// SEE of the move most recently returned by Next, when it came from the
+	// capture list (where SEE is computed for scoring anyway).
+	lastSEE      int32
+	lastSEEKnown bool
+
+	// Per-node facts the search has already worked out. When not supplied the
+	// picker computes them itself.
+	haveNodeInfo    bool
+	threats         bitboard.Bitboard
+	kingInDanger    bool
+	hasActiveAttack bool
+	enemyKingRing   bitboard.Bitboard
+}
+
+// SetNodeInfo hands the picker values the caller has already computed for this
+// position, so they are not computed twice: the caller's pieces under tactical
+// threat, whether its king zone is attacked by two or more pieces, whether it
+// has an attack going against the enemy king, and the enemy king ring.
+func (mp *MovePicker) SetNodeInfo(threats bitboard.Bitboard, kingInDanger, hasActiveAttack bool, enemyKingRing bitboard.Bitboard) {
+	mp.haveNodeInfo = true
+	mp.threats = threats
+	mp.kingInDanger = kingInDanger
+	mp.hasActiveAttack = hasActiveAttack
+	mp.enemyKingRing = enemyKingRing
+}
+
+// LastSEE returns the static exchange value of the move Next just returned, if
+// the picker computed one for it.
+func (mp *MovePicker) LastSEE() (int32, bool) {
+	return mp.lastSEE, mp.lastSEEKnown
+}
+
+// enemyRing returns the squares around the enemy king, extended two ranks
+// toward the side to move.
+func (mp *MovePicker) enemyRing() bitboard.Bitboard {
+	if mp.haveNodeInfo {
+		return mp.enemyKingRing
+	}
+	them := mp.board.SideToMove.Other()
+	kSq := mp.board.KingSquare(them)
+	ring := bitboard.Bitboard(0)
+	if kSq < types.SquareNone {
+		ring = bitboard.KingAttacks(kSq) | bitboard.SquareBB[kSq]
+		if them == types.White {
+			ring |= (ring << 8) | (ring << 16)
+		} else {
+			ring |= (ring >> 8) | (ring >> 16)
+		}
+	}
+	return ring
+}
+
+// pickCapture is PickNextMove for the capture list, keeping capSEE in step.
+func (mp *MovePicker) pickCapture(currentIndex int) types.Move {
+	bestIndex := currentIndex
+	bestScore := mp.capScores[currentIndex]
+	for i := currentIndex + 1; i < mp.captures.Count; i++ {
+		if mp.capScores[i] > bestScore {
+			bestScore = mp.capScores[i]
+			bestIndex = i
+		}
+	}
+	if bestIndex != currentIndex {
+		ml := &mp.captures
+		ml.Moves[currentIndex], ml.Moves[bestIndex] = ml.Moves[bestIndex], ml.Moves[currentIndex]
+		mp.capScores[currentIndex], mp.capScores[bestIndex] = mp.capScores[bestIndex], mp.capScores[currentIndex]
+		mp.capSEE[currentIndex], mp.capSEE[bestIndex] = mp.capSEE[bestIndex], mp.capSEE[currentIndex]
+	}
+	return mp.captures.Moves[currentIndex]
 }
 
 func NewMovePicker(
@@ -85,6 +157,7 @@ func NewMovePicker(
 }
 
 func (mp *MovePicker) Next() types.Move {
+	mp.lastSEEKnown = false
 	for {
 		switch mp.stage {
 		case StageTTMove:
@@ -98,17 +171,7 @@ func (mp *MovePicker) Next() types.Move {
 			mp.stage = StageGoodCaptures
 			movegen.GenerateMovesByType(mp.board, movegen.GenCaptures, &mp.captures)
 			checkers := mp.board.Checkers(mp.board.SideToMove)
-			them := mp.board.SideToMove.Other()
-			kSq := mp.board.KingSquare(them)
-			kingRing := bitboard.Bitboard(0)
-			if kSq < types.SquareNone {
-				kingRing = bitboard.KingAttacks(kSq) | bitboard.SquareBB[kSq]
-				if them == types.White {
-					kingRing |= (kingRing << 8) | (kingRing << 16)
-				} else {
-					kingRing |= (kingRing >> 8) | (kingRing >> 16)
-				}
-			}
+			kingRing := mp.enemyRing()
 
 			for i := 0; i < mp.captures.Count; i++ {
 				m := mp.captures.Moves[i]
@@ -123,6 +186,7 @@ func (mp *MovePicker) Next() types.Move {
 					capHist = mp.history.CaptureHistory[attacker][m.To()][victim]
 				}
 				see := eval.SEE(mp.board, m)
+				mp.capSEE[i] = see
 				givesCheck := mp.board.GivesCheck(m)
 				isCheckerCapture := checkers != 0 && (bitboard.SquareBB[m.To()]&checkers) != 0
 				isKingZoneCapture := (bitboard.SquareBB[m.To()] & kingRing) != 0
@@ -165,8 +229,9 @@ func (mp *MovePicker) Next() types.Move {
 
 		case StageGoodCaptures:
 			for mp.capIndex < mp.captures.Count {
-				m := PickNextMove(&mp.captures, mp.capScores[:mp.captures.Count], mp.capIndex)
+				m := mp.pickCapture(mp.capIndex)
 				score := mp.capScores[mp.capIndex]
+				see := mp.capSEE[mp.capIndex]
 				mp.capIndex++
 
 				if m == mp.ttMove || m == mp.excludedMove {
@@ -175,6 +240,7 @@ func (mp *MovePicker) Next() types.Move {
 
 				// Return good/equal captures, queen promotions, and forcing checking captures in this stage
 				if score >= ScoreQuietCheck {
+					mp.lastSEE, mp.lastSEEKnown = see, true
 					return m
 				}
 
@@ -182,6 +248,7 @@ func (mp *MovePicker) Next() types.Move {
 				if mp.badCapCount < 64 {
 					mp.badCaps[mp.badCapCount] = m
 					mp.badCapScores[mp.badCapCount] = score
+					mp.badCapSEE[mp.badCapCount] = see
 					mp.badCapCount++
 				}
 			}
@@ -217,22 +284,20 @@ func (mp *MovePicker) Next() types.Move {
 			mp.stage = StageQuiets
 			movegen.GenerateMovesByType(mp.board, movegen.GenQuiets, &mp.quiets)
 			side := mp.board.SideToMove
-			pawnThreats := mp.board.PawnThreatsOnPieces(side)
-			kAttackers, _ := mp.board.KingAttackersCount(side)
-			kingInDanger := kAttackers >= 2
-			them := side.Other()
-			enemyAttackers, enemyUnits := mp.board.KingAttackersCount(them)
-			hasActiveAttack := enemyAttackers >= 2 || enemyUnits >= 4
-			enemyKingSq := mp.board.KingSquare(them)
-			enemyKingRing := bitboard.Bitboard(0)
-			if enemyKingSq < types.SquareNone {
-				enemyKingRing = bitboard.KingAttacks(enemyKingSq) | bitboard.SquareBB[enemyKingSq]
-				if them == types.White {
-					enemyKingRing |= (enemyKingRing << 8) | (enemyKingRing << 16)
-				} else {
-					enemyKingRing |= (enemyKingRing >> 8) | (enemyKingRing >> 16)
-				}
+			var pawnThreats bitboard.Bitboard
+			var kingInDanger, hasActiveAttack bool
+			if mp.haveNodeInfo {
+				pawnThreats = mp.threats
+				kingInDanger = mp.kingInDanger
+				hasActiveAttack = mp.hasActiveAttack
+			} else {
+				pawnThreats = mp.board.PawnThreatsOnPieces(side)
+				kAttackers, _ := mp.board.KingAttackersCount(side)
+				kingInDanger = kAttackers >= 2
+				enemyAttackers, enemyUnits := mp.board.KingAttackersCount(side.Other())
+				hasActiveAttack = enemyAttackers >= 2 || enemyUnits >= 4
 			}
+			enemyKingRing := mp.enemyRing()
 
 			for i := 0; i < mp.quiets.Count; i++ {
 				m := mp.quiets.Moves[i]
@@ -296,8 +361,10 @@ func (mp *MovePicker) Next() types.Move {
 				if bestIdx != mp.badCapIndex {
 					mp.badCaps[mp.badCapIndex], mp.badCaps[bestIdx] = mp.badCaps[bestIdx], mp.badCaps[mp.badCapIndex]
 					mp.badCapScores[mp.badCapIndex], mp.badCapScores[bestIdx] = mp.badCapScores[bestIdx], mp.badCapScores[mp.badCapIndex]
+					mp.badCapSEE[mp.badCapIndex], mp.badCapSEE[bestIdx] = mp.badCapSEE[bestIdx], mp.badCapSEE[mp.badCapIndex]
 				}
 				m := mp.badCaps[mp.badCapIndex]
+				mp.lastSEE, mp.lastSEEKnown = mp.badCapSEE[mp.badCapIndex], true
 				mp.badCapIndex++
 				return m
 			}

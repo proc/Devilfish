@@ -32,6 +32,20 @@ func addThreatVector1024NEON(acc *[EightL1Size]int16, weights *int8) {
 	}
 }
 
+func subVector1024NEON(acc *[EightL1Size]int16, weights *int16) {
+	wSlice := unsafe.Slice(weights, EightL1Size)
+	for i := 0; i < EightL1Size; i++ {
+		acc[i] -= wSlice[i]
+	}
+}
+
+func subThreatVector1024NEON(acc *[EightL1Size]int16, weights *int8) {
+	wSlice := unsafe.Slice(weights, EightL1Size)
+	for i := 0; i < EightL1Size; i++ {
+		acc[i] -= int16(wSlice[i])
+	}
+}
+
 func activateEightFTNEON(out *uint8, pst *int16, thr *int16) {
 	outSlice := unsafe.Slice(out, EightL1Size/2)
 	pstSlice := unsafe.Slice(pst, EightL1Size)

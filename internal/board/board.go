@@ -360,7 +360,119 @@ func (b *Board) Checkers(c types.Color) bitboard.Bitboard {
 		(bitboard.RookAttacks(kSq, occ) & (b.PieceBB[types.MakePiece(them, types.Rook)] | b.PieceBB[types.MakePiece(them, types.Queen)]))
 }
 
+// GivesCheck reports whether pseudo-legal move m, played by the side to move,
+// attacks the enemy king. It works from attack tables without making the move.
+// It does not test whether m is legal (i.e. whether it leaves our own king in
+// check); callers find that out when they make the move.
 func (b *Board) GivesCheck(m types.Move) bool {
+	from := m.From()
+	to := m.To()
+	if m == types.MoveNone || from >= types.SquareNone || to >= types.SquareNone {
+		return false
+	}
+	us := b.SideToMove
+	them := us.Other()
+	moving := b.Pieces[from]
+	if moving == types.PieceNone || moving.Color() != us {
+		return false
+	}
+	kSq := b.KingSquare(them)
+	if kSq >= types.SquareNone {
+		return false
+	}
+	kBB := bitboard.SquareBB[kSq]
+	fromBB := bitboard.SquareBB[from]
+	toBB := bitboard.SquareBB[to]
+
+	// Occupancy after the move.
+	occ := (b.Occupied() &^ fromBB) | toBB
+	special := false
+	if m.IsEnPassant() {
+		if us == types.White {
+			if to < 8 {
+				return false
+			}
+			occ &^= bitboard.SquareBB[to-8]
+		} else {
+			if to >= 56 {
+				return false
+			}
+			occ &^= bitboard.SquareBB[to+8]
+		}
+		special = true
+	}
+
+	ourDiag := b.PieceBB[types.MakePiece(us, types.Bishop)] | b.PieceBB[types.MakePiece(us, types.Queen)]
+	ourStraight := b.PieceBB[types.MakePiece(us, types.Rook)] | b.PieceBB[types.MakePiece(us, types.Queen)]
+
+	if m.IsCastle() {
+		var rFrom, rTo types.Square
+		if m.Flags() == types.FlagKingCastle {
+			if us == types.White {
+				rFrom, rTo = types.H1, types.F1
+			} else {
+				rFrom, rTo = types.H8, types.F8
+			}
+		} else {
+			if us == types.White {
+				rFrom, rTo = types.A1, types.D1
+			} else {
+				rFrom, rTo = types.A8, types.D8
+			}
+		}
+		occ = (occ &^ bitboard.SquareBB[rFrom]) | bitboard.SquareBB[rTo]
+		ourStraight = (ourStraight &^ bitboard.SquareBB[rFrom]) | bitboard.SquareBB[rTo]
+		special = true
+	} else {
+		// Direct check from the destination square.
+		pt := moving.Type()
+		if m.IsPromotion() {
+			pt = m.PromotionType()
+		}
+		switch pt {
+		case types.Pawn:
+			if bitboard.PawnAttacks(us, to)&kBB != 0 {
+				return true
+			}
+		case types.Knight:
+			if bitboard.KnightAttacks(to)&kBB != 0 {
+				return true
+			}
+		case types.Bishop:
+			if bitboard.BishopAttacks(to, occ)&kBB != 0 {
+				return true
+			}
+		case types.Rook:
+			if bitboard.RookAttacks(to, occ)&kBB != 0 {
+				return true
+			}
+		case types.Queen:
+			if bitboard.QueenAttacks(to, occ)&kBB != 0 {
+				return true
+			}
+		}
+	}
+
+	// Discovered check: one of our sliders now sees the king. Only possible if
+	// the vacated square is on a line with the king, or occupancy changed in
+	// more than the usual two squares (en passant, castling).
+	if !special && bitboard.LineTable[from][kSq] == 0 {
+		return false
+	}
+	ourDiag &^= fromBB
+	ourStraight &^= fromBB
+	if ourDiag != 0 && bitboard.BishopAttacks(kSq, occ)&ourDiag != 0 {
+		return true
+	}
+	if ourStraight != 0 && bitboard.RookAttacks(kSq, occ)&ourStraight != 0 {
+		return true
+	}
+	return false
+}
+
+// GivesCheckSlow is the reference implementation of GivesCheck: it makes the
+// move and looks. It returns false for illegal moves. Kept for tests.
+func (b *Board) GivesCheckSlow(m types.Move) bool {
 	if !b.MakeMove(m) {
 		return false
 	}

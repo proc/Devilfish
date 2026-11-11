@@ -32,9 +32,17 @@ func FeatureIndex(perspective types.Color, p types.Piece, sq types.Square) int {
 	return ptIdx*64 + perspSq
 }
 
+// UsesAccumulator reports whether evaluation reads the 768->256 Accumulator.
+// It does not when NNUE is switched off or when the 8Chess network is active
+// (that network keeps its own state, see EightState), so the search can skip
+// maintaining it.
+func UsesAccumulator() bool {
+	return Enabled && ActiveNetwork != nil && ActiveEightNetwork == nil
+}
+
 // Refresh recomputes the accumulators for White and Black completely from scratch.
 func Refresh(b *board.Board, acc *Accumulator) {
-	if ActiveNetwork == nil {
+	if ActiveNetwork == nil || ActiveEightNetwork != nil {
 		return
 	}
 
@@ -61,7 +69,7 @@ func Refresh(b *board.Board, acc *Accumulator) {
 
 // Update incrementally updates next Accumulator from curr Accumulator based on move m.
 func Update(curr *Accumulator, next *Accumulator, m types.Move, b *board.Board) {
-	if ActiveNetwork == nil {
+	if ActiveNetwork == nil || ActiveEightNetwork != nil {
 		return
 	}
 

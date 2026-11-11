@@ -223,6 +223,9 @@ type EightNetwork struct {
 	FTPieceWeights  []int16                 // [EightPieceFeatures * EightL1Size]
 	FTBiases        [EightL1Size]int16      // [EightL1Size]
 	L1Weights       [EightOutputBuckets][EightL2Size * EightL1Size]int8
+	// L1WeightsByInput holds the same numbers as L1Weights, indexed
+	// [bucket][input][output]. Derived at load time; see eightL1.
+	L1WeightsByInput [EightOutputBuckets][EightL1Size][EightL2Size]int8
 	L1Biases        [EightOutputBuckets][EightL2Size]float32
 	L2Weights       [EightOutputBuckets][EightL2Size][EightL3Size]float32
 	L2Biases        [EightOutputBuckets][EightL3Size]float32
@@ -295,6 +298,14 @@ func LoadEightBytes(data []byte) (*EightNetwork, error) {
 		for i := 0; i < EightL2Size*EightL1Size; i++ {
 			idx := l1WOffset + b*(EightL2Size*EightL1Size) + i
 			net.L1Weights[b][i] = int8(data[idx])
+		}
+	}
+
+	for b := 0; b < EightOutputBuckets; b++ {
+		for i := 0; i < EightL1Size; i++ {
+			for j := 0; j < EightL2Size; j++ {
+				net.L1WeightsByInput[b][i][j] = net.L1Weights[b][(i/4)*EightL2Size*4+j*4+i%4]
+			}
 		}
 	}
 
@@ -447,6 +458,11 @@ func EvaluateEight(net *EightNetwork, b *board.Board) int32 {
 		}
 	}
 
+	return eightForward(net, &accPst, &accThr, b, occCount)
+}
+
+// eightForward runs activation and the dense layers on finished accumulators.
+func eightForward(net *EightNetwork, accPst, accThr *[2][EightL1Size]int16, b *board.Board, occCount int) int32 {
 	// 3. Activation (per flip)
 	var ftOut [EightL1Size]uint8
 	stm := int(b.SideToMove)
@@ -459,32 +475,8 @@ func EvaluateEight(net *EightNetwork, b *board.Board) int32 {
 	// 4. Layer 1 Propagation
 	bucket := EightOutputBucketsLayout[occCount]
 	var preActivations [EightL2Size]int32
-	l1w := &net.L1Weights[bucket]
 
-	chunks := EightL1Size / 4 // 256 chunks of 4 bytes
-	for c := 0; c < chunks; c++ {
-		quad := *(*uint32)(unsafe.Pointer(&ftOut[c*4]))
-		if quad == 0 {
-			continue
-		}
-
-		b0 := int32(byte(quad))
-		b1 := int32(byte(quad >> 8))
-		b2 := int32(byte(quad >> 16))
-		b3 := int32(byte(quad >> 24))
-
-		wBase := c * EightL2Size * 4
-		weights := (*[64]int8)(unsafe.Pointer(&l1w[wBase]))
-		for j := 0; j < EightL2Size; j++ {
-			w0 := int32(weights[j*4+0])
-			w1 := int32(weights[j*4+1])
-			w2 := int32(weights[j*4+2])
-			w3 := int32(weights[j*4+3])
-
-			vector := b0*w0 + b1*w1 + b2*w2 + b3*w3
-			preActivations[j] += vector
-		}
-	}
+	eightL1(&ftOut, &net.L1WeightsByInput[bucket], &preActivations)
 
 	var l1Out [EightL2Size]float32
 	for i := 0; i < EightL2Size; i++ {
@@ -549,4 +541,85 @@ func NormalizeEightScoreToCP(score int32, b *board.Board) int32 {
 
 	normalization := -285.1*v*v*v + 642.5*v*v - 455.5*v + 464.8
 	return int32(math.Round(100.0 * float64(score) / normalization))
+}
+
+// eightL1Ref is the straightforward first dense layer: every non-zero group of
+// four inputs is multiplied into all sixteen outputs. Kept as the reference
+// for eightL1.
+func eightL1Ref(ftOut *[EightL1Size]uint8, l1w *[EightL2Size * EightL1Size]int8, preActivations *[EightL2Size]int32) {
+	chunks := EightL1Size / 4 // 256 chunks of 4 bytes
+	for c := 0; c < chunks; c++ {
+		quad := *(*uint32)(unsafe.Pointer(&ftOut[c*4]))
+		if quad == 0 {
+			continue
+		}
+
+		b0 := int32(byte(quad))
+		b1 := int32(byte(quad >> 8))
+		b2 := int32(byte(quad >> 16))
+		b3 := int32(byte(quad >> 24))
+
+		wBase := c * EightL2Size * 4
+		weights := (*[64]int8)(unsafe.Pointer(&l1w[wBase]))
+		for j := 0; j < EightL2Size; j++ {
+			w0 := int32(weights[j*4+0])
+			w1 := int32(weights[j*4+1])
+			w2 := int32(weights[j*4+2])
+			w3 := int32(weights[j*4+3])
+
+			vector := b0*w0 + b1*w1 + b2*w2 + b3*w3
+			preActivations[j] += vector
+		}
+	}
+}
+
+// eightL1 computes the same sums as eightL1Ref, faster. The inputs come out of
+// a clipped pairwise product, so most are zero (about one byte in nine in
+// middlegame positions) even inside a non-zero group of four; only the
+// non-zero bytes are visited. For each one the sixteen weights are read from a
+// copy of the layer laid out by input (EightNetwork.L1WeightsByInput), so they
+// sit together in one 16-byte run, and the sixteen sums stay in locals.
+func eightL1(ftOut *[EightL1Size]uint8, wt *[EightL1Size][EightL2Size]int8, preActivations *[EightL2Size]int32) {
+	var a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15 int32
+	for c := 0; c < EightL1Size/8; c++ {
+		oct := binary.LittleEndian.Uint64(ftOut[c*8 : c*8+8])
+		for oct != 0 {
+			k := bits.TrailingZeros64(oct) >> 3
+			v := int32(byte(oct >> (8 * k)))
+			oct &^= 0xFF << (8 * k)
+			w := &wt[c*8+k]
+			a0 += v * int32(w[0])
+			a1 += v * int32(w[1])
+			a2 += v * int32(w[2])
+			a3 += v * int32(w[3])
+			a4 += v * int32(w[4])
+			a5 += v * int32(w[5])
+			a6 += v * int32(w[6])
+			a7 += v * int32(w[7])
+			a8 += v * int32(w[8])
+			a9 += v * int32(w[9])
+			a10 += v * int32(w[10])
+			a11 += v * int32(w[11])
+			a12 += v * int32(w[12])
+			a13 += v * int32(w[13])
+			a14 += v * int32(w[14])
+			a15 += v * int32(w[15])
+		}
+	}
+	preActivations[0] += a0
+	preActivations[1] += a1
+	preActivations[2] += a2
+	preActivations[3] += a3
+	preActivations[4] += a4
+	preActivations[5] += a5
+	preActivations[6] += a6
+	preActivations[7] += a7
+	preActivations[8] += a8
+	preActivations[9] += a9
+	preActivations[10] += a10
+	preActivations[11] += a11
+	preActivations[12] += a12
+	preActivations[13] += a13
+	preActivations[14] += a14
+	preActivations[15] += a15
 }

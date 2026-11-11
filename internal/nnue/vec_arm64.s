@@ -123,6 +123,73 @@ loop_addthr:
 
 	RET
 
+// func subVector1024NEON(acc *[1024]int16, weights *int16)
+TEXT ·subVector1024NEON(SB), NOSPLIT|NOFRAME, $0-16
+	MOVD acc+0(FP), R0
+	MOVD weights+8(FP), R1
+	MOVD R0, R2
+
+	MOVD $16, R3 // 16 iterations of 128 bytes (2048 bytes / 1024 int16)
+loop_sub1024:
+	VLD1.P 64(R0), [V0.H8, V1.H8, V2.H8, V3.H8]
+	VLD1.P 64(R0), [V4.H8, V5.H8, V6.H8, V7.H8]
+	VLD1.P 64(R1), [V8.H8, V9.H8, V10.H8, V11.H8]
+	VLD1.P 64(R1), [V12.H8, V13.H8, V14.H8, V15.H8]
+	VSUB   V8.H8, V0.H8, V0.H8
+	VSUB   V9.H8, V1.H8, V1.H8
+	VSUB   V10.H8, V2.H8, V2.H8
+	VSUB   V11.H8, V3.H8, V3.H8
+	VSUB   V12.H8, V4.H8, V4.H8
+	VSUB   V13.H8, V5.H8, V5.H8
+	VSUB   V14.H8, V6.H8, V6.H8
+	VSUB   V15.H8, V7.H8, V7.H8
+	VST1.P [V0.H8, V1.H8, V2.H8, V3.H8], 64(R2)
+	VST1.P [V4.H8, V5.H8, V6.H8, V7.H8], 64(R2)
+	SUB    $1, R3
+	CBNZ   R3, loop_sub1024
+
+	RET
+
+// func subThreatVector1024NEON(acc *[1024]int16, weights *int8)
+TEXT ·subThreatVector1024NEON(SB), NOSPLIT|NOFRAME, $0-16
+	MOVD acc+0(FP), R0
+	MOVD weights+8(FP), R1
+	MOVD R0, R2
+
+	MOVD $16, R3 // 16 iterations * 64 elements (1024 elements total)
+loop_subthr:
+	// Load 64 bytes of weights
+	VLD1.P 64(R1), [V16.B16, V17.B16, V18.B16, V19.B16]
+	VSXTL  V16.B8, V20.H8
+	VSXTL2 V16.B16, V21.H8
+	VSXTL  V17.B8, V22.H8
+	VSXTL2 V17.B16, V23.H8
+	VSXTL  V18.B8, V24.H8
+	VSXTL2 V18.B16, V25.H8
+	VSXTL  V19.B8, V26.H8
+	VSXTL2 V19.B16, V27.H8
+
+	// Load 128 bytes of accumulator
+	VLD1.P 64(R0), [V0.H8, V1.H8, V2.H8, V3.H8]
+	VLD1.P 64(R0), [V4.H8, V5.H8, V6.H8, V7.H8]
+
+	VSUB   V20.H8, V0.H8, V0.H8
+	VSUB   V21.H8, V1.H8, V1.H8
+	VSUB   V22.H8, V2.H8, V2.H8
+	VSUB   V23.H8, V3.H8, V3.H8
+	VSUB   V24.H8, V4.H8, V4.H8
+	VSUB   V25.H8, V5.H8, V5.H8
+	VSUB   V26.H8, V6.H8, V6.H8
+	VSUB   V27.H8, V7.H8, V7.H8
+
+	VST1.P [V0.H8, V1.H8, V2.H8, V3.H8], 64(R2)
+	VST1.P [V4.H8, V5.H8, V6.H8, V7.H8], 64(R2)
+
+	SUB    $1, R3
+	CBNZ   R3, loop_subthr
+
+	RET
+
 // func activateEightFTNEON(out *uint8, pst *int16, thr *int16)
 TEXT ·activateEightFTNEON(SB), NOSPLIT|NOFRAME, $0-24
 	MOVD out+0(FP), R0

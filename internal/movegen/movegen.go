@@ -386,8 +386,11 @@ func GenerateLegalMoves(b *board.Board) []types.Move {
 }
 
 func IsPseudoLegal(b *board.Board, m types.Move) bool {
-	if m == types.MoveNone || m.IsCastle() {
+	if m == types.MoveNone {
 		return false
+	}
+	if m.IsCastle() {
+		return isPseudoLegalCastle(b, m)
 	}
 	from := m.From()
 	to := m.To()
@@ -442,4 +445,48 @@ func IsPseudoLegal(b *board.Board, m types.Move) bool {
 		}
 	}
 	return false
+}
+
+// isPseudoLegalCastle applies the same conditions the generator uses before
+// emitting a castling move: king and rook at home, the right still held, the
+// squares between empty, and the king neither in check nor passing through an
+// attacked square.
+func isPseudoLegalCastle(b *board.Board, m types.Move) bool {
+	us := b.SideToMove
+	them := us.Other()
+	occ := b.Occupied()
+
+	var kFrom, kTo, rFrom, pass types.Square
+	var right types.CastlingRights
+	var between bitboard.Bitboard
+	king := types.MakePiece(us, types.King)
+	rook := types.MakePiece(us, types.Rook)
+
+	switch {
+	case us == types.White && m.Flags() == types.FlagKingCastle:
+		kFrom, kTo, rFrom, pass, right = types.E1, types.G1, types.H1, types.F1, types.CastlingWhiteKing
+		between = bitboard.SquareBB[types.F1] | bitboard.SquareBB[types.G1]
+	case us == types.White && m.Flags() == types.FlagQueenCastle:
+		kFrom, kTo, rFrom, pass, right = types.E1, types.C1, types.A1, types.D1, types.CastlingWhiteQueen
+		between = bitboard.SquareBB[types.B1] | bitboard.SquareBB[types.C1] | bitboard.SquareBB[types.D1]
+	case us == types.Black && m.Flags() == types.FlagKingCastle:
+		kFrom, kTo, rFrom, pass, right = types.E8, types.G8, types.H8, types.F8, types.CastlingBlackKing
+		between = bitboard.SquareBB[types.F8] | bitboard.SquareBB[types.G8]
+	case us == types.Black && m.Flags() == types.FlagQueenCastle:
+		kFrom, kTo, rFrom, pass, right = types.E8, types.C8, types.A8, types.D8, types.CastlingBlackQueen
+		between = bitboard.SquareBB[types.B8] | bitboard.SquareBB[types.C8] | bitboard.SquareBB[types.D8]
+	default:
+		return false
+	}
+
+	if m.From() != kFrom || m.To() != kTo {
+		return false
+	}
+	if b.Castling&right == 0 || b.Pieces[kFrom] != king || b.Pieces[rFrom] != rook {
+		return false
+	}
+	if occ&between != 0 {
+		return false
+	}
+	return !b.IsSquareAttacked(kFrom, them) && !b.IsSquareAttacked(pass, them) && !b.IsSquareAttacked(kTo, them)
 }
