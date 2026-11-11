@@ -905,15 +905,26 @@ next:
 	RET
 
 // func l1NonzeroAVX512(ft *[1024]uint8, nz *uint32) int
+// 64 bytes per block; uses no AVX-512 mask registers (see below).
 TEXT ·l1NonzeroAVX512(SB), NOSPLIT, $0-24
 	MOVQ ft+0(FP), SI
 	MOVQ nz+8(FP), DI
 	MOVQ DI, R10
 	XORQ R11, R11
+	VPXOR Y15, Y15, Y15
 block:
-	VMOVDQU64 (SI)(R11*1), Z0
-	VPTESTMB  Z0, Z0, K1    // bit set where the byte is non-zero
-	KMOVQ     K1, AX
+	// Built from two 32-byte compares rather than VPTESTMB into a mask
+	// register: some macOS kernels (Darwin 19.6.0 to 21.2.0) do not restore
+	// the K registers after a signal, and Go signals running threads often.
+	VMOVDQU   (SI)(R11*1), Y0
+	VMOVDQU   32(SI)(R11*1), Y1
+	VPCMPEQB  Y15, Y0, Y0   // 0xFF where the byte is zero
+	VPCMPEQB  Y15, Y1, Y1
+	VPMOVMSKB Y0, AX
+	VPMOVMSKB Y1, BX
+	SHLQ      $32, BX
+	ORQ       BX, AX
+	NOTQ      AX            // set bits: non-zero bytes
 	TESTQ AX, AX
 	JZ    next
 bits:
