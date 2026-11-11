@@ -121,3 +121,61 @@ func refL1Nonzero(ft *[EightL1Size]uint8, nz *[EightL1Size + 1]uint32) int {
 	}
 	return n
 }
+
+// refFusedPiece sets dst to src plus the piece-weight rows listed in add
+// (nAdd of them) minus those listed in rem. dst and src may be the same
+// array. This is the definition of the fusedPiece kernels.
+func refFusedPiece(dst, src *[EightL1Size]int16, w *int16, add *int32, nAdd int, rem *int32, nRem int) {
+	acc := *src
+	for _, k := range unsafe.Slice(add, nAdd) {
+		row := unsafe.Slice((*int16)(unsafe.Add(unsafe.Pointer(w), uintptr(k)*EightL1Size*2)), EightL1Size)
+		for i := range acc {
+			acc[i] += row[i]
+		}
+	}
+	for _, k := range unsafe.Slice(rem, nRem) {
+		row := unsafe.Slice((*int16)(unsafe.Add(unsafe.Pointer(w), uintptr(k)*EightL1Size*2)), EightL1Size)
+		for i := range acc {
+			acc[i] -= row[i]
+		}
+	}
+	*dst = acc
+}
+
+// refFusedThreat is refFusedPiece for the int8 threat weights.
+func refFusedThreat(dst, src *[EightL1Size]int16, w *int8, add *int32, nAdd int, rem *int32, nRem int) {
+	acc := *src
+	for _, k := range unsafe.Slice(add, nAdd) {
+		row := unsafe.Slice((*int8)(unsafe.Add(unsafe.Pointer(w), uintptr(k)*EightL1Size)), EightL1Size)
+		for i := range acc {
+			acc[i] += int16(row[i])
+		}
+	}
+	for _, k := range unsafe.Slice(rem, nRem) {
+		row := unsafe.Slice((*int8)(unsafe.Add(unsafe.Pointer(w), uintptr(k)*EightL1Size)), EightL1Size)
+		for i := range acc {
+			acc[i] -= int16(row[i])
+		}
+	}
+	*dst = acc
+}
+
+// refL2 is the definition of the l2Layer kernels: out[j] = clamp(bias[j] +
+// sum over i of w[i][j]*x[i], 0, 1), the sum taken in order of i with every
+// product and every addition rounded to float32 on its own. The explicit
+// conversions stop the compiler fusing a multiply and an add, which it may do
+// on some targets, so this is the same arithmetic as the SIMD versions.
+func refL2(w *[EightL2Size][EightL3Size]float32, bias *[EightL3Size]float32, x *[EightL2Size]float32, out *[EightL3Size]float32) {
+	for j := 0; j < EightL3Size; j++ {
+		sum := bias[j]
+		for i := 0; i < EightL2Size; i++ {
+			sum = float32(sum + float32(w[i][j]*x[i]))
+		}
+		if sum < 0 {
+			sum = 0
+		} else if sum > 1 {
+			sum = 1
+		}
+		out[j] = sum
+	}
+}

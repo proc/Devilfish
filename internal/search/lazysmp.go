@@ -45,6 +45,30 @@ type Engine struct {
 	TBHits     atomic.Uint64
 	currentTM  atomic.Pointer[TimeManager]
 	searchMu   sync.Mutex
+
+	// workers are kept between searches so their large tables are allocated
+	// once. Only Search uses them, under searchMu, and it waits for every
+	// helper before returning.
+	workers []*SearchWorker
+}
+
+// worker returns the worker for thread id, ready for a new search of b.
+func (e *Engine) worker(id int, b *board.Board, tm *TimeManager) *SearchWorker {
+	if id == 0 && len(e.workers) > e.NumThreads {
+		// The thread count went down: let the surplus workers go.
+		clear(e.workers[e.NumThreads:])
+		e.workers = e.workers[:e.NumThreads]
+	}
+	for len(e.workers) <= id {
+		e.workers = append(e.workers, nil)
+	}
+	if w := e.workers[id]; w != nil {
+		w.resetFor(b, e.TT, tm, &e.Nodes, &e.TBHits)
+		return w
+	}
+	w := NewWorker(id, b, e.TT, tm, &e.Nodes, &e.TBHits)
+	e.workers[id] = w
+	return w
 }
 
 func NewEngine(ttSizeMB int, numThreads int) *Engine {
@@ -289,7 +313,7 @@ func (e *Engine) Search(
 	}
 
 	// Master worker
-	master := NewWorker(0, b, e.TT, tm, &e.Nodes, &e.TBHits)
+	master := e.worker(0, b, tm)
 
 	// WaitGroup for helper threads
 	var wg sync.WaitGroup
@@ -298,7 +322,7 @@ func (e *Engine) Search(
 	// Start helper workers
 	for id := 1; id < e.NumThreads; id++ {
 		wg.Add(1)
-		helper := NewWorker(id, b, e.TT, tm, &e.Nodes, &e.TBHits)
+		helper := e.worker(id, b, tm)
 		helpers = append(helpers, helper)
 		go func(workerID int, w *SearchWorker) {
 			defer wg.Done()
@@ -708,17 +732,18 @@ func (e *Engine) Search(
 		totalNnueEvals, evalPct, totalClassicalEvals, totalNnueUpdates, totalNnueRefreshes, incHitRate)
 
 	if master.Eight != nil {
-		var accs, rowOps, scratchOps uint64
+		var accs, rowOps, finny, rebuilds uint64
 		for _, w := range append([]*SearchWorker{master}, helpers...) {
 			if w.Eight != nil {
 				accs += w.Eight.Evals
 				rowOps += w.Eight.RowOps
-				scratchOps += w.Eight.ScratchOps
+				finny += w.Eight.FinnyRefreshes
+				rebuilds += w.Eight.ThreatRebuilds
 			}
 		}
-		if accs > 0 && rowOps > 0 {
-			logger.Profilef("8Chess Accumulators: Built=%d, RowOps=%d (%.1f per accumulator; from scratch would be %.1f, %.1fx more)",
-				accs, rowOps, float64(rowOps)/float64(accs), float64(scratchOps)/float64(accs), float64(scratchOps)/float64(rowOps))
+		if accs > 0 {
+			logger.Profilef("8Chess Accumulators: Built=%d, RowOps=%d (%.1f per set; ~110 from scratch), KingBucketCache=%d, ThreatRebuilds=%d",
+				accs, rowOps, float64(rowOps)/float64(accs), finny, rebuilds)
 		}
 	}
 

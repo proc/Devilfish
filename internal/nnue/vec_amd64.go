@@ -199,6 +199,33 @@ func l1SparseAVX2(nz *uint32, n int, wt *[EightL1Size][EightL2Size]int8, out *[E
 //go:noescape
 func l1SparseAVX512(nz *uint32, n int, wt *[EightL1Size][EightL2Size]int8, out *[EightL2Size]int32)
 
+//go:noescape
+func fusedPieceSSE2(dst, src *[EightL1Size]int16, w *int16, add *int32, nAdd int, rem *int32, nRem int)
+
+//go:noescape
+func fusedThreatSSE2(dst, src *[EightL1Size]int16, w *int8, add *int32, nAdd int, rem *int32, nRem int)
+
+//go:noescape
+func fusedPieceAVX2(dst, src *[EightL1Size]int16, w *int16, add *int32, nAdd int, rem *int32, nRem int)
+
+//go:noescape
+func fusedThreatAVX2(dst, src *[EightL1Size]int16, w *int8, add *int32, nAdd int, rem *int32, nRem int)
+
+//go:noescape
+func fusedPieceAVX512(dst, src *[EightL1Size]int16, w *int16, add *int32, nAdd int, rem *int32, nRem int)
+
+//go:noescape
+func fusedThreatAVX512(dst, src *[EightL1Size]int16, w *int8, add *int32, nAdd int, rem *int32, nRem int)
+
+//go:noescape
+func l2LayerSSE2(w *[EightL2Size][EightL3Size]float32, bias *[EightL3Size]float32, x *[EightL2Size]float32, out *[EightL3Size]float32)
+
+//go:noescape
+func l2LayerAVX2(w *[EightL2Size][EightL3Size]float32, bias *[EightL3Size]float32, x *[EightL2Size]float32, out *[EightL3Size]float32)
+
+//go:noescape
+func l2LayerAVX512(w *[EightL2Size][EightL3Size]float32, bias *[EightL3Size]float32, x *[EightL2Size]float32, out *[EightL3Size]float32)
+
 // Dispatch. The function names follow the arm64 originals so the callers are
 // the same on every architecture. simd never changes after startup (except in
 // tests), so the branches predict perfectly.
@@ -317,4 +344,43 @@ func l1Nonzero(ft *[EightL1Size]uint8, nz *[EightL1Size + 1]uint32) int {
 		return l1NonzeroSSE2(ft, &nz[0])
 	}
 	return refL1Nonzero(ft, nz)
+}
+
+func fusedPiece(dst, src *[EightL1Size]int16, w *int16, add *int32, nAdd int, rem *int32, nRem int) {
+	switch simd {
+	case simdAVX512:
+		fusedPieceAVX512(dst, src, w, add, nAdd, rem, nRem)
+	case simdAVX2:
+		fusedPieceAVX2(dst, src, w, add, nAdd, rem, nRem)
+	case simdSSE2:
+		fusedPieceSSE2(dst, src, w, add, nAdd, rem, nRem)
+	default:
+		refFusedPiece(dst, src, w, add, nAdd, rem, nRem)
+	}
+}
+
+func fusedThreat(dst, src *[EightL1Size]int16, w *int8, add *int32, nAdd int, rem *int32, nRem int) {
+	switch simd {
+	case simdAVX512:
+		fusedThreatAVX512(dst, src, w, add, nAdd, rem, nRem)
+	case simdAVX2:
+		fusedThreatAVX2(dst, src, w, add, nAdd, rem, nRem)
+	case simdSSE2:
+		fusedThreatSSE2(dst, src, w, add, nAdd, rem, nRem)
+	default:
+		refFusedThreat(dst, src, w, add, nAdd, rem, nRem)
+	}
+}
+
+func l2Layer(w *[EightL2Size][EightL3Size]float32, bias *[EightL3Size]float32, x *[EightL2Size]float32, out *[EightL3Size]float32) {
+	switch simd {
+	case simdAVX512:
+		l2LayerAVX512(w, bias, x, out)
+	case simdAVX2:
+		l2LayerAVX2(w, bias, x, out)
+	case simdSSE2:
+		l2LayerSSE2(w, bias, x, out)
+	default:
+		refL2(w, bias, x, out)
+	}
 }

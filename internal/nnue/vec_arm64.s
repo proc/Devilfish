@@ -338,3 +338,272 @@ loop:
 done:
 	VST1 [V0.S4, V1.S4, V2.S4, V3.S4], (R3)
 	RET
+
+// ---------------------------------------------------------------------------
+// Fused accumulator update: dst = src + sum of the added weight rows - sum of
+// the removed ones, one block of sixteen vector registers (128 int16) at a
+// time, so the accumulator is read and written once. dst and src may be the
+// same array. See refFusedPiece/refFusedThreat.
+// ---------------------------------------------------------------------------
+// func fusedPieceNEON(dst, src *[1024]int16, w *int16, add *int32, nAdd int, rem *int32, nRem int)
+TEXT ·fusedPieceNEON(SB), NOSPLIT|NOFRAME, $0-56
+	MOVD dst+0(FP), R0
+	MOVD src+8(FP), R1
+	MOVD w+16(FP), R2
+	MOVD add+24(FP), R3
+	MOVD nAdd+32(FP), R4
+	MOVD rem+40(FP), R5
+	MOVD nRem+48(FP), R6
+	MOVD $0, R7 // accumulator offset of this block
+	MOVD $0, R8 // weight-row offset of this block
+block:
+	ADD R7, R1, R9
+	VLD1.P 64(R9), [V0.H8, V1.H8, V2.H8, V3.H8]
+	VLD1.P 64(R9), [V4.H8, V5.H8, V6.H8, V7.H8]
+	VLD1.P 64(R9), [V8.H8, V9.H8, V10.H8, V11.H8]
+	VLD1.P 64(R9), [V12.H8, V13.H8, V14.H8, V15.H8]
+	MOVD $0, R10
+adds:
+	CMP  R4, R10
+	BGE  addsdone
+	MOVWU (R3)(R10<<2), R11
+	ADD  R11<<11, R2, R12
+	ADD  R8, R12, R12
+	VLD1.P 64(R12), [V16.H8, V17.H8, V18.H8, V19.H8]
+	VADD V16.H8, V0.H8, V0.H8
+	VADD V17.H8, V1.H8, V1.H8
+	VADD V18.H8, V2.H8, V2.H8
+	VADD V19.H8, V3.H8, V3.H8
+	VLD1.P 64(R12), [V16.H8, V17.H8, V18.H8, V19.H8]
+	VADD V16.H8, V4.H8, V4.H8
+	VADD V17.H8, V5.H8, V5.H8
+	VADD V18.H8, V6.H8, V6.H8
+	VADD V19.H8, V7.H8, V7.H8
+	VLD1.P 64(R12), [V16.H8, V17.H8, V18.H8, V19.H8]
+	VADD V16.H8, V8.H8, V8.H8
+	VADD V17.H8, V9.H8, V9.H8
+	VADD V18.H8, V10.H8, V10.H8
+	VADD V19.H8, V11.H8, V11.H8
+	VLD1.P 64(R12), [V16.H8, V17.H8, V18.H8, V19.H8]
+	VADD V16.H8, V12.H8, V12.H8
+	VADD V17.H8, V13.H8, V13.H8
+	VADD V18.H8, V14.H8, V14.H8
+	VADD V19.H8, V15.H8, V15.H8
+	ADD  $1, R10, R10
+	B    adds
+addsdone:
+	MOVD $0, R10
+rems:
+	CMP  R6, R10
+	BGE  remsdone
+	MOVWU (R5)(R10<<2), R11
+	ADD  R11<<11, R2, R12
+	ADD  R8, R12, R12
+	VLD1.P 64(R12), [V16.H8, V17.H8, V18.H8, V19.H8]
+	VSUB V16.H8, V0.H8, V0.H8
+	VSUB V17.H8, V1.H8, V1.H8
+	VSUB V18.H8, V2.H8, V2.H8
+	VSUB V19.H8, V3.H8, V3.H8
+	VLD1.P 64(R12), [V16.H8, V17.H8, V18.H8, V19.H8]
+	VSUB V16.H8, V4.H8, V4.H8
+	VSUB V17.H8, V5.H8, V5.H8
+	VSUB V18.H8, V6.H8, V6.H8
+	VSUB V19.H8, V7.H8, V7.H8
+	VLD1.P 64(R12), [V16.H8, V17.H8, V18.H8, V19.H8]
+	VSUB V16.H8, V8.H8, V8.H8
+	VSUB V17.H8, V9.H8, V9.H8
+	VSUB V18.H8, V10.H8, V10.H8
+	VSUB V19.H8, V11.H8, V11.H8
+	VLD1.P 64(R12), [V16.H8, V17.H8, V18.H8, V19.H8]
+	VSUB V16.H8, V12.H8, V12.H8
+	VSUB V17.H8, V13.H8, V13.H8
+	VSUB V18.H8, V14.H8, V14.H8
+	VSUB V19.H8, V15.H8, V15.H8
+	ADD  $1, R10, R10
+	B    rems
+remsdone:
+	ADD R7, R0, R9
+	VST1.P [V0.H8, V1.H8, V2.H8, V3.H8], 64(R9)
+	VST1.P [V4.H8, V5.H8, V6.H8, V7.H8], 64(R9)
+	VST1.P [V8.H8, V9.H8, V10.H8, V11.H8], 64(R9)
+	VST1.P [V12.H8, V13.H8, V14.H8, V15.H8], 64(R9)
+	ADD $256, R7, R7
+	ADD $256, R8, R8
+	CMP $2048, R7
+	BLT block
+	RET
+
+// func fusedThreatNEON(dst, src *[1024]int16, w *int8, add *int32, nAdd int, rem *int32, nRem int)
+TEXT ·fusedThreatNEON(SB), NOSPLIT|NOFRAME, $0-56
+	MOVD dst+0(FP), R0
+	MOVD src+8(FP), R1
+	MOVD w+16(FP), R2
+	MOVD add+24(FP), R3
+	MOVD nAdd+32(FP), R4
+	MOVD rem+40(FP), R5
+	MOVD nRem+48(FP), R6
+	MOVD $0, R7 // accumulator offset of this block
+	MOVD $0, R8 // weight-row offset of this block
+block:
+	ADD R7, R1, R9
+	VLD1.P 64(R9), [V0.H8, V1.H8, V2.H8, V3.H8]
+	VLD1.P 64(R9), [V4.H8, V5.H8, V6.H8, V7.H8]
+	VLD1.P 64(R9), [V8.H8, V9.H8, V10.H8, V11.H8]
+	VLD1.P 64(R9), [V12.H8, V13.H8, V14.H8, V15.H8]
+	MOVD $0, R10
+adds:
+	CMP  R4, R10
+	BGE  addsdone
+	MOVWU (R3)(R10<<2), R11
+	ADD  R11<<10, R2, R12
+	ADD  R8, R12, R12
+	VLD1.P 64(R12), [V16.B16, V17.B16, V18.B16, V19.B16]
+	WORD $0x0f08a614 // SXTL V20.8H, V16.8B
+	WORD $0x4f08a615 // SXTL2 V21.8H, V16.16B
+	WORD $0x0f08a636 // SXTL V22.8H, V17.8B
+	WORD $0x4f08a637 // SXTL2 V23.8H, V17.16B
+	WORD $0x0f08a658 // SXTL V24.8H, V18.8B
+	WORD $0x4f08a659 // SXTL2 V25.8H, V18.16B
+	WORD $0x0f08a67a // SXTL V26.8H, V19.8B
+	WORD $0x4f08a67b // SXTL2 V27.8H, V19.16B
+	VADD V20.H8, V0.H8, V0.H8
+	VADD V21.H8, V1.H8, V1.H8
+	VADD V22.H8, V2.H8, V2.H8
+	VADD V23.H8, V3.H8, V3.H8
+	VADD V24.H8, V4.H8, V4.H8
+	VADD V25.H8, V5.H8, V5.H8
+	VADD V26.H8, V6.H8, V6.H8
+	VADD V27.H8, V7.H8, V7.H8
+	VLD1.P 64(R12), [V16.B16, V17.B16, V18.B16, V19.B16]
+	WORD $0x0f08a614 // SXTL V20.8H, V16.8B
+	WORD $0x4f08a615 // SXTL2 V21.8H, V16.16B
+	WORD $0x0f08a636 // SXTL V22.8H, V17.8B
+	WORD $0x4f08a637 // SXTL2 V23.8H, V17.16B
+	WORD $0x0f08a658 // SXTL V24.8H, V18.8B
+	WORD $0x4f08a659 // SXTL2 V25.8H, V18.16B
+	WORD $0x0f08a67a // SXTL V26.8H, V19.8B
+	WORD $0x4f08a67b // SXTL2 V27.8H, V19.16B
+	VADD V20.H8, V8.H8, V8.H8
+	VADD V21.H8, V9.H8, V9.H8
+	VADD V22.H8, V10.H8, V10.H8
+	VADD V23.H8, V11.H8, V11.H8
+	VADD V24.H8, V12.H8, V12.H8
+	VADD V25.H8, V13.H8, V13.H8
+	VADD V26.H8, V14.H8, V14.H8
+	VADD V27.H8, V15.H8, V15.H8
+	ADD  $1, R10, R10
+	B    adds
+addsdone:
+	MOVD $0, R10
+rems:
+	CMP  R6, R10
+	BGE  remsdone
+	MOVWU (R5)(R10<<2), R11
+	ADD  R11<<10, R2, R12
+	ADD  R8, R12, R12
+	VLD1.P 64(R12), [V16.B16, V17.B16, V18.B16, V19.B16]
+	WORD $0x0f08a614 // SXTL V20.8H, V16.8B
+	WORD $0x4f08a615 // SXTL2 V21.8H, V16.16B
+	WORD $0x0f08a636 // SXTL V22.8H, V17.8B
+	WORD $0x4f08a637 // SXTL2 V23.8H, V17.16B
+	WORD $0x0f08a658 // SXTL V24.8H, V18.8B
+	WORD $0x4f08a659 // SXTL2 V25.8H, V18.16B
+	WORD $0x0f08a67a // SXTL V26.8H, V19.8B
+	WORD $0x4f08a67b // SXTL2 V27.8H, V19.16B
+	VSUB V20.H8, V0.H8, V0.H8
+	VSUB V21.H8, V1.H8, V1.H8
+	VSUB V22.H8, V2.H8, V2.H8
+	VSUB V23.H8, V3.H8, V3.H8
+	VSUB V24.H8, V4.H8, V4.H8
+	VSUB V25.H8, V5.H8, V5.H8
+	VSUB V26.H8, V6.H8, V6.H8
+	VSUB V27.H8, V7.H8, V7.H8
+	VLD1.P 64(R12), [V16.B16, V17.B16, V18.B16, V19.B16]
+	WORD $0x0f08a614 // SXTL V20.8H, V16.8B
+	WORD $0x4f08a615 // SXTL2 V21.8H, V16.16B
+	WORD $0x0f08a636 // SXTL V22.8H, V17.8B
+	WORD $0x4f08a637 // SXTL2 V23.8H, V17.16B
+	WORD $0x0f08a658 // SXTL V24.8H, V18.8B
+	WORD $0x4f08a659 // SXTL2 V25.8H, V18.16B
+	WORD $0x0f08a67a // SXTL V26.8H, V19.8B
+	WORD $0x4f08a67b // SXTL2 V27.8H, V19.16B
+	VSUB V20.H8, V8.H8, V8.H8
+	VSUB V21.H8, V9.H8, V9.H8
+	VSUB V22.H8, V10.H8, V10.H8
+	VSUB V23.H8, V11.H8, V11.H8
+	VSUB V24.H8, V12.H8, V12.H8
+	VSUB V25.H8, V13.H8, V13.H8
+	VSUB V26.H8, V14.H8, V14.H8
+	VSUB V27.H8, V15.H8, V15.H8
+	ADD  $1, R10, R10
+	B    rems
+remsdone:
+	ADD R7, R0, R9
+	VST1.P [V0.H8, V1.H8, V2.H8, V3.H8], 64(R9)
+	VST1.P [V4.H8, V5.H8, V6.H8, V7.H8], 64(R9)
+	VST1.P [V8.H8, V9.H8, V10.H8, V11.H8], 64(R9)
+	VST1.P [V12.H8, V13.H8, V14.H8, V15.H8], 64(R9)
+	ADD $256, R7, R7
+	ADD $128, R8, R8
+	CMP $2048, R7
+	BLT block
+	RET
+
+// ---------------------------------------------------------------------------
+// Second dense layer: out[j] = clamp(bias[j] + sum_i w[i][j]*x[i], 0, 1) for
+// 16 inputs and 32 outputs, eight vectors of four lanes. Separate FMUL and
+// FADD (not FMLA), in input order, as refL2 specifies.
+// ---------------------------------------------------------------------------
+
+// func l2LayerNEON(w *[16][32]float32, bias *[32]float32, x *[16]float32, out *[32]float32)
+TEXT ·l2LayerNEON(SB), NOSPLIT|NOFRAME, $0-32
+	MOVD w+0(FP), R0
+	MOVD bias+8(FP), R1
+	MOVD x+16(FP), R2
+	MOVD out+24(FP), R3
+	VLD1.P 64(R1), [V0.S4, V1.S4, V2.S4, V3.S4]
+	VLD1   (R1), [V4.S4, V5.S4, V6.S4, V7.S4]
+	MOVD $16, R4
+loop:
+	WORD $0x4ddfc850 // LD1R {V16.4S}, [R2], #4 (x[i] in every lane)
+	VLD1.P 64(R0), [V17.S4, V18.S4, V19.S4, V20.S4]
+	VLD1.P 64(R0), [V21.S4, V22.S4, V23.S4, V24.S4]
+	WORD $0x6e30de39 // FMUL V25.4S, V17.4S, V16.4S
+	WORD $0x4e39d400 // FADD V0.4S, V0.4S, V25.4S
+	WORD $0x6e30de59 // FMUL V25.4S, V18.4S, V16.4S
+	WORD $0x4e39d421 // FADD V1.4S, V1.4S, V25.4S
+	WORD $0x6e30de79 // FMUL V25.4S, V19.4S, V16.4S
+	WORD $0x4e39d442 // FADD V2.4S, V2.4S, V25.4S
+	WORD $0x6e30de99 // FMUL V25.4S, V20.4S, V16.4S
+	WORD $0x4e39d463 // FADD V3.4S, V3.4S, V25.4S
+	WORD $0x6e30deb9 // FMUL V25.4S, V21.4S, V16.4S
+	WORD $0x4e39d484 // FADD V4.4S, V4.4S, V25.4S
+	WORD $0x6e30ded9 // FMUL V25.4S, V22.4S, V16.4S
+	WORD $0x4e39d4a5 // FADD V5.4S, V5.4S, V25.4S
+	WORD $0x6e30def9 // FMUL V25.4S, V23.4S, V16.4S
+	WORD $0x4e39d4c6 // FADD V6.4S, V6.4S, V25.4S
+	WORD $0x6e30df19 // FMUL V25.4S, V24.4S, V16.4S
+	WORD $0x4e39d4e7 // FADD V7.4S, V7.4S, V25.4S
+	SUB  $1, R4, R4
+	CBNZ R4, loop
+	VEOR V26.B16, V26.B16, V26.B16
+	WORD $0x4f03f61b // FMOV V27.4S, #1.0
+	WORD $0x4e3af400 // FMAX V0.4S, V0.4S, V26.4S
+	WORD $0x4ebbf400 // FMIN V0.4S, V0.4S, V27.4S
+	WORD $0x4e3af421 // FMAX V1.4S, V1.4S, V26.4S
+	WORD $0x4ebbf421 // FMIN V1.4S, V1.4S, V27.4S
+	WORD $0x4e3af442 // FMAX V2.4S, V2.4S, V26.4S
+	WORD $0x4ebbf442 // FMIN V2.4S, V2.4S, V27.4S
+	WORD $0x4e3af463 // FMAX V3.4S, V3.4S, V26.4S
+	WORD $0x4ebbf463 // FMIN V3.4S, V3.4S, V27.4S
+	WORD $0x4e3af484 // FMAX V4.4S, V4.4S, V26.4S
+	WORD $0x4ebbf484 // FMIN V4.4S, V4.4S, V27.4S
+	WORD $0x4e3af4a5 // FMAX V5.4S, V5.4S, V26.4S
+	WORD $0x4ebbf4a5 // FMIN V5.4S, V5.4S, V27.4S
+	WORD $0x4e3af4c6 // FMAX V6.4S, V6.4S, V26.4S
+	WORD $0x4ebbf4c6 // FMIN V6.4S, V6.4S, V27.4S
+	WORD $0x4e3af4e7 // FMAX V7.4S, V7.4S, V26.4S
+	WORD $0x4ebbf4e7 // FMIN V7.4S, V7.4S, V27.4S
+	VST1.P [V0.S4, V1.S4, V2.S4, V3.S4], 64(R3)
+	VST1   [V4.S4, V5.S4, V6.S4, V7.S4], (R3)
+	RET

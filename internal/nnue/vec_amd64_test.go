@@ -32,21 +32,6 @@ func withSIMD(l simdLevel, f func()) {
 	f()
 }
 
-// fillInt16 fills s with values that include the int16 extremes, so wrapping
-// is exercised as well as ordinary sums.
-func fillInt16(rng *rand.Rand, s []int16) {
-	for i := range s {
-		switch rng.Intn(8) {
-		case 0:
-			s[i] = 32767 - int16(rng.Intn(4))
-		case 1:
-			s[i] = -32768 + int16(rng.Intn(4))
-		default:
-			s[i] = int16(rng.Intn(65536) - 32768)
-		}
-	}
-}
-
 // fillActivation fills s with values clustered around the clamp edges (0 and
 // 255) the activation cares about.
 func fillActivation(rng *rand.Rand, s []int16) {
@@ -217,6 +202,24 @@ func TestAMD64L1NonzeroKernels(t *testing.T) {
 					}
 				}
 			})
+		})
+	}
+}
+
+func TestAMD64FusedKernels(t *testing.T) {
+	rng := rand.New(rand.NewSource(17))
+	for _, level := range availableSIMD() {
+		t.Run(simdName(level), func(t *testing.T) {
+			withSIMD(level, func() { checkFusedKernels(t, rng) })
+		})
+	}
+}
+
+func TestAMD64L2Layer(t *testing.T) {
+	rng := rand.New(rand.NewSource(19))
+	for _, level := range availableSIMD() {
+		t.Run(simdName(level), func(t *testing.T) {
+			withSIMD(level, func() { checkL2(t, rng) })
 		})
 	}
 }

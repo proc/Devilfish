@@ -82,11 +82,12 @@ func TestEightIncrementalMatchesScratch(t *testing.T) {
 	if checked < 2000 {
 		t.Fatalf("only %d positions checked", checked)
 	}
-	if st.RowOps >= st.ScratchOps {
-		t.Fatalf("incremental did no better than scratch: %d ops vs %d", st.RowOps, st.ScratchOps)
+	perSet := float64(st.RowOps) / float64(st.Evals)
+	if perSet > 60 {
+		t.Fatalf("%.1f weight rows per accumulator set; from scratch is about 110", perSet)
 	}
-	t.Logf("checked %d positions; %d row ops vs %d from scratch (%.1fx fewer)",
-		checked, st.RowOps, st.ScratchOps, float64(st.ScratchOps)/float64(st.RowOps))
+	t.Logf("checked %d positions; %.1f weight rows per accumulator set, %d king-bucket cache refreshes, %d threat rebuilds",
+		checked, perSet, st.FinnyRefreshes, st.ThreatRebuilds)
 }
 
 func BenchmarkEightScratch(b *testing.B) {
@@ -213,4 +214,67 @@ func BenchmarkEightL1(b *testing.B) {
 		k := i % len(ins)
 		eightL1(&ins[k], &net.L1WeightsByInput[buckets[k]], &out)
 	}
+}
+
+// Positions for the exhaustive delta test: castling both ways, en passant
+// (including one that uncovers a line), promotions with and without capture,
+// pins and discovered attacks, kings near the mirror line and bucket edges.
+var eightDeltaFENs = []string{
+	"r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+	"r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+	"rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+	"8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+	"4k3/1b6/8/8/3pP3/8/8/7K b - e3 0 1",
+	"8/8/8/2k5/3Pp3/8/8/4K2B b - d3 0 1",
+	"n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1",
+	"r1bq1rk1/pp2bppp/2n1pn2/3p4/2PP4/2N1PN2/PP1QBPPP/R3K2R w KQ - 0 9",
+	"3k4/8/8/8/8/8/8/R2K3R w - - 0 1",
+}
+
+// TestEightDeltaEveryMove checks the incremental accumulators for every legal
+// move three plies deep from the positions above, built both from the parent
+// and from the previous sibling (two moves away).
+func TestEightDeltaEveryMove(t *testing.T) {
+	net := ActiveEightNetwork
+	if net == nil {
+		t.Skip("8Chess network not embedded")
+	}
+	st := NewEightState(8)
+	checked := 0
+	var walk func(b *board.Board, ply, depth int)
+	walk = func(b *board.Board, ply, depth int) {
+		if depth == 0 {
+			return
+		}
+		parent := b.Hash
+		if !st.Prepare(net, b, ply, 0, false) && ply == 0 {
+			t.Fatalf("%s: Prepare failed", b.ToFEN())
+		}
+		for i, m := range movegen.GenerateLegalMoves(b) {
+			if !b.MakeMove(m) {
+				continue
+			}
+			// Alternate: from the parent, or from whatever sits at this ply
+			// (the previous sibling or a cousin).
+			useParent := i%2 == 0
+			got := st.Evaluate(net, b, ply+1, parent, useParent)
+			if want := EvaluateEight(net, b); got != want {
+				b.UnmakeMove(m)
+				t.Fatalf("%s then %s (from parent: %v): incremental %d, scratch %d", b.ToFEN(), m, useParent, got, want)
+			}
+			checked++
+			walk(b, ply+1, depth-1)
+			b.UnmakeMove(m)
+		}
+	}
+	for _, fen := range eightDeltaFENs {
+		b, err := board.ParseFEN(fen)
+		if err != nil {
+			t.Fatalf("%s: %v", fen, err)
+		}
+		st.Reset()
+		walk(b, 0, 3)
+	}
+	t.Logf("checked %d moves; %.1f weight rows per accumulator set, %d king-bucket cache refreshes, %d threat rebuilds",
+		checked, float64(st.RowOps)/float64(st.Evals), st.FinnyRefreshes, st.ThreatRebuilds)
 }

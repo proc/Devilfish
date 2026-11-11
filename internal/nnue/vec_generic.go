@@ -42,3 +42,15 @@ func l1Sparse(nz *uint32, n int, wt *[EightL1Size][EightL2Size]int8, out *[Eight
 func l1Nonzero(ft *[EightL1Size]uint8, nz *[EightL1Size + 1]uint32) int {
 	return refL1Nonzero(ft, nz)
 }
+
+func fusedPiece(dst, src *[EightL1Size]int16, w *int16, add *int32, nAdd int, rem *int32, nRem int) {
+	refFusedPiece(dst, src, w, add, nAdd, rem, nRem)
+}
+
+func fusedThreat(dst, src *[EightL1Size]int16, w *int8, add *int32, nAdd int, rem *int32, nRem int) {
+	refFusedThreat(dst, src, w, add, nAdd, rem, nRem)
+}
+
+func l2Layer(w *[EightL2Size][EightL3Size]float32, bias *[EightL3Size]float32, x *[EightL2Size]float32, out *[EightL3Size]float32) {
+	refL2(w, bias, x, out)
+}

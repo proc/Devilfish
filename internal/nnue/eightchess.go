@@ -491,18 +491,7 @@ func eightForward(net *EightNetwork, accPst, accThr *[2][EightL1Size]int16, b *b
 
 	// 5. Layer 2 Propagation
 	var l2Out [EightL3Size]float32
-	for j := 0; j < EightL3Size; j++ {
-		sum := net.L2Biases[bucket][j]
-		for i := 0; i < EightL2Size; i++ {
-			sum += net.L2Weights[bucket][i][j] * l1Out[i]
-		}
-		if sum < 0.0 {
-			sum = 0.0
-		} else if sum > 1.0 {
-			sum = 1.0
-		}
-		l2Out[j] = sum
-	}
+	l2Layer(&net.L2Weights[bucket], &net.L2Biases[bucket], &l1Out, &l2Out)
 
 	// 6. Layer 3 Propagation (Halving reduction)
 	var sums [16]float32

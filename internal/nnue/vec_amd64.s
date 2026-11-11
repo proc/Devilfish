@@ -936,3 +936,708 @@ next:
 	MOVQ DI, ret+16(FP)
 	VZEROUPPER
 	RET
+
+// ---------------------------------------------------------------------------
+// Fused accumulator update: dst = src + sum of the added weight rows - sum of
+// the removed ones. Works through the accumulator one register block at a
+// time (eight vector registers), applying every row to the block before
+// storing it, so the 2 KB accumulator is read once and written once however
+// many rows change. dst and src may be the same array. Row k of the piece
+// weights starts at byte k<<11 (1024 int16); of the threat weights at k<<10
+// (1024 int8). See refFusedPiece/refFusedThreat.
+//
+// Registers: DI dst, SI src, DX weights, R8/R9 added rows and count,
+// R10/R11 removed rows and count, BX block offset in the accumulator, R12 the
+// matching offset in a weight row, CX the row counter, AX the row address.
+// ---------------------------------------------------------------------------
+
+// func fusedPieceSSE2(dst, src *[1024]int16, w *int16, add *int32, nAdd int, rem *int32, nRem int)
+TEXT ·fusedPieceSSE2(SB), NOSPLIT, $0-56
+	MOVQ dst+0(FP), DI
+	MOVQ src+8(FP), SI
+	MOVQ w+16(FP), DX
+	MOVQ add+24(FP), R8
+	MOVQ nAdd+32(FP), R9
+	MOVQ rem+40(FP), R10
+	MOVQ nRem+48(FP), R11
+	XORQ BX, BX  // accumulator offset of this block
+	XORQ R12, R12 // weight-row offset of this block
+block:
+	MOVOU 0(SI)(BX*1), X0
+	MOVOU 16(SI)(BX*1), X1
+	MOVOU 32(SI)(BX*1), X2
+	MOVOU 48(SI)(BX*1), X3
+	MOVOU 64(SI)(BX*1), X4
+	MOVOU 80(SI)(BX*1), X5
+	MOVOU 96(SI)(BX*1), X6
+	MOVOU 112(SI)(BX*1), X7
+	XORQ CX, CX
+adds:
+	CMPQ CX, R9
+	JAE  addsdone
+	MOVL (R8)(CX*4), AX
+	SHLQ $11, AX
+	ADDQ DX, AX
+	ADDQ R12, AX
+	MOVOU 0(AX), X8
+	PADDW X8, X0
+	MOVOU 16(AX), X9
+	PADDW X9, X1
+	MOVOU 32(AX), X10
+	PADDW X10, X2
+	MOVOU 48(AX), X11
+	PADDW X11, X3
+	MOVOU 64(AX), X12
+	PADDW X12, X4
+	MOVOU 80(AX), X13
+	PADDW X13, X5
+	MOVOU 96(AX), X14
+	PADDW X14, X6
+	MOVOU 112(AX), X15
+	PADDW X15, X7
+	INCQ CX
+	JMP  adds
+addsdone:
+	XORQ CX, CX
+rems:
+	CMPQ CX, R11
+	JAE  remsdone
+	MOVL (R10)(CX*4), AX
+	SHLQ $11, AX
+	ADDQ DX, AX
+	ADDQ R12, AX
+	MOVOU 0(AX), X8
+	PSUBW X8, X0
+	MOVOU 16(AX), X9
+	PSUBW X9, X1
+	MOVOU 32(AX), X10
+	PSUBW X10, X2
+	MOVOU 48(AX), X11
+	PSUBW X11, X3
+	MOVOU 64(AX), X12
+	PSUBW X12, X4
+	MOVOU 80(AX), X13
+	PSUBW X13, X5
+	MOVOU 96(AX), X14
+	PSUBW X14, X6
+	MOVOU 112(AX), X15
+	PSUBW X15, X7
+	INCQ CX
+	JMP  rems
+remsdone:
+	MOVOU X0, 0(DI)(BX*1)
+	MOVOU X1, 16(DI)(BX*1)
+	MOVOU X2, 32(DI)(BX*1)
+	MOVOU X3, 48(DI)(BX*1)
+	MOVOU X4, 64(DI)(BX*1)
+	MOVOU X5, 80(DI)(BX*1)
+	MOVOU X6, 96(DI)(BX*1)
+	MOVOU X7, 112(DI)(BX*1)
+	ADDQ $128, BX
+	ADDQ $128, R12
+	CMPQ BX, $2048
+	JB   block
+	RET
+
+// func fusedThreatSSE2(dst, src *[1024]int16, w *int8, add *int32, nAdd int, rem *int32, nRem int)
+TEXT ·fusedThreatSSE2(SB), NOSPLIT, $0-56
+	MOVQ dst+0(FP), DI
+	MOVQ src+8(FP), SI
+	MOVQ w+16(FP), DX
+	MOVQ add+24(FP), R8
+	MOVQ nAdd+32(FP), R9
+	MOVQ rem+40(FP), R10
+	MOVQ nRem+48(FP), R11
+	XORQ BX, BX  // accumulator offset of this block
+	XORQ R12, R12 // weight-row offset of this block
+block:
+	MOVOU 0(SI)(BX*1), X0
+	MOVOU 16(SI)(BX*1), X1
+	MOVOU 32(SI)(BX*1), X2
+	MOVOU 48(SI)(BX*1), X3
+	MOVOU 64(SI)(BX*1), X4
+	MOVOU 80(SI)(BX*1), X5
+	MOVOU 96(SI)(BX*1), X6
+	MOVOU 112(SI)(BX*1), X7
+	XORQ CX, CX
+adds:
+	CMPQ CX, R9
+	JAE  addsdone
+	MOVL (R8)(CX*4), AX
+	SHLQ $10, AX
+	ADDQ DX, AX
+	ADDQ R12, AX
+	MOVOU 0(AX), X8
+	MOVO X8, X9
+	PUNPCKLBW X8, X8
+	PUNPCKHBW X9, X9
+	PSRAW $8, X8
+	PSRAW $8, X9
+	PADDW X8, X0
+	PADDW X9, X1
+	MOVOU 16(AX), X10
+	MOVO X10, X11
+	PUNPCKLBW X10, X10
+	PUNPCKHBW X11, X11
+	PSRAW $8, X10
+	PSRAW $8, X11
+	PADDW X10, X2
+	PADDW X11, X3
+	MOVOU 32(AX), X12
+	MOVO X12, X13
+	PUNPCKLBW X12, X12
+	PUNPCKHBW X13, X13
+	PSRAW $8, X12
+	PSRAW $8, X13
+	PADDW X12, X4
+	PADDW X13, X5
+	MOVOU 48(AX), X14
+	MOVO X14, X15
+	PUNPCKLBW X14, X14
+	PUNPCKHBW X15, X15
+	PSRAW $8, X14
+	PSRAW $8, X15
+	PADDW X14, X6
+	PADDW X15, X7
+	INCQ CX
+	JMP  adds
+addsdone:
+	XORQ CX, CX
+rems:
+	CMPQ CX, R11
+	JAE  remsdone
+	MOVL (R10)(CX*4), AX
+	SHLQ $10, AX
+	ADDQ DX, AX
+	ADDQ R12, AX
+	MOVOU 0(AX), X8
+	MOVO X8, X9
+	PUNPCKLBW X8, X8
+	PUNPCKHBW X9, X9
+	PSRAW $8, X8
+	PSRAW $8, X9
+	PSUBW X8, X0
+	PSUBW X9, X1
+	MOVOU 16(AX), X10
+	MOVO X10, X11
+	PUNPCKLBW X10, X10
+	PUNPCKHBW X11, X11
+	PSRAW $8, X10
+	PSRAW $8, X11
+	PSUBW X10, X2
+	PSUBW X11, X3
+	MOVOU 32(AX), X12
+	MOVO X12, X13
+	PUNPCKLBW X12, X12
+	PUNPCKHBW X13, X13
+	PSRAW $8, X12
+	PSRAW $8, X13
+	PSUBW X12, X4
+	PSUBW X13, X5
+	MOVOU 48(AX), X14
+	MOVO X14, X15
+	PUNPCKLBW X14, X14
+	PUNPCKHBW X15, X15
+	PSRAW $8, X14
+	PSRAW $8, X15
+	PSUBW X14, X6
+	PSUBW X15, X7
+	INCQ CX
+	JMP  rems
+remsdone:
+	MOVOU X0, 0(DI)(BX*1)
+	MOVOU X1, 16(DI)(BX*1)
+	MOVOU X2, 32(DI)(BX*1)
+	MOVOU X3, 48(DI)(BX*1)
+	MOVOU X4, 64(DI)(BX*1)
+	MOVOU X5, 80(DI)(BX*1)
+	MOVOU X6, 96(DI)(BX*1)
+	MOVOU X7, 112(DI)(BX*1)
+	ADDQ $128, BX
+	ADDQ $64, R12
+	CMPQ BX, $2048
+	JB   block
+	RET
+
+// func fusedPieceAVX2(dst, src *[1024]int16, w *int16, add *int32, nAdd int, rem *int32, nRem int)
+TEXT ·fusedPieceAVX2(SB), NOSPLIT, $0-56
+	MOVQ dst+0(FP), DI
+	MOVQ src+8(FP), SI
+	MOVQ w+16(FP), DX
+	MOVQ add+24(FP), R8
+	MOVQ nAdd+32(FP), R9
+	MOVQ rem+40(FP), R10
+	MOVQ nRem+48(FP), R11
+	XORQ BX, BX  // accumulator offset of this block
+	XORQ R12, R12 // weight-row offset of this block
+block:
+	VMOVDQU 0(SI)(BX*1), Y0
+	VMOVDQU 32(SI)(BX*1), Y1
+	VMOVDQU 64(SI)(BX*1), Y2
+	VMOVDQU 96(SI)(BX*1), Y3
+	VMOVDQU 128(SI)(BX*1), Y4
+	VMOVDQU 160(SI)(BX*1), Y5
+	VMOVDQU 192(SI)(BX*1), Y6
+	VMOVDQU 224(SI)(BX*1), Y7
+	XORQ CX, CX
+adds:
+	CMPQ CX, R9
+	JAE  addsdone
+	MOVL (R8)(CX*4), AX
+	SHLQ $11, AX
+	ADDQ DX, AX
+	ADDQ R12, AX
+	VPADDW 0(AX), Y0, Y0
+	VPADDW 32(AX), Y1, Y1
+	VPADDW 64(AX), Y2, Y2
+	VPADDW 96(AX), Y3, Y3
+	VPADDW 128(AX), Y4, Y4
+	VPADDW 160(AX), Y5, Y5
+	VPADDW 192(AX), Y6, Y6
+	VPADDW 224(AX), Y7, Y7
+	INCQ CX
+	JMP  adds
+addsdone:
+	XORQ CX, CX
+rems:
+	CMPQ CX, R11
+	JAE  remsdone
+	MOVL (R10)(CX*4), AX
+	SHLQ $11, AX
+	ADDQ DX, AX
+	ADDQ R12, AX
+	VPSUBW 0(AX), Y0, Y0
+	VPSUBW 32(AX), Y1, Y1
+	VPSUBW 64(AX), Y2, Y2
+	VPSUBW 96(AX), Y3, Y3
+	VPSUBW 128(AX), Y4, Y4
+	VPSUBW 160(AX), Y5, Y5
+	VPSUBW 192(AX), Y6, Y6
+	VPSUBW 224(AX), Y7, Y7
+	INCQ CX
+	JMP  rems
+remsdone:
+	VMOVDQU Y0, 0(DI)(BX*1)
+	VMOVDQU Y1, 32(DI)(BX*1)
+	VMOVDQU Y2, 64(DI)(BX*1)
+	VMOVDQU Y3, 96(DI)(BX*1)
+	VMOVDQU Y4, 128(DI)(BX*1)
+	VMOVDQU Y5, 160(DI)(BX*1)
+	VMOVDQU Y6, 192(DI)(BX*1)
+	VMOVDQU Y7, 224(DI)(BX*1)
+	ADDQ $256, BX
+	ADDQ $256, R12
+	CMPQ BX, $2048
+	JB   block
+	VZEROUPPER
+	RET
+
+// func fusedThreatAVX2(dst, src *[1024]int16, w *int8, add *int32, nAdd int, rem *int32, nRem int)
+TEXT ·fusedThreatAVX2(SB), NOSPLIT, $0-56
+	MOVQ dst+0(FP), DI
+	MOVQ src+8(FP), SI
+	MOVQ w+16(FP), DX
+	MOVQ add+24(FP), R8
+	MOVQ nAdd+32(FP), R9
+	MOVQ rem+40(FP), R10
+	MOVQ nRem+48(FP), R11
+	XORQ BX, BX  // accumulator offset of this block
+	XORQ R12, R12 // weight-row offset of this block
+block:
+	VMOVDQU 0(SI)(BX*1), Y0
+	VMOVDQU 32(SI)(BX*1), Y1
+	VMOVDQU 64(SI)(BX*1), Y2
+	VMOVDQU 96(SI)(BX*1), Y3
+	VMOVDQU 128(SI)(BX*1), Y4
+	VMOVDQU 160(SI)(BX*1), Y5
+	VMOVDQU 192(SI)(BX*1), Y6
+	VMOVDQU 224(SI)(BX*1), Y7
+	XORQ CX, CX
+adds:
+	CMPQ CX, R9
+	JAE  addsdone
+	MOVL (R8)(CX*4), AX
+	SHLQ $10, AX
+	ADDQ DX, AX
+	ADDQ R12, AX
+	VPMOVSXBW 0(AX), Y8
+	VPMOVSXBW 16(AX), Y9
+	VPMOVSXBW 32(AX), Y10
+	VPMOVSXBW 48(AX), Y11
+	VPMOVSXBW 64(AX), Y12
+	VPMOVSXBW 80(AX), Y13
+	VPMOVSXBW 96(AX), Y14
+	VPMOVSXBW 112(AX), Y15
+	VPADDW Y8, Y0, Y0
+	VPADDW Y9, Y1, Y1
+	VPADDW Y10, Y2, Y2
+	VPADDW Y11, Y3, Y3
+	VPADDW Y12, Y4, Y4
+	VPADDW Y13, Y5, Y5
+	VPADDW Y14, Y6, Y6
+	VPADDW Y15, Y7, Y7
+	INCQ CX
+	JMP  adds
+addsdone:
+	XORQ CX, CX
+rems:
+	CMPQ CX, R11
+	JAE  remsdone
+	MOVL (R10)(CX*4), AX
+	SHLQ $10, AX
+	ADDQ DX, AX
+	ADDQ R12, AX
+	VPMOVSXBW 0(AX), Y8
+	VPMOVSXBW 16(AX), Y9
+	VPMOVSXBW 32(AX), Y10
+	VPMOVSXBW 48(AX), Y11
+	VPMOVSXBW 64(AX), Y12
+	VPMOVSXBW 80(AX), Y13
+	VPMOVSXBW 96(AX), Y14
+	VPMOVSXBW 112(AX), Y15
+	VPSUBW Y8, Y0, Y0
+	VPSUBW Y9, Y1, Y1
+	VPSUBW Y10, Y2, Y2
+	VPSUBW Y11, Y3, Y3
+	VPSUBW Y12, Y4, Y4
+	VPSUBW Y13, Y5, Y5
+	VPSUBW Y14, Y6, Y6
+	VPSUBW Y15, Y7, Y7
+	INCQ CX
+	JMP  rems
+remsdone:
+	VMOVDQU Y0, 0(DI)(BX*1)
+	VMOVDQU Y1, 32(DI)(BX*1)
+	VMOVDQU Y2, 64(DI)(BX*1)
+	VMOVDQU Y3, 96(DI)(BX*1)
+	VMOVDQU Y4, 128(DI)(BX*1)
+	VMOVDQU Y5, 160(DI)(BX*1)
+	VMOVDQU Y6, 192(DI)(BX*1)
+	VMOVDQU Y7, 224(DI)(BX*1)
+	ADDQ $256, BX
+	ADDQ $128, R12
+	CMPQ BX, $2048
+	JB   block
+	VZEROUPPER
+	RET
+
+// func fusedPieceAVX512(dst, src *[1024]int16, w *int16, add *int32, nAdd int, rem *int32, nRem int)
+TEXT ·fusedPieceAVX512(SB), NOSPLIT, $0-56
+	MOVQ dst+0(FP), DI
+	MOVQ src+8(FP), SI
+	MOVQ w+16(FP), DX
+	MOVQ add+24(FP), R8
+	MOVQ nAdd+32(FP), R9
+	MOVQ rem+40(FP), R10
+	MOVQ nRem+48(FP), R11
+	XORQ BX, BX  // accumulator offset of this block
+	XORQ R12, R12 // weight-row offset of this block
+block:
+	VMOVDQU64 0(SI)(BX*1), Z0
+	VMOVDQU64 64(SI)(BX*1), Z1
+	VMOVDQU64 128(SI)(BX*1), Z2
+	VMOVDQU64 192(SI)(BX*1), Z3
+	VMOVDQU64 256(SI)(BX*1), Z4
+	VMOVDQU64 320(SI)(BX*1), Z5
+	VMOVDQU64 384(SI)(BX*1), Z6
+	VMOVDQU64 448(SI)(BX*1), Z7
+	XORQ CX, CX
+adds:
+	CMPQ CX, R9
+	JAE  addsdone
+	MOVL (R8)(CX*4), AX
+	SHLQ $11, AX
+	ADDQ DX, AX
+	ADDQ R12, AX
+	VPADDW 0(AX), Z0, Z0
+	VPADDW 64(AX), Z1, Z1
+	VPADDW 128(AX), Z2, Z2
+	VPADDW 192(AX), Z3, Z3
+	VPADDW 256(AX), Z4, Z4
+	VPADDW 320(AX), Z5, Z5
+	VPADDW 384(AX), Z6, Z6
+	VPADDW 448(AX), Z7, Z7
+	INCQ CX
+	JMP  adds
+addsdone:
+	XORQ CX, CX
+rems:
+	CMPQ CX, R11
+	JAE  remsdone
+	MOVL (R10)(CX*4), AX
+	SHLQ $11, AX
+	ADDQ DX, AX
+	ADDQ R12, AX
+	VPSUBW 0(AX), Z0, Z0
+	VPSUBW 64(AX), Z1, Z1
+	VPSUBW 128(AX), Z2, Z2
+	VPSUBW 192(AX), Z3, Z3
+	VPSUBW 256(AX), Z4, Z4
+	VPSUBW 320(AX), Z5, Z5
+	VPSUBW 384(AX), Z6, Z6
+	VPSUBW 448(AX), Z7, Z7
+	INCQ CX
+	JMP  rems
+remsdone:
+	VMOVDQU64 Z0, 0(DI)(BX*1)
+	VMOVDQU64 Z1, 64(DI)(BX*1)
+	VMOVDQU64 Z2, 128(DI)(BX*1)
+	VMOVDQU64 Z3, 192(DI)(BX*1)
+	VMOVDQU64 Z4, 256(DI)(BX*1)
+	VMOVDQU64 Z5, 320(DI)(BX*1)
+	VMOVDQU64 Z6, 384(DI)(BX*1)
+	VMOVDQU64 Z7, 448(DI)(BX*1)
+	ADDQ $512, BX
+	ADDQ $512, R12
+	CMPQ BX, $2048
+	JB   block
+	VZEROUPPER
+	RET
+
+// func fusedThreatAVX512(dst, src *[1024]int16, w *int8, add *int32, nAdd int, rem *int32, nRem int)
+TEXT ·fusedThreatAVX512(SB), NOSPLIT, $0-56
+	MOVQ dst+0(FP), DI
+	MOVQ src+8(FP), SI
+	MOVQ w+16(FP), DX
+	MOVQ add+24(FP), R8
+	MOVQ nAdd+32(FP), R9
+	MOVQ rem+40(FP), R10
+	MOVQ nRem+48(FP), R11
+	XORQ BX, BX  // accumulator offset of this block
+	XORQ R12, R12 // weight-row offset of this block
+block:
+	VMOVDQU64 0(SI)(BX*1), Z0
+	VMOVDQU64 64(SI)(BX*1), Z1
+	VMOVDQU64 128(SI)(BX*1), Z2
+	VMOVDQU64 192(SI)(BX*1), Z3
+	VMOVDQU64 256(SI)(BX*1), Z4
+	VMOVDQU64 320(SI)(BX*1), Z5
+	VMOVDQU64 384(SI)(BX*1), Z6
+	VMOVDQU64 448(SI)(BX*1), Z7
+	XORQ CX, CX
+adds:
+	CMPQ CX, R9
+	JAE  addsdone
+	MOVL (R8)(CX*4), AX
+	SHLQ $10, AX
+	ADDQ DX, AX
+	ADDQ R12, AX
+	VPMOVSXBW 0(AX), Z8
+	VPMOVSXBW 32(AX), Z9
+	VPMOVSXBW 64(AX), Z10
+	VPMOVSXBW 96(AX), Z11
+	VPMOVSXBW 128(AX), Z12
+	VPMOVSXBW 160(AX), Z13
+	VPMOVSXBW 192(AX), Z14
+	VPMOVSXBW 224(AX), Z15
+	VPADDW Z8, Z0, Z0
+	VPADDW Z9, Z1, Z1
+	VPADDW Z10, Z2, Z2
+	VPADDW Z11, Z3, Z3
+	VPADDW Z12, Z4, Z4
+	VPADDW Z13, Z5, Z5
+	VPADDW Z14, Z6, Z6
+	VPADDW Z15, Z7, Z7
+	INCQ CX
+	JMP  adds
+addsdone:
+	XORQ CX, CX
+rems:
+	CMPQ CX, R11
+	JAE  remsdone
+	MOVL (R10)(CX*4), AX
+	SHLQ $10, AX
+	ADDQ DX, AX
+	ADDQ R12, AX
+	VPMOVSXBW 0(AX), Z8
+	VPMOVSXBW 32(AX), Z9
+	VPMOVSXBW 64(AX), Z10
+	VPMOVSXBW 96(AX), Z11
+	VPMOVSXBW 128(AX), Z12
+	VPMOVSXBW 160(AX), Z13
+	VPMOVSXBW 192(AX), Z14
+	VPMOVSXBW 224(AX), Z15
+	VPSUBW Z8, Z0, Z0
+	VPSUBW Z9, Z1, Z1
+	VPSUBW Z10, Z2, Z2
+	VPSUBW Z11, Z3, Z3
+	VPSUBW Z12, Z4, Z4
+	VPSUBW Z13, Z5, Z5
+	VPSUBW Z14, Z6, Z6
+	VPSUBW Z15, Z7, Z7
+	INCQ CX
+	JMP  rems
+remsdone:
+	VMOVDQU64 Z0, 0(DI)(BX*1)
+	VMOVDQU64 Z1, 64(DI)(BX*1)
+	VMOVDQU64 Z2, 128(DI)(BX*1)
+	VMOVDQU64 Z3, 192(DI)(BX*1)
+	VMOVDQU64 Z4, 256(DI)(BX*1)
+	VMOVDQU64 Z5, 320(DI)(BX*1)
+	VMOVDQU64 Z6, 384(DI)(BX*1)
+	VMOVDQU64 Z7, 448(DI)(BX*1)
+	ADDQ $512, BX
+	ADDQ $256, R12
+	CMPQ BX, $2048
+	JB   block
+	VZEROUPPER
+	RET
+
+// ---------------------------------------------------------------------------
+// Second dense layer: out[j] = clamp(bias[j] + sum_i w[i][j]*x[i], 0, 1) for
+// 16 inputs and 32 outputs. One accumulator lane per output; inputs are added
+// in order with a separate multiply and add (no FMA), so the result is the
+// same as the scalar code's. See refL2.
+// ---------------------------------------------------------------------------
+
+// func l2LayerSSE2(w *[16][32]float32, bias *[32]float32, x *[16]float32, out *[32]float32)
+TEXT ·l2LayerSSE2(SB), NOSPLIT, $0-32
+	MOVQ w+0(FP), DX
+	MOVQ bias+8(FP), BX
+	MOVQ x+16(FP), SI
+	MOVQ out+24(FP), DI
+	MOVUPS 0(BX), X0
+	MOVUPS 16(BX), X1
+	MOVUPS 32(BX), X2
+	MOVUPS 48(BX), X3
+	MOVUPS 64(BX), X4
+	MOVUPS 80(BX), X5
+	MOVUPS 96(BX), X6
+	MOVUPS 112(BX), X7
+	MOVQ $16, CX
+loop:
+	MOVSS (SI), X8
+	SHUFPS $0, X8, X8
+	MOVUPS 0(DX), X9
+	MULPS X8, X9
+	ADDPS X9, X0
+	MOVUPS 16(DX), X9
+	MULPS X8, X9
+	ADDPS X9, X1
+	MOVUPS 32(DX), X9
+	MULPS X8, X9
+	ADDPS X9, X2
+	MOVUPS 48(DX), X9
+	MULPS X8, X9
+	ADDPS X9, X3
+	MOVUPS 64(DX), X9
+	MULPS X8, X9
+	ADDPS X9, X4
+	MOVUPS 80(DX), X9
+	MULPS X8, X9
+	ADDPS X9, X5
+	MOVUPS 96(DX), X9
+	MULPS X8, X9
+	ADDPS X9, X6
+	MOVUPS 112(DX), X9
+	MULPS X8, X9
+	ADDPS X9, X7
+	ADDQ $4, SI
+	ADDQ $128, DX
+	DECQ CX
+	JNZ  loop
+	XORPS X14, X14
+	MOVL $0x3f800000, AX
+	MOVQ AX, X15
+	SHUFPS $0, X15, X15
+	MAXPS X14, X0
+	MINPS X15, X0
+	MOVUPS X0, 0(DI)
+	MAXPS X14, X1
+	MINPS X15, X1
+	MOVUPS X1, 16(DI)
+	MAXPS X14, X2
+	MINPS X15, X2
+	MOVUPS X2, 32(DI)
+	MAXPS X14, X3
+	MINPS X15, X3
+	MOVUPS X3, 48(DI)
+	MAXPS X14, X4
+	MINPS X15, X4
+	MOVUPS X4, 64(DI)
+	MAXPS X14, X5
+	MINPS X15, X5
+	MOVUPS X5, 80(DI)
+	MAXPS X14, X6
+	MINPS X15, X6
+	MOVUPS X6, 96(DI)
+	MAXPS X14, X7
+	MINPS X15, X7
+	MOVUPS X7, 112(DI)
+	RET
+
+// func l2LayerAVX2(w *[16][32]float32, bias *[32]float32, x *[16]float32, out *[32]float32)
+TEXT ·l2LayerAVX2(SB), NOSPLIT, $0-32
+	MOVQ w+0(FP), DX
+	MOVQ bias+8(FP), BX
+	MOVQ x+16(FP), SI
+	MOVQ out+24(FP), DI
+	VMOVUPS 0(BX), Y0
+	VMOVUPS 32(BX), Y1
+	VMOVUPS 64(BX), Y2
+	VMOVUPS 96(BX), Y3
+	MOVQ $16, CX
+loop:
+	VBROADCASTSS (SI), Y8
+	VMULPS 0(DX), Y8, Y9
+	VMULPS 32(DX), Y8, Y10
+	VMULPS 64(DX), Y8, Y11
+	VMULPS 96(DX), Y8, Y12
+	VADDPS Y9, Y0, Y0
+	VADDPS Y10, Y1, Y1
+	VADDPS Y11, Y2, Y2
+	VADDPS Y12, Y3, Y3
+	ADDQ $4, SI
+	ADDQ $128, DX
+	DECQ CX
+	JNZ  loop
+	VXORPS Y14, Y14, Y14
+	MOVL $0x3f800000, AX
+	VMOVD AX, X15
+	VBROADCASTSS X15, Y15
+	VMAXPS Y14, Y0, Y0
+	VMINPS Y15, Y0, Y0
+	VMOVUPS Y0, 0(DI)
+	VMAXPS Y14, Y1, Y1
+	VMINPS Y15, Y1, Y1
+	VMOVUPS Y1, 32(DI)
+	VMAXPS Y14, Y2, Y2
+	VMINPS Y15, Y2, Y2
+	VMOVUPS Y2, 64(DI)
+	VMAXPS Y14, Y3, Y3
+	VMINPS Y15, Y3, Y3
+	VMOVUPS Y3, 96(DI)
+	VZEROUPPER
+	RET
+
+// func l2LayerAVX512(w *[16][32]float32, bias *[32]float32, x *[16]float32, out *[32]float32)
+TEXT ·l2LayerAVX512(SB), NOSPLIT, $0-32
+	MOVQ w+0(FP), DX
+	MOVQ bias+8(FP), BX
+	MOVQ x+16(FP), SI
+	MOVQ out+24(FP), DI
+	VMOVUPS 0(BX), Z0
+	VMOVUPS 64(BX), Z1
+	MOVQ $16, CX
+loop:
+	VBROADCASTSS (SI), Z8
+	VMULPS 0(DX), Z8, Z9
+	VMULPS 64(DX), Z8, Z10
+	VADDPS Z9, Z0, Z0
+	VADDPS Z10, Z1, Z1
+	ADDQ $4, SI
+	ADDQ $128, DX
+	DECQ CX
+	JNZ  loop
+	VPXORD Z14, Z14, Z14
+	MOVL $0x3f800000, AX
+	VMOVD AX, X15
+	VBROADCASTSS X15, Z15
+	VMAXPS Z14, Z0, Z0
+	VMINPS Z15, Z0, Z0
+	VMOVUPS Z0, 0(DI)
+	VMAXPS Z14, Z1, Z1
+	VMINPS Z15, Z1, Z1
+	VMOVUPS Z1, 64(DI)
+	VZEROUPPER
+	RET

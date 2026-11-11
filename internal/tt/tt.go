@@ -2,6 +2,7 @@ package tt
 
 import (
 	"math/bits"
+	"unsafe"
 
 	"devilfish/internal/types"
 )
@@ -121,6 +122,12 @@ func (tt *TT) Clear() {
 
 func (tt *TT) IncrementAge() {
 	tt.age = (tt.age + 1) & 0x0F
+}
+
+// Prefetch starts loading the entry for hash into the cache, so that a Probe
+// or Store for it shortly afterwards does not wait on main memory.
+func (tt *TT) Prefetch(hash uint64) {
+	prefetch(unsafe.Pointer(&tt.entries[hash&tt.mask]))
 }
 
 func (tt *TT) Probe(hash uint64) (m types.Move, score int32, depth int8, nodeType uint8, found bool) {

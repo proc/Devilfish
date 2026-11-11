@@ -48,8 +48,9 @@ type SearchWorker struct {
 		hash uint64
 		eval int32
 	}
-	Eight             *nnue.EightState // incremental 8Chess accumulators (nil unless that net is active)
-	useAcc            bool             // the 768->256 accumulator stack is in use this search
+	Eight             *nnue.EightState   // incremental 8Chess accumulators (nil unless that net is active)
+	useAcc            bool               // the 768->256 accumulator stack is in use this search
+	cacheNet          *nnue.EightNetwork // network whose evaluations EvalCache holds
 	RootBestMove      types.Move
 	RootScore         int32
 	RootMoveNodes     [64][64]uint64
@@ -108,15 +109,66 @@ func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *a
 		Nodes:   nodes,
 		TBHits:  tbHits,
 	}
-	w.useAcc = nnue.UsesAccumulator()
-	if nnue.Enabled && nnue.ActiveEightNetwork != nil {
-		w.Eight = nnue.NewEightState(MaxPly)
+	w.setupEval()
+	return w
+}
+
+// eightNet returns the 8Chess network evaluations will use, or nil.
+func eightNet() *nnue.EightNetwork {
+	if nnue.Enabled {
+		return nnue.ActiveEightNetwork
 	}
+	return nil
+}
+
+// setupEval prepares the evaluation state for a search of w.Board.
+func (w *SearchWorker) setupEval() {
+	net := eightNet()
+	if net != w.cacheNet {
+		// The cached values came from another network (or none).
+		clear(w.EvalCache[:])
+		w.cacheNet = net
+	}
+	if net == nil {
+		w.Eight = nil
+	} else if w.Eight == nil {
+		w.Eight = nnue.NewEightState(MaxPly)
+	} else {
+		w.Eight.Reset()
+	}
+	w.useAcc = nnue.UsesAccumulator()
 	if w.useAcc {
 		w.NnueRefreshes++
 		nnue.Refresh(w.Board, &w.Accumulators[0])
 	}
-	return w
+}
+
+// resetFor readies a worker used by an earlier search for a new search of b.
+// Afterwards it is in the same state as NewWorker would build, except that
+// it keeps its allocations, and the static evaluations in EvalCache while the
+// network is unchanged (they depend on nothing else).
+func (w *SearchWorker) resetFor(b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *atomic.Uint64, tbHits *atomic.Uint64) {
+	w.Board = b.Clone()
+	w.TT = ttTable
+	w.TimeMan = tm
+	w.Nodes = nodes
+	w.TBHits = tbHits
+	w.History.Clear()
+	w.LocalNodes = 0
+	w.NnueEvals = 0
+	w.NnueUpdates = 0
+	w.NnueRefreshes = 0
+	w.ClassicalEvals = 0
+	w.SelDepth = 0
+	clear(w.PVArray[:])
+	clear(w.PVLength[:])
+	clear(w.StaticEvalHistory[:])
+	clear(w.Accumulators[:])
+	w.RootBestMove = types.MoveNone
+	w.RootScore = 0
+	clear(w.RootMoveNodes[:])
+	w.ExcludedRootMoves = nil
+	w.setupEval()
 }
 
 // parentHash returns the hash of the position one move up the search path.
@@ -469,6 +521,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	if ttMove != types.MoveNone && ttMove != excludedMove && (ply > 0 || !w.isRootExcluded(ttMove)) && movegen.IsPseudoLegal(w.Board, ttMove) {
 		w.pushAccumulator(ply, ttMove)
 		if w.Board.MakeMove(ttMove) {
+			w.TT.Prefetch(w.Board.Hash)
 			legalMoves++
 			searchedMoves[movesSearched] = ttMove
 
@@ -703,6 +756,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		if !w.Board.MakeMove(m) {
 			continue
 		}
+		w.TT.Prefetch(w.Board.Hash)
 
 		legalMoves++
 		searchedMoves[movesSearched] = m
@@ -1073,6 +1127,7 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 		if !w.Board.MakeMove(m) {
 			continue
 		}
+		w.TT.Prefetch(w.Board.Hash)
 
 		legalMoves++
 		score := -w.Quiescence(-beta, -alpha, ply+1)
