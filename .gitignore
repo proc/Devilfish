@@ -1,6 +1,8 @@
-syzygy
+/syzygy/
+*.rtbz
+*.rtbw
 *.log
 *.pyc
 *.npz
-
-
+/devilfish
+.DS_Store

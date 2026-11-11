@@ -84,10 +84,11 @@ func Path() string {
 	return logPath
 }
 
+// writeRaw issues a single unbuffered write; no fsync, since an fsync per
+// log line stalls the search for milliseconds at a time.
 func writeRaw(str string) {
 	if file != nil {
 		_, _ = file.WriteString(str)
-		_ = file.Sync()
 	}
 }
 

@@ -255,11 +255,13 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 	}
 
-	var staticEval int32
+	var staticEval, rawEval int32
 	if inCheck {
 		staticEval = -Infinity
+		rawEval = -Infinity
 	} else {
 		staticEval = w.Evaluate(ply)
+		rawEval = staticEval
 		if ttFound && abs(ttScore) < MateThreshold {
 			if ttType == tt.Exact || (ttType == tt.LowerBound && ttScore > staticEval) || (ttType == tt.UpperBound && ttScore < staticEval) {
 				staticEval = ttScore
@@ -309,7 +311,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	// 4. Reverse Futility Pruning (Static Null Move Pruning)
 	// Never RFP if high-value pieces (Queen, Rook, Minor) are under tactical threat,
 	// because opponent capture would immediately wipe out the static advantage.
-	if ply > 0 && !isPVNode && !inCheck && !kingInDanger && !prevIsKingThreat && (threatenedPieces&(ourQueens|ourRooks|ourMinors)) == 0 && depth <= 4 && abs(beta) < MateThreshold && hasNonPawns {
+	if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && !kingInDanger && !prevIsKingThreat && (threatenedPieces&(ourQueens|ourRooks|ourMinors)) == 0 && depth <= 4 && abs(beta) < MateThreshold && hasNonPawns {
 		margin := int32(depth) * 75
 		if !improving {
 			margin += int32(depth) * 35
@@ -323,7 +325,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	}
 
 	// 5. Razoring
-	if ply > 0 && !isPVNode && !inCheck && !kingInDanger && !prevIsKingThreat && depth <= 1 {
+	if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && !kingInDanger && !prevIsKingThreat && depth <= 1 {
 		razorMargin := int32(350)
 		if staticEval+razorMargin <= alpha {
 			qScore := w.Quiescence(alpha, beta, ply)
@@ -334,12 +336,20 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	}
 
 	// 6. Null Move Pruning (NMP)
-	// Never pass if our Queen is under direct tactical threat.
+	// Never pass if our Queen is under direct tactical threat, and never twice in a row
+	// (prevMove is MoveNone below the root only directly after a null move).
 	pieceCount := bitboard.Count(w.Board.Occupied())
-	if ply > 0 && !isPVNode && !inCheck && !kingInDanger && !prevIsKingThreat && (threatenedPieces&ourQueens) == 0 && depth >= 3 && staticEval >= beta && hasNonPawns && pieceCount > 6 {
+	if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && prevMove != types.MoveNone && !kingInDanger && !prevIsKingThreat && (threatenedPieces&ourQueens) == 0 && depth >= 3 && staticEval >= beta && hasNonPawns && pieceCount > 6 {
 		r := int8(3 + depth/4)
 		if !improving {
 			r++
+		}
+		// Reduce more the further static eval sits above beta
+		if evalR := (staticEval - beta) / 200; evalR > 0 {
+			if evalR > 3 {
+				evalR = 3
+			}
+			r += int8(evalR)
 		}
 		if ply+1 < MaxPly {
 			w.Accumulators[ply+1] = w.Accumulators[ply]
@@ -367,7 +377,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	// Singular Extension (SE)
 	// If the TT move is significantly better than all other alternative moves,
 	// extend the search depth for the TT move.
-	if excludedMove == types.MoveNone && depth >= 6 && ttMove != types.MoveNone &&
+	if ply > 0 && excludedMove == types.MoveNone && depth >= 6 && ttMove != types.MoveNone &&
 		!inCheck && ttFound && ttDepth >= depth-3 && ttType != tt.UpperBound &&
 		ttScore > -MateThreshold && ttScore < MateThreshold {
 
@@ -431,12 +441,12 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 			// Beta Cutoff (Fail-High)
 			if score >= beta {
-				if ply > 0 || len(w.ExcludedRootMoves) == 0 {
+				if excludedMove == types.MoveNone && (ply > 0 || len(w.ExcludedRootMoves) == 0) {
 					w.TT.Store(w.Board.Hash, ttMove, tt.ScoreToTT(score, ply), depth, tt.LowerBound)
 				}
 
-				if !inCheck && score < MateThreshold && score > -MateThreshold {
-					diff := score - staticEval
+				if !inCheck && excludedMove == types.MoveNone && score > rawEval && score < MateThreshold {
+					diff := score - rawEval
 					w.History.UpdateCorrHist(us, w.Board.PawnHash, diff, depth)
 				}
 
@@ -495,6 +505,10 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		for i := 0; i < probList.Count; i++ {
 			m := PickNextMove(&probList, probScores[:probList.Count], i)
 			if m == ttMove || m == excludedMove {
+				continue
+			}
+			// Skip captures that can't plausibly reach probBeta
+			if eval.SEE(w.Board, m) < probBeta-staticEval {
 				continue
 			}
 			if ply+1 < MaxPly {
@@ -606,7 +620,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		// SEE Pruning
 		// Do not prune tactical/killer moves, countermoves, advanced pawn pushes, or moves that give check
-		if !isPVNode && !inCheck && depth <= 3 && m != killer1 && m != killer2 && m != counterMove && !isAdvancedPawnPush && !isThreatMove && !isThreatEvasion {
+		if !isPVNode && !inCheck && depth <= 3 && movesSearched > 0 && m != killer1 && m != killer2 && m != counterMove && !isAdvancedPawnPush && !isThreatMove && !isThreatEvasion {
 			if !givesCheck {
 				if isQuiet {
 					if depth <= 2 && moveSEE < -int32(depth)*60 {
@@ -637,15 +651,16 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			startNodes = w.LocalNodes
 		}
 
-		moveExtension := extension
-		if is7thRankPawnPush && moveExtension == 0 && depth >= 3 {
+		// The singular extension belongs to the TT move only; here only 7th-rank pushes extend
+		var moveExtension int8
+		if is7thRankPawnPush && depth >= 3 {
 			moveExtension = 1
 		}
 
 		var reduction int8
 		// Principal Variation Search & LMR
 		if movesSearched == 0 {
-			// First move: full window (extended if singular or 7th rank pawn push)
+			// First move: full window (extended if 7th rank pawn push)
 			score = -w.Search(depth-1+moveExtension, -beta, -alpha, ply+1, isPVNode, true, types.MoveNone, m, prevMove, prevMove2)
 		} else {
 			// Late Move Reductions (LMR)
@@ -751,11 +766,11 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			}
 
 			// Null-window search with reduction
-			score = -w.Search(depth-1-reduction, -alpha-1, -alpha, ply+1, false, false, types.MoveNone, m, prevMove, prevMove2)
+			score = -w.Search(depth-1+moveExtension-reduction, -alpha-1, -alpha, ply+1, false, false, types.MoveNone, m, prevMove, prevMove2)
 
 			// If reduced search fails high, re-search at full depth with null window
 			if reduction > 0 && score > alpha && !w.TimeMan.Stopped.Load() {
-				score = -w.Search(depth-1, -alpha-1, -alpha, ply+1, false, true, types.MoveNone, m, prevMove, prevMove2)
+				score = -w.Search(depth-1+moveExtension, -alpha-1, -alpha, ply+1, false, true, types.MoveNone, m, prevMove, prevMove2)
 			}
 
 			// If null-window fails high and in PV node, re-search with full PV window
@@ -781,12 +796,12 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		// Beta Cutoff (Fail-High)
 		if score >= beta {
-			if ply > 0 || len(w.ExcludedRootMoves) == 0 {
+			if excludedMove == types.MoveNone && (ply > 0 || len(w.ExcludedRootMoves) == 0) {
 				w.TT.Store(w.Board.Hash, m, tt.ScoreToTT(score, ply), depth, tt.LowerBound)
 			}
 
-			if !inCheck && score < MateThreshold && score > -MateThreshold {
-				diff := score - staticEval
+			if !inCheck && excludedMove == types.MoveNone && score > rawEval && score < MateThreshold {
+				diff := score - rawEval
 				w.History.UpdateCorrHist(us, w.Board.PawnHash, diff, depth)
 			}
 
@@ -863,8 +878,10 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		return 0
 	}
 
-	if !inCheck && alpha < MateThreshold && alpha > -MateThreshold {
-		diff := alpha - staticEval
+	// An upper bound only says the eval was too high when it sits below rawEval
+	if !inCheck && excludedMove == types.MoveNone && alpha < MateThreshold && alpha > -MateThreshold &&
+		(bestType == tt.Exact || alpha < rawEval) {
+		diff := alpha - rawEval
 		w.History.UpdateCorrHist(us, w.Board.PawnHash, diff, depth)
 	}
 
@@ -878,7 +895,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		return 0
 	}
 
-	if ply > 0 || len(w.ExcludedRootMoves) == 0 {
+	if excludedMove == types.MoveNone && (ply > 0 || len(w.ExcludedRootMoves) == 0) {
 		w.TT.Store(w.Board.Hash, bestMove, tt.ScoreToTT(alpha, ply), depth, bestType)
 	}
 	return alpha
@@ -908,6 +925,20 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 	// Draw detection in quiescence
 	if w.Board.IsRepetition() || w.Board.IsFiftyMoveDraw() || w.Board.IsInsufficientMaterial() {
 		return 0
+	}
+
+	// TT probe: any stored bound is at least as deep as a quiescence search.
+	// Stores go in at depth 0; tt.Store never lets those displace a current-generation entry.
+	origAlpha := alpha
+	_, ttScore, _, ttType, ttFound := w.TT.Probe(w.Board.Hash)
+	if ttFound {
+		ttScore = tt.ScoreFromTT(ttScore, ply)
+		switch {
+		case ttType == tt.Exact,
+			ttType == tt.LowerBound && ttScore >= beta,
+			ttType == tt.UpperBound && ttScore <= alpha:
+			return ttScore
+		}
 	}
 
 	inCheck := w.Board.IsInCheck(w.Board.SideToMove)
@@ -989,6 +1020,9 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 		}
 
 		if score >= beta {
+			if !ttFound {
+				w.TT.Store(w.Board.Hash, m, tt.ScoreToTT(beta, ply), 0, tt.LowerBound)
+			}
 			return beta
 		}
 		if score > alpha {
@@ -1000,6 +1034,13 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 		return -MateScore + int32(ply)
 	}
 
+	if !ttFound {
+		bound := tt.UpperBound
+		if alpha > origAlpha {
+			bound = tt.Exact
+		}
+		w.TT.Store(w.Board.Hash, types.MoveNone, tt.ScoreToTT(alpha, ply), 0, bound)
+	}
 	return alpha
 }
 

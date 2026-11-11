@@ -165,8 +165,9 @@ func (tt *TT) Store(hash uint64, m types.Move, score int32, depth int8, nodeType
 	} else if currData != 0 {
 		// Collision: Different position mapped to the same index.
 		// Protect deeper entries from the current search generation from being blown away by shallow subtrees.
+		// Depth-0 (quiescence) entries never displace anything from the current generation.
 		_, _, currDepth, _, currAge := unpackData(currData)
-		if currAge == tt.age && currDepth > depth+2 {
+		if currAge == tt.age && (depth <= 0 || currDepth > depth+2) {
 			return
 		}
 	}
