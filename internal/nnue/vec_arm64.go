@@ -59,3 +59,8 @@ func l2LayerNEON(w *[EightL2Size][EightL3Size]float32, bias *[EightL3Size]float3
 func l2Layer(w *[EightL2Size][EightL3Size]float32, bias *[EightL3Size]float32, x *[EightL2Size]float32, out *[EightL3Size]float32) {
 	l2LayerNEON(w, bias, x, out)
 }
+
+// eightL1Layer is the first dense layer (see eightL1).
+func eightL1Layer(ft *[EightL1Size]uint8, wFile *[EightL2Size * EightL1Size]int8, wByInput *[EightL1Size][EightL2Size]int8, pre *[EightL2Size]int32) {
+	eightL1(ft, wByInput, pre)
+}

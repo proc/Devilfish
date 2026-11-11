@@ -476,7 +476,7 @@ func eightForward(net *EightNetwork, accPst, accThr *[2][EightL1Size]int16, b *b
 	bucket := EightOutputBucketsLayout[occCount]
 	var preActivations [EightL2Size]int32
 
-	eightL1(&ftOut, &net.L1WeightsByInput[bucket], &preActivations)
+	eightL1Layer(&ftOut, &net.L1Weights[bucket], &net.L1WeightsByInput[bucket], &preActivations)
 
 	var l1Out [EightL2Size]float32
 	for i := 0; i < EightL2Size; i++ {

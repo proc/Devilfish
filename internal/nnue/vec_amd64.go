@@ -28,8 +28,42 @@ const (
 
 var simd = detectSIMD()
 
+// vnni says whether the first dense layer uses VNNI (VPDPBUSD) at the
+// current tier: the 512-bit form with AVX-512, the 256-bit AVX-VNNI form
+// with AVX2. Set DEVILFISH_VNNI=0 to use the other kernels instead.
+var vnni = detectVNNI()
+
+func detectVNNI() bool {
+	if os.Getenv("DEVILFISH_VNNI") == "0" {
+		return false
+	}
+	return vnniFor(simd)
+}
+
+// vnniFor reports whether the CPU offers VNNI in the form tier l uses.
+func vnniFor(l simdLevel) bool {
+	switch l {
+	case simdAVX512:
+		_, _, ecx7, _ := cpuid(7, 0)
+		return ecx7&(1<<11) != 0 // AVX512_VNNI
+	case simdAVX2:
+		maxID, _, _, _ := cpuid(0, 0)
+		if maxID < 7 {
+			return false
+		}
+		eax71, _, _, _ := cpuid(7, 1)
+		return eax71&(1<<4) != 0 // AVX-VNNI
+	}
+	return false
+}
+
 // SIMDInstructionSet names the kernels in use, for the startup banner.
-var SIMDInstructionSet = simdName(simd)
+var SIMDInstructionSet = func() string {
+	if vnni {
+		return simdName(simd) + " + VNNI"
+	}
+	return simdName(simd)
+}()
 
 func simdName(l simdLevel) string {
 	switch l {
@@ -188,16 +222,16 @@ func l1NonzeroSSE2(ft *[EightL1Size]uint8, nz *uint32) int
 func l1NonzeroAVX2(ft *[EightL1Size]uint8, nz *uint32) int
 
 //go:noescape
-func l1NonzeroAVX512(ft *[EightL1Size]uint8, nz *uint32) int
-
-//go:noescape
 func l1SparseSSE2(nz *uint32, n int, wt *[EightL1Size][EightL2Size]int8, out *[EightL2Size]int32)
 
 //go:noescape
 func l1SparseAVX2(nz *uint32, n int, wt *[EightL1Size][EightL2Size]int8, out *[EightL2Size]int32)
 
 //go:noescape
-func l1SparseAVX512(nz *uint32, n int, wt *[EightL1Size][EightL2Size]int8, out *[EightL2Size]int32)
+func l1VNNI512(ft *[EightL1Size]uint8, w *[EightL2Size * EightL1Size]int8, out *[EightL2Size]int32)
+
+//go:noescape
+func l1AVXVNNI(ft *[EightL1Size]uint8, w *[EightL2Size * EightL1Size]int8, out *[EightL2Size]int32)
 
 //go:noescape
 func fusedPieceSSE2(dst, src *[EightL1Size]int16, w *int16, add *int32, nAdd int, rem *int32, nRem int)
@@ -323,9 +357,8 @@ func activateEightFTNEON(out *uint8, pst *int16, thr *int16) {
 
 func l1Sparse(nz *uint32, n int, wt *[EightL1Size][EightL2Size]int8, out *[EightL2Size]int32) {
 	switch simd {
-	case simdAVX512:
-		l1SparseAVX512(nz, n, wt, out)
-	case simdAVX2:
+	case simdAVX512, simdAVX2:
+		// The AVX2 version is the faster of the two on AVX-512 machines too.
 		l1SparseAVX2(nz, n, wt, out)
 	case simdSSE2:
 		l1SparseSSE2(nz, n, wt, out)
@@ -336,9 +369,7 @@ func l1Sparse(nz *uint32, n int, wt *[EightL1Size][EightL2Size]int8, out *[Eight
 
 func l1Nonzero(ft *[EightL1Size]uint8, nz *[EightL1Size + 1]uint32) int {
 	switch simd {
-	case simdAVX512:
-		return l1NonzeroAVX512(ft, &nz[0])
-	case simdAVX2:
+	case simdAVX512, simdAVX2:
 		return l1NonzeroAVX2(ft, &nz[0])
 	case simdSSE2:
 		return l1NonzeroSSE2(ft, &nz[0])
@@ -383,4 +414,26 @@ func l2Layer(w *[EightL2Size][EightL3Size]float32, bias *[EightL3Size]float32, x
 	default:
 		refL2(w, bias, x, out)
 	}
+}
+
+// eightL1Layer is the first dense layer. wFile is the bucket's weights in the
+// network file's layout, wByInput the same weights by input.
+func eightL1Layer(ft *[EightL1Size]uint8, wFile *[EightL2Size * EightL1Size]int8, wByInput *[EightL1Size][EightL2Size]int8, pre *[EightL2Size]int32) {
+	if vnni {
+		var out [EightL2Size]int32
+		switch simd {
+		case simdAVX512:
+			l1VNNI512(ft, wFile, &out)
+		case simdAVX2:
+			l1AVXVNNI(ft, wFile, &out)
+		default:
+			eightL1(ft, wByInput, pre)
+			return
+		}
+		for j := range out {
+			pre[j] += out[j]
+		}
+		return
+	}
+	eightL1(ft, wByInput, pre)
 }

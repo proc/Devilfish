@@ -797,33 +797,6 @@ done:
 	VZEROUPPER
 	RET
 
-// func l1SparseAVX512(nz *uint32, n int, wt *[1024][16]int8, out *[16]int32)
-TEXT ·l1SparseAVX512(SB), NOSPLIT, $0-32
-	MOVQ nz+0(FP), SI
-	MOVQ n+8(FP), CX
-	MOVQ wt+16(FP), DX
-	MOVQ out+24(FP), DI
-	VPXORQ Z0, Z0, Z0 // outputs 0..15
-	SHRQ $1, CX
-	JZ   done
-loop:
-	L1_PAIR_SETUP
-	VPBROADCASTD AX, Z6
-	VMOVDQU (DX)(R8*1), X2
-	VMOVDQU (DX)(R9*1), X3
-	VPUNPCKLBW  X3, X2, X4    // pairs for outputs 0..7
-	VPUNPCKHBW  X3, X2, X5    // pairs for outputs 8..15
-	VINSERTI128 $1, X5, Y4, Y4
-	VPMOVSXBW   Y4, Z4
-	VPMADDWD    Z6, Z4, Z4
-	VPADDD      Z4, Z0, Z0
-	ADDQ $8, SI
-	DECQ CX
-	JNZ  loop
-done:
-	VMOVDQU64 Z0, 0(DI)
-	VZEROUPPER
-	RET
 
 
 // ---------------------------------------------------------------------------
@@ -904,49 +877,6 @@ next:
 	VZEROUPPER
 	RET
 
-// func l1NonzeroAVX512(ft *[1024]uint8, nz *uint32) int
-// 64 bytes per block; uses no AVX-512 mask registers (see below).
-TEXT ·l1NonzeroAVX512(SB), NOSPLIT, $0-24
-	MOVQ ft+0(FP), SI
-	MOVQ nz+8(FP), DI
-	MOVQ DI, R10
-	XORQ R11, R11
-	VPXOR Y15, Y15, Y15
-block:
-	// Built from two 32-byte compares rather than VPTESTMB into a mask
-	// register: some macOS kernels (Darwin 19.6.0 to 21.2.0) do not restore
-	// the K registers after a signal, and Go signals running threads often.
-	VMOVDQU   (SI)(R11*1), Y0
-	VMOVDQU   32(SI)(R11*1), Y1
-	VPCMPEQB  Y15, Y0, Y0   // 0xFF where the byte is zero
-	VPCMPEQB  Y15, Y1, Y1
-	VPMOVMSKB Y0, AX
-	VPMOVMSKB Y1, BX
-	SHLQ      $32, BX
-	ORQ       BX, AX
-	NOTQ      AX            // set bits: non-zero bytes
-	TESTQ AX, AX
-	JZ    next
-bits:
-	BSFQ    AX, BX
-	LEAQ    (R11)(BX*1), R8    // input index
-	MOVBLZX (SI)(R8*1), R9     // its value
-	SHLL    $16, R9
-	ORL     R8, R9
-	MOVL    R9, (DI)
-	ADDQ    $4, DI
-	LEAQ    -1(AX), R9
-	ANDQ    R9, AX             // clear the lowest set bit
-	JNZ     bits
-next:
-	ADDQ $64, R11
-	CMPQ R11, $1024
-	JB   block
-	SUBQ R10, DI
-	SHRQ $2, DI
-	MOVQ DI, ret+16(FP)
-	VZEROUPPER
-	RET
 
 // ---------------------------------------------------------------------------
 // Fused accumulator update: dst = src + sum of the added weight rows - sum of
@@ -1650,5 +1580,134 @@ loop:
 	VMAXPS Z14, Z1, Z1
 	VMINPS Z15, Z1, Z1
 	VMOVUPS Z1, 64(DI)
+	VZEROUPPER
+	RET
+
+// ---------------------------------------------------------------------------
+// First dense layer with VNNI. VPDPBUSD multiplies four unsigned bytes by four
+// signed bytes and adds the sum to a 32-bit lane, which is this layer exactly:
+// for each group of four inputs with any non-zero byte, the group is
+// broadcast and multiplied against that group's 64-byte weight row (16
+// outputs x 4 inputs, the network file's own layout). Products fit in 16 bits
+// and sums in 32, so the result is exact.
+//
+// Groups are found 8 at a time: VPCMPEQD against zero and VMOVMSKPS give one
+// bit per group, walked with BSF. Four accumulator chains hide the latency of
+// VPDPBUSD. No AVX-512 mask registers are used (see l1NonzeroAVX512).
+//
+// Registers: SI inputs, DX weights, R11 byte offset of the current 32-byte
+// block, AX its mask of non-zero groups, R8 group offset, BX/R9 scratch.
+// ---------------------------------------------------------------------------
+
+// func l1VNNI512(ft *[1024]uint8, w *[16384]int8, out *[16]int32)
+TEXT ·l1VNNI512(SB), NOSPLIT, $0-24
+	MOVQ ft+0(FP), SI
+	MOVQ w+8(FP), DX
+	MOVQ out+16(FP), DI
+	VPXORD Z0, Z0, Z0
+	VPXORD Z1, Z1, Z1
+	VPXORD Z2, Z2, Z2
+	VPXORD Z3, Z3, Z3
+	VPXOR Y15, Y15, Y15
+	XORQ R11, R11
+block:
+	VMOVDQU   (SI)(R11*1), Y4
+	VPCMPEQD  Y15, Y4, Y4
+	VMOVMSKPS Y4, AX
+	XORL      $0xFF, AX        // set bits: groups with a non-zero input
+	JZ        next
+bits:
+	BSFL    AX, BX
+	LEAQ    (R11)(BX*4), R8    // byte offset of this group of four inputs
+	VPBROADCASTD (SI)(R8*1), Z5
+	SHLQ    $4, R8             // its weight row: 64 bytes per group
+	VPDPBUSD (DX)(R8*1), Z5, Z0
+	LEAL    -1(AX), R9
+	ANDL    R9, AX
+	JZ      next
+	BSFL    AX, BX
+	LEAQ    (R11)(BX*4), R8    // byte offset of this group of four inputs
+	VPBROADCASTD (SI)(R8*1), Z5
+	SHLQ    $4, R8             // its weight row: 64 bytes per group
+	VPDPBUSD (DX)(R8*1), Z5, Z1
+	LEAL    -1(AX), R9
+	ANDL    R9, AX
+	JZ      next
+	BSFL    AX, BX
+	LEAQ    (R11)(BX*4), R8    // byte offset of this group of four inputs
+	VPBROADCASTD (SI)(R8*1), Z5
+	SHLQ    $4, R8             // its weight row: 64 bytes per group
+	VPDPBUSD (DX)(R8*1), Z5, Z2
+	LEAL    -1(AX), R9
+	ANDL    R9, AX
+	JZ      next
+	BSFL    AX, BX
+	LEAQ    (R11)(BX*4), R8    // byte offset of this group of four inputs
+	VPBROADCASTD (SI)(R8*1), Z5
+	SHLQ    $4, R8             // its weight row: 64 bytes per group
+	VPDPBUSD (DX)(R8*1), Z5, Z3
+	LEAL    -1(AX), R9
+	ANDL    R9, AX
+	JNZ     bits
+next:
+	ADDQ $32, R11
+	CMPQ R11, $1024
+	JB   block
+	VPADDD Z1, Z0, Z0
+	VPADDD Z3, Z2, Z2
+	VPADDD Z2, Z0, Z0
+	VMOVDQU64 Z0, (DI)
+	VZEROUPPER
+	RET
+
+// func l1AVXVNNI(ft *[1024]uint8, w *[16384]int8, out *[16]int32)
+TEXT ·l1AVXVNNI(SB), NOSPLIT, $0-24
+	MOVQ ft+0(FP), SI
+	MOVQ w+8(FP), DX
+	MOVQ out+16(FP), DI
+	VPXOR Y0, Y0, Y0
+	VPXOR Y1, Y1, Y1
+	VPXOR Y2, Y2, Y2
+	VPXOR Y3, Y3, Y3
+	VPXOR Y4, Y4, Y4
+	VPXOR Y15, Y15, Y15
+	XORQ R11, R11
+block:
+	VMOVDQU   (SI)(R11*1), Y4
+	VPCMPEQD  Y15, Y4, Y4
+	VMOVMSKPS Y4, AX
+	XORL      $0xFF, AX        // set bits: groups with a non-zero input
+	JZ        next
+bits:
+	BSFL    AX, BX
+	LEAQ    (R11)(BX*4), R8    // byte offset of this group of four inputs
+	VPBROADCASTD (SI)(R8*1), Y5
+	SHLQ    $4, R8
+	VMOVDQU (DX)(R8*1), Y6      // weights for outputs 0-7
+	VMOVDQU 32(DX)(R8*1), Y7    // outputs 8-15
+	BYTE $0xC4; BYTE $0xE2; BYTE $0x55; BYTE $0x50; BYTE $0xc6 // VPDPBUSD Y0, Y5, Y6 (AVX-VNNI)
+	BYTE $0xC4; BYTE $0xE2; BYTE $0x55; BYTE $0x50; BYTE $0xcf // VPDPBUSD Y1, Y5, Y7 (AVX-VNNI)
+	LEAL    -1(AX), R9
+	ANDL    R9, AX
+	JZ      next
+	BSFL    AX, BX
+	LEAQ    (R11)(BX*4), R8    // byte offset of this group of four inputs
+	VPBROADCASTD (SI)(R8*1), Y5
+	SHLQ    $4, R8
+	VMOVDQU (DX)(R8*1), Y6      // weights for outputs 0-7
+	VMOVDQU 32(DX)(R8*1), Y7    // outputs 8-15
+	BYTE $0xC4; BYTE $0xE2; BYTE $0x55; BYTE $0x50; BYTE $0xd6 // VPDPBUSD Y2, Y5, Y6 (AVX-VNNI)
+	BYTE $0xC4; BYTE $0xE2; BYTE $0x55; BYTE $0x50; BYTE $0xdf // VPDPBUSD Y3, Y5, Y7 (AVX-VNNI)
+	LEAL    -1(AX), R9
+	ANDL    R9, AX
+	JNZ     bits
+next:
+	ADDQ $32, R11
+	CMPQ R11, $1024
+	JB   block
+	VPADDD Y2, Y0, Y0
+	VPADDD Y3, Y1, Y1
+	VMOVDQU Y0, (DI)
+	VMOVDQU Y1, 32(DI)
 	VZEROUPPER
 	RET

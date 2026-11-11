@@ -24,11 +24,16 @@ func availableSIMD() []simdLevel {
 	return levels
 }
 
-// withSIMD runs f with the given kernel set selected.
+// withSIMD runs f with the given kernel set selected, using VNNI where that
+// tier offers it.
 func withSIMD(l simdLevel, f func()) {
-	old := simd
-	simd = l
-	defer func() { simd = old }()
+	withSIMDVNNI(l, vnniFor(l), f)
+}
+
+func withSIMDVNNI(l simdLevel, useVNNI bool, f func()) {
+	oldSIMD, oldVNNI := simd, vnni
+	simd, vnni = l, useVNNI && vnniFor(l)
+	defer func() { simd, vnni = oldSIMD, oldVNNI }()
 	f()
 }
 
@@ -224,6 +229,42 @@ func TestAMD64L2Layer(t *testing.T) {
 	}
 }
 
+// The VNNI first layer must match the reference exactly: all densities,
+// full-range inputs, the most negative weights.
+func TestAMD64VNNIFirstLayer(t *testing.T) {
+	rng := rand.New(rand.NewSource(23))
+	_, flat := randomL1Weights(rng)
+	tested := 0
+	for _, level := range availableSIMD() {
+		if !vnniFor(level) {
+			continue
+		}
+		tested++
+		withSIMD(level, func() {
+			var byInput [EightL1Size][EightL2Size]int8 // unused by the VNNI path
+			for trial := 0; trial < 600; trial++ {
+				ft := randomFTOut(rng, []float64{0, 0.002, 0.05, 0.11, 0.4, 1}[trial%6])
+				if trial%6 == 5 {
+					for i := range ft {
+						ft[i] = 255
+					}
+				}
+				var got, want [EightL2Size]int32
+				got[3] = 7 // eightL1Layer accumulates into its output
+				want[3] = 7
+				eightL1Ref(&ft, &flat, &want)
+				eightL1Layer(&ft, &flat, &byInput, &got)
+				if got != want {
+					t.Fatalf("%s trial %d: got %v want %v", simdName(level), trial, got, want)
+				}
+			}
+		})
+	}
+	if tested == 0 {
+		t.Skip("no VNNI on this CPU")
+	}
+}
+
 // The network evaluations must not depend on which kernels are in use.
 func TestAMD64EvaluationsMatchAcrossKernels(t *testing.T) {
 	if ActiveEightNetwork == nil || ActiveNetwork == nil {
@@ -268,15 +309,20 @@ func TestAMD64EvaluationsMatchAcrossKernels(t *testing.T) {
 	var wantEight, wantSmall []int32
 	withSIMD(simdGeneric, func() { wantEight, wantSmall = evalAll() })
 	for _, level := range availableSIMD() {
-		withSIMD(level, func() {
-			gotEight, gotSmall := evalAll()
-			for i := range positions {
-				if gotEight[i] != wantEight[i] || gotSmall[i] != wantSmall[i] {
-					t.Fatalf("%s, %s: 8chess %d (generic %d), small %d (generic %d)",
-						simdName(level), positions[i].ToFEN(), gotEight[i], wantEight[i], gotSmall[i], wantSmall[i])
-				}
+		for _, useVNNI := range []bool{false, true} {
+			if useVNNI && !vnniFor(level) {
+				continue
 			}
-		})
+			withSIMDVNNI(level, useVNNI, func() {
+				gotEight, gotSmall := evalAll()
+				for i := range positions {
+					if gotEight[i] != wantEight[i] || gotSmall[i] != wantSmall[i] {
+						t.Fatalf("%s (VNNI %v), %s: 8chess %d (generic %d), small %d (generic %d)",
+							simdName(level), useVNNI, positions[i].ToFEN(), gotEight[i], wantEight[i], gotSmall[i], wantSmall[i])
+					}
+				}
+			})
+		}
 	}
 	t.Logf("%d positions agree across generic, %v", len(positions), availableSIMD())
 }
