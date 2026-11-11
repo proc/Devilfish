@@ -16,13 +16,17 @@
 
 ### 2. Evaluation: NNUE & Handcrafted Classical Fallback
 - **NNUE (Efficiently Updatable Neural Network)**:
-  - Perspective-oriented neural network architecture: $768 \to 256 \times 2 \to 32 \to 1$.
-  - 768 input features ($12$ piece types $\times 64$ squares) with vertical symmetry ($sq \oplus 56$).
-  - **Incremental Accumulator Updates**: Updates 256-dimensional accumulators incrementally during search ($2$ to $4$ vector additions/subtractions per move).
-  - **Hardware ARM64 NEON SIMD Vectorization**: Handcrafted 128-bit NEON SIMD assembly (`VLD1`, `VADD.H8`, `VSUB.H8`, `VST1`) processing 32 16-bit integers per unrolled step, achieving an **10.88× speedup** (~19.9 ns) on Apple Silicon with automatic fallback on non-ARM64 platforms.
-  - **Embedded Default Network**: Ships with a fully calibrated embedded network inside the binary, running with zero external dependencies.
-  - **Custom Model Loading**: Load external `.nnue` binary models via `--eval-file <path>` or UCI `setoption name EvalFile value <path>`.
-  - **Dual Engine Evaluation**: Toggle between NNUE and classical evaluation via `--no-nnue` or `setoption name UseNNUE value false`.
+  - **Dual Architecture Engine Support**:
+    - **8Chess 1024-wide Architecture** (`eightchess_1024_tuned768.nnue`, 80.4 MB, 84,349,504 bytes):
+      - 7,680 piece features ($10$ king input buckets $\times 768$ features) + 66,864 occupancy-aware threat features ($1024$-wide FT).
+      - Clipped-pair squaring activation, 8 output buckets (by occupied square count), $1024 \to 16 \to 32 \to 1$ affine layers.
+      - ARM64 NEON vectorization (`addVector1024NEON`) and 16k-entry thread-local evaluation cache.
+      - Automatically detected and preferred when `eightchess_1024_tuned768.nnue` is present in the workspace or `~/Downloads/`.
+    - **Native 768->256 Direct Architecture** (`default.nnue`, 410 KB):
+      - Perspective architecture $768 \to 256 \times 2 \to 32 \to 1$ with embedded default weights.
+      - Incremental accumulator updates during search with 128-bit ARM64 NEON vectorization.
+  - **Runtime Model Switching**: Switch dynamically between networks via `--eval-file <path>` or UCI `setoption name EvalFile value <path>`.
+  - **Classical Fallback**: Toggle NNUE on/off via `--no-nnue` or UCI `setoption name UseNNUE value false`.
 - **Classical Tapered Evaluation (HCE)**:
   - Smoothly blends Midgame (MG) and Endgame (EG) scores based on non-pawn material phase.
   - PeSTO-style Piece-Square Tables (PSQT) for all piece types.

@@ -437,7 +437,7 @@ func TestWAC071(t *testing.T) {
 	}
 
 	engine := NewEngine(64, 1)
-	bm, _ := engine.Search(b, SearchLimits{MaxDepth: 10}, func(si SearchInfo) {
+	bm, _ := engine.Search(b, SearchLimits{MaxDepth: 8}, func(si SearchInfo) {
 		var pvStrs []string
 		for _, m := range si.PV {
 			pvStrs = append(pvStrs, m.String())

@@ -2,11 +2,17 @@ package nnue
 
 import (
 	_ "embed"
+	"os"
+	"path/filepath"
+
 	"devilfish/internal/types"
 )
 
 //go:embed default.nnue
 var embeddedDefaultNNUE []byte
+
+//go:embed eightchess_1024_tuned768.nnue
+var embeddedEightNNUE []byte
 
 var defaultPST = [7][64]int32{
 	0: {}, // None
@@ -83,16 +89,48 @@ func init() {
 }
 
 func ResetToDefault() {
+	// Always initialize ActiveNetwork from embedded default weights as baseline
 	if len(embeddedDefaultNNUE) > 0 {
 		net, err := LoadBytes(embeddedDefaultNNUE)
 		if err == nil {
 			ActiveNetwork = net
 			CurrentFilePath = "<embedded>"
+		}
+	}
+	if ActiveNetwork == nil {
+		ActiveNetwork = generateDefaultNetwork()
+		CurrentFilePath = "<embedded (synthetic)>"
+	}
+
+	// 1. Prefer embedded 8Chess NNUE if compiled into binary
+	if len(embeddedEightNNUE) == EightNetworkSize {
+		eightNet, err := LoadEightBytes(embeddedEightNNUE)
+		if err == nil {
+			ActiveEightNetwork = eightNet
+			CurrentFilePath = "<embedded (8chess)>"
 			return
 		}
 	}
-	ActiveNetwork = generateDefaultNetwork()
-	CurrentFilePath = "<embedded (synthetic)>"
+
+	// 2. Check for EightChess network if present in local directory or Downloads
+	eightPaths := []string{
+		"eightchess_1024_tuned768.nnue",
+		"../eightchess_1024_tuned768.nnue",
+		"../../eightchess_1024_tuned768.nnue",
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		eightPaths = append(eightPaths, filepath.Join(home, "Downloads", "eightchess_1024_tuned768.nnue"))
+	}
+
+	for _, p := range eightPaths {
+		if fi, err := os.Stat(p); err == nil && fi.Size() == EightNetworkSize {
+			if eightNet, err := LoadEightFile(p); err == nil {
+				ActiveEightNetwork = eightNet
+				CurrentFilePath = p
+				return
+			}
+		}
+	}
 }
 
 func generateDefaultNetwork() *Network {

@@ -52,6 +52,10 @@ type SearchWorker struct {
 	PVLength          [MaxPly]int
 	StaticEvalHistory [MaxPly]int32
 	Accumulators      [MaxPly]nnue.Accumulator
+	EvalCache         [16384]struct {
+		hash uint64
+		eval int32
+	}
 	RootBestMove      types.Move
 	RootScore         int32
 	RootMoveNodes     [64][64]uint64
@@ -69,9 +73,25 @@ func (w *SearchWorker) isRootExcluded(m types.Move) bool {
 
 func (w *SearchWorker) Evaluate(ply int) int32 {
 	var staticEval int32
-	if nnue.Enabled && nnue.ActiveNetwork != nil && ply < MaxPly {
-		w.NnueEvals++
-		staticEval = nnue.Evaluate(&w.Accumulators[ply], w.Board.SideToMove)
+	if nnue.Enabled {
+		if nnue.ActiveEightNetwork != nil {
+			w.NnueEvals++
+			h := w.Board.Hash
+			idx := h & 16383
+			if w.EvalCache[idx].hash == h {
+				staticEval = w.EvalCache[idx].eval
+			} else {
+				staticEval = nnue.EvaluateEight(nnue.ActiveEightNetwork, w.Board)
+				w.EvalCache[idx].hash = h
+				w.EvalCache[idx].eval = staticEval
+			}
+		} else if nnue.ActiveNetwork != nil && ply < MaxPly {
+			w.NnueEvals++
+			staticEval = nnue.Evaluate(&w.Accumulators[ply], w.Board.SideToMove)
+		} else {
+			w.ClassicalEvals++
+			staticEval = eval.EvaluateClassical(w.Board)
+		}
 	} else {
 		w.ClassicalEvals++
 		staticEval = eval.EvaluateClassical(w.Board)

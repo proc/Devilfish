@@ -25,7 +25,7 @@ import (
 
 const (
 	EngineName    = "Devilfish"
-	EngineVersion = "0.0.2"
+	EngineVersion = "0.1.0"
 	EngineAuthor  = "Peter Tran"
 )
 
@@ -248,7 +248,7 @@ func (u *UCI) cmdSetOption(args []string) {
 		if err == nil && threads > 0 {
 			u.engine.SetThreads(threads)
 		}
-	case "ponder":
+	case "ponder", "autoponder":
 		valLower := strings.ToLower(strings.TrimSpace(valStr))
 		if valLower == "true" || valLower == "1" {
 			u.ponderEnabled = true
@@ -660,9 +660,14 @@ func (u *UCI) cmdPerft(args []string) {
 
 func (u *UCI) cmdEval() {
 	classicalScore := eval.EvaluateClassical(u.board)
-	var acc nnue.Accumulator
-	nnue.Refresh(u.board, &acc)
-	nnueScore := nnue.Evaluate(&acc, u.board.SideToMove)
+	var nnueScore int32
+	if nnue.ActiveEightNetwork != nil {
+		nnueScore = nnue.EvaluateEight(nnue.ActiveEightNetwork, u.board)
+	} else if nnue.ActiveNetwork != nil {
+		var acc nnue.Accumulator
+		nnue.Refresh(u.board, &acc)
+		nnueScore = nnue.Evaluate(&acc, u.board.SideToMove)
+	}
 
 	active := "NNUE"
 	activeScore := nnueScore
@@ -671,6 +676,8 @@ func (u *UCI) cmdEval() {
 		activeScore = classicalScore
 	}
 
+	netInfo := nnue.GetNetworkInfo()
+	u.sendLine(fmt.Sprintf("NNUE architecture     : %s", netInfo.Architecture))
 	u.sendLine(fmt.Sprintf("NNUE evaluation       : %+d cp", nnueScore))
 	u.sendLine(fmt.Sprintf("Classical evaluation  : %+d cp", classicalScore))
 	u.sendLine(fmt.Sprintf("Active evaluation (%s): %+d cp (from %s's perspective)", active, activeScore, u.board.SideToMove))

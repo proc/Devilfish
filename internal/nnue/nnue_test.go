@@ -226,3 +226,14 @@ func BenchmarkVectorOpsScalar(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkStandardEvaluate(b *testing.B) {
+	brd, _ := board.ParseFEN(board.StartFEN)
+	var acc Accumulator
+	Refresh(brd, &acc)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = Evaluate(&acc, types.White)
+	}
+}

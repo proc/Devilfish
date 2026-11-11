@@ -39,7 +39,7 @@ func printHelp() {
 	fmt.Println("  If present, configuration is automatically loaded from:")
 	fmt.Println("    1. ./config.json (current working directory)")
 	fmt.Printf("    2. %s (user home)\n", config.GetDefaultConfigPath())
-	fmt.Println("  Example format: {\"threads\": 10, \"hash\": 128, \"multipv\": 1, \"own_book\": true, \"book_file\": \"<embedded>\", \"ponder\": true, \"use_nnue\": true, \"eval_file\": \"<embedded>\", \"syzygy_path\": \"syzygy\"}")
+	fmt.Println("  Example format: {\"threads\": 10, \"hash\": 128, \"multipv\": 1, \"own_book\": true, \"book_file\": \"<embedded>\", \"ponder\": false, \"use_nnue\": true, \"eval_file\": \"<embedded>\", \"syzygy_path\": \"syzygy\"}")
 }
 
 func main() {
@@ -54,6 +54,7 @@ func main() {
 	var cliNoNNUE bool
 	var cliBookFile string
 	var cliNoBook bool
+	var cliPonder *bool
 	var isBench bool
 	var benchDepth int8 = 7
 
@@ -207,6 +208,18 @@ func main() {
 			continue
 		}
 
+		// Handle --ponder / --no-ponder
+		if arg == "--ponder" || arg == "-ponder" {
+			val := true
+			cliPonder = &val
+			continue
+		}
+		if arg == "--no-ponder" || arg == "-no-ponder" {
+			val := false
+			cliPonder = &val
+			continue
+		}
+
 		// Handle --multipv / -multipv
 		if arg == "-multipv" || arg == "--multipv" {
 			if i+1 < len(args) {
@@ -261,6 +274,9 @@ func main() {
 	}
 	if cliLogPath != "" {
 		cfg.LogFile = cliLogPath
+	}
+	if cliPonder != nil {
+		cfg.Ponder = *cliPonder
 	}
 
 	// 3. Initialize Logger if requested via CLI (--log) or config

@@ -1,3 +1,7 @@
 devilfish
 syzygy
 *.log
+*.pyc
+*.npz
+
+

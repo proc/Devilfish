@@ -51,6 +51,22 @@ func GetNetworkInfo() NetworkInfo {
 	if path == "" {
 		path = "<embedded>"
 	}
+	if ActiveEightNetwork != nil {
+		numParams := EightThreatFeatures*EightL1Size + EightPieceFeatures*EightL1Size + EightL1Size +
+			EightOutputBuckets*(EightL2Size*EightL1Size+EightL2Size+EightL2Size*EightL3Size+EightL3Size+EightL3Size+1)
+		return NetworkInfo{
+			Enabled:       Enabled,
+			Architecture:  "8Chess 1024-wide (Piece 7680 + Threat 66864 -> 1024 -> 16x8 -> 32x8 -> 1x8)",
+			FilePath:      path,
+			SIMD:          SIMDInstructionSet,
+			FeatureCount:  EightThreatFeatures + EightPieceFeatures,
+			HiddenSize:    EightL1Size,
+			Layer1Size:    EightL2Size,
+			NumParameters: numParams,
+			SizeBytes:     EightNetworkSize,
+		}
+	}
+
 	numParams := HiddenSize + (NumFeatures * HiddenSize) + Layer1Size + (Layer1Size * 2 * HiddenSize) + 1 + Layer1Size
 	sizeBytes := (HiddenSize * 2) + (NumFeatures * HiddenSize * 2) + (Layer1Size * 4) + (Layer1Size * 2 * HiddenSize * 1) + 4 + (Layer1Size * 2)
 	return NetworkInfo{

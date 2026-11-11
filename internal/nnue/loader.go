@@ -21,19 +21,31 @@ func LoadFile(path string) error {
 		return err
 	}
 
+	if fi.Size() == EightNetworkSize {
+		eightNet, err := LoadEightFile(path)
+		if err != nil {
+			return err
+		}
+		ActiveEightNetwork = eightNet
+		ActiveNetwork = nil
+		Enabled = true
+		CurrentFilePath = path
+		return nil
+	}
+
 	expectedSize := int64((HiddenSize * 2) + (NumFeatures * HiddenSize * 2) + (Layer1Size * 4) + (Layer1Size * 2 * HiddenSize * 1) + 4 + (Layer1Size * 2))
 
 	// Detect Stockfish / YaneuraOu HalfKAv2 format
 	var magic uint32
 	if err := binary.Read(file, binary.LittleEndian, &magic); err == nil {
 		if magic == 0x6a448afa || magic == 0x7f0b0fc6 {
-			return fmt.Errorf("incompatible NNUE network architecture: %s is a Stockfish SFNNv16/HalfKAv2 model (%.1f MB), but Devilfish implements a 768->256 direct feature network (expected ~%.1f KB)", path, float64(fi.Size())/(1024*1024), float64(expectedSize)/1024)
+			return fmt.Errorf("incompatible NNUE network architecture: %s is a Stockfish SFNNv16/HalfKAv2 model (%.1f MB), but Devilfish implements 768->256 direct feature and 8Chess (1024-wide) networks", path, float64(fi.Size())/(1024*1024))
 		}
 		_, _ = file.Seek(0, io.SeekStart)
 	}
 
 	if fi.Size() != expectedSize {
-		return fmt.Errorf("invalid NNUE network size: got %d bytes, expected %d bytes for (768->256x2)->32->1", fi.Size(), expectedSize)
+		return fmt.Errorf("invalid NNUE network size: got %d bytes, expected %d bytes (768->256) or %d bytes (8Chess 1024-wide)", fi.Size(), expectedSize, EightNetworkSize)
 	}
 
 	net, err := LoadReader(file)
@@ -42,6 +54,7 @@ func LoadFile(path string) error {
 	}
 
 	ActiveNetwork = net
+	ActiveEightNetwork = nil
 	Enabled = true
 	CurrentFilePath = path
 	return nil

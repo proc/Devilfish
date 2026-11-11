@@ -26,10 +26,15 @@ func absVal(x int32) int32 {
 }
 
 func Evaluate(b *board.Board) int32 {
-	if nnue.Enabled && nnue.ActiveNetwork != nil {
-		var acc nnue.Accumulator
-		nnue.Refresh(b, &acc)
-		return nnue.Evaluate(&acc, b.SideToMove)
+	if nnue.Enabled {
+		if nnue.ActiveEightNetwork != nil {
+			return nnue.EvaluateEight(nnue.ActiveEightNetwork, b)
+		}
+		if nnue.ActiveNetwork != nil {
+			var acc nnue.Accumulator
+			nnue.Refresh(b, &acc)
+			return nnue.Evaluate(&acc, b.SideToMove)
+		}
 	}
 	return EvaluateClassical(b)
 }

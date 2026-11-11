@@ -15,6 +15,7 @@ func TestAutoPondering(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	cfg.Threads = 2
+	cfg.Ponder = true
 	u := New(in, out, cfg)
 
 	// Send "go depth 3"
@@ -53,6 +54,7 @@ func TestAutoPonderPositionMatch(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	cfg.Threads = 2
+	cfg.Ponder = true
 	u := New(in, out, cfg)
 
 	// Search startpos
@@ -87,6 +89,7 @@ func TestAutoPonderPonderHit(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	cfg.Threads = 2
+	cfg.Ponder = true
 	u := New(in, out, cfg)
 
 	// Search startpos
@@ -195,5 +198,28 @@ func TestSyzygySetOptions(t *testing.T) {
 	u.cmdSetOption([]string{"name", "BookFile", "value", "<embedded>"})
 	if u.bookFile != "<embedded>" {
 		t.Errorf("expected BookFile to be <embedded>, got %s", u.bookFile)
+	}
+}
+
+func TestAutoPonderDisabledByDefault(t *testing.T) {
+	in := bytes.NewBuffer(nil)
+	out := &bytes.Buffer{}
+
+	cfg := config.DefaultConfig()
+	cfg.Threads = 2
+	u := New(in, out, cfg)
+
+	if u.ponderEnabled {
+		t.Errorf("expected ponderEnabled to be false by default")
+	}
+
+	// Search startpos
+	u.cmdGo([]string{"depth", "3"})
+
+	// Wait briefly to see if auto-ponder starts (it shouldn't)
+	time.Sleep(200 * time.Millisecond)
+
+	if u.isAutoPonder.Load() {
+		t.Errorf("expected auto-ponder NOT to run when disabled by default")
 	}
 }

@@ -29,7 +29,7 @@ func DefaultConfig() Config {
 	return Config{
 		Threads:          10,
 		Hash:             128,
-		Ponder:           true,
+		Ponder:           false,
 		UseNNUE:          true,
 		EvalFile:         "<embedded>",
 		SyzygyPath:       "",
