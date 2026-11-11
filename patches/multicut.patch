@@ -1,0 +1,14 @@
+--- a/internal/search/search.go
++++ b/internal/search/search.go
+@@ -501,6 +501,11 @@
+ 			return 0
+ 		}
+ 
++		if sScore >= singularBeta && singularBeta >= beta {
++			// Multi-cut: another move also beats beta, even searched shallower
++			// and with the TT move excluded, so this node fails high.
++			return beta
++		}
+ 		if sScore < singularBeta {
+ 			extension = 1
+ 			if !isPVNode && sScore < singularBeta-25 {

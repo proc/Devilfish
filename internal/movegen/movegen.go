@@ -405,11 +405,28 @@ func IsPseudoLegal(b *board.Board, m types.Move) bool {
 	}
 
 	target := b.Pieces[to]
-	if target != types.PieceNone && target.Color() == us {
+	if target != types.PieceNone && (target.Color() == us || target.Type() == types.King) {
 		return false
 	}
+	isCapture := target != types.PieceNone
 
+	// The move's flags must agree with the board: MakeMove trusts the
+	// en-passant and promotion flags, so a stale TT/killer move with the
+	// wrong flags would corrupt the position.
 	pt := p.Type()
+	if f := m.Flags(); f == 6 || f == 7 { // unassigned encodings
+		return false
+	}
+	if pt != types.Pawn {
+		want := types.FlagQuiet
+		if isCapture {
+			want = types.FlagCapture
+		}
+		if m.Flags() != want {
+			return false
+		}
+	}
+
 	switch pt {
 	case types.Knight:
 		return bitboard.KnightAttacks(from)&bitboard.SquareBB[to] != 0
@@ -422,26 +439,29 @@ func IsPseudoLegal(b *board.Board, m types.Move) bool {
 	case types.King:
 		return bitboard.KingAttacks(from)&bitboard.SquareBB[to] != 0
 	case types.Pawn:
-		if us == types.White {
-			if to == from+8 && target == types.PieceNone {
-				return true
+		lastRank, startRank, forward := types.Rank8, types.Rank2, 8
+		if us == types.Black {
+			lastRank, startRank, forward = types.Rank1, types.Rank7, -8
+		}
+		step := int(to) - int(from)
+		if m.IsPromotion() != (to.Rank() == lastRank) {
+			return false
+		}
+		// Attack table, not from±7/9 arithmetic, which wraps across the a/h files
+		if bitboard.PawnAttacks(us, from)&bitboard.SquareBB[to] != 0 {
+			if m.IsEnPassant() {
+				return to == b.EPSquare && !isCapture
 			}
-			if from.Rank() == types.Rank2 && to == from+16 && b.Pieces[from+8] == types.PieceNone && target == types.PieceNone {
-				return true
-			}
-			if (to == from+7 || to == from+9) && (target != types.PieceNone || to == b.EPSquare) {
-				return true
-			}
-		} else {
-			if to == from-8 && target == types.PieceNone {
-				return true
-			}
-			if from.Rank() == types.Rank7 && to == from-16 && b.Pieces[from-8] == types.PieceNone && target == types.PieceNone {
-				return true
-			}
-			if (to == from-7 || to == from-9) && (target != types.PieceNone || to == b.EPSquare) {
-				return true
-			}
+			return isCapture && m.IsCapture()
+		}
+		if isCapture || m.IsCapture() {
+			return false
+		}
+		if step == forward {
+			return m.Flags() != types.FlagDoublePawnPush
+		}
+		if from.Rank() == startRank && step == 2*forward && b.Pieces[int(from)+forward] == types.PieceNone {
+			return m.Flags() == types.FlagDoublePawnPush
 		}
 	}
 	return false

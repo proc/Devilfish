@@ -95,6 +95,8 @@ func (w *SearchWorker) Evaluate(ply int) int32 {
 		w.ClassicalEvals++
 		staticEval = eval.EvaluateClassical(w.Board)
 	}
+	// Rule of the square in pawn endings, which the network misjudges
+	staticEval += eval.PawnRaceBonus(w.Board)
 	corr := w.History.GetCorrection(w.Board.SideToMove, w.Board.PawnHash)
 	return staticEval + corr
 }
@@ -501,6 +503,11 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			return 0
 		}
 
+		if sScore >= singularBeta && singularBeta >= beta {
+			// Multi-cut: another move also beats beta, even searched shallower
+			// and with the TT move excluded, so this node fails high.
+			return beta
+		}
 		if sScore < singularBeta {
 			extension = 1
 			if !isPVNode && sScore < singularBeta-25 {
