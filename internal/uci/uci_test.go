@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"devilfish/internal/config"
+	"devilfish/internal/syzygy"
 )
 
 func TestAutoPondering(t *testing.T) {
@@ -221,5 +222,76 @@ func TestAutoPonderDisabledByDefault(t *testing.T) {
 
 	if u.isAutoPonder.Load() {
 		t.Errorf("expected auto-ponder NOT to run when disabled by default")
+	}
+}
+
+func TestDisableBookUCI(t *testing.T) {
+	testCmds := [][]string{
+		{"name", "Book", "value", "false"},
+		{"name", "Book", "value", "off"},
+		{"name", "Book", "value", "none"},
+		{"name", "Opening", "Book", "value", "false"},
+		{"name", "OpeningBook", "value", "false"},
+		{"name", "UseBook", "value", "false"},
+		{"name", "OwnBook", "value", "false"},
+		{"name", "BookFile", "value", "none"},
+		{"name", "BookFile", "value", "<empty>"},
+	}
+
+	for _, cmd := range testCmds {
+		out := &bytes.Buffer{}
+		cfg := config.DefaultConfig()
+		cfg.OwnBook = true
+		u := New(bytes.NewBuffer(nil), out, cfg)
+
+		if !u.engine.UseBook {
+			t.Fatal("expected engine to start with book enabled")
+		}
+
+		u.cmdSetOption(cmd)
+		if u.engine.UseBook {
+			t.Errorf("cmd %v failed to disable opening book", cmd)
+		}
+	}
+}
+
+func TestOpeningInfoMessage(t *testing.T) {
+	out := &bytes.Buffer{}
+	cfg := config.DefaultConfig()
+	cfg.Threads = 2
+	u := New(bytes.NewBuffer(nil), out, cfg)
+
+	u.cmdPosition([]string{"startpos", "moves", "e2e4", "c7c5"})
+	u.cmdGo([]string{"depth", "1"})
+
+	time.Sleep(100 * time.Millisecond)
+	u.cmdStop()
+
+	output := out.String()
+	if !strings.Contains(output, "info string Opening: B20: Sicilian Defense") {
+		t.Errorf("expected opening info message in output, got:\n%s", output)
+	}
+}
+
+func TestSyzygyTablebaseLogAndInfoMessage(t *testing.T) {
+	out := &bytes.Buffer{}
+	cfg := config.DefaultConfig()
+	cfg.Threads = 1
+	cfg.SyzygyPath = "../../syzygy"
+	u := New(bytes.NewBuffer(nil), out, cfg)
+
+	if !syzygy.IsAvailable() {
+		t.Skip("Syzygy tablebases not available, skipping test")
+	}
+
+	u.cmdPosition([]string{"fen", "8/8/8/8/8/5k2/8/4K2R", "w", "-", "-", "0", "1"})
+	u.cmdGo([]string{"depth", "5"})
+
+	time.Sleep(100 * time.Millisecond)
+	u.cmdStop()
+
+	output := out.String()
+	if !strings.Contains(output, "info string Syzygy tablebase determined best position:") {
+		t.Errorf("expected Syzygy info message in output, got:\n%s", output)
 	}
 }

@@ -727,3 +727,70 @@ func TestThreatenedRookResponses(t *testing.T) {
 		}
 	})
 }
+
+func TestSearchDepthBeyond10(t *testing.T) {
+	eng := NewEngine(16, 2)
+	eng.SetUseBook(false)
+
+	fen := "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+	b, err := board.ParseFEN(fen)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var maxDepthReached int8
+	bm, _ := eng.Search(b, SearchLimits{MaxDepth: 11}, func(info SearchInfo) {
+		if info.Depth > maxDepthReached {
+			maxDepthReached = info.Depth
+		}
+	})
+
+	if bm == types.MoveNone {
+		t.Fatal("expected valid best move")
+	}
+
+	if maxDepthReached < 11 {
+		t.Errorf("expected search to reach depth 11 without artificial cutoff, got depth %d", maxDepthReached)
+	}
+}
+
+func TestQueenThreatEvasion(t *testing.T) {
+	eng := NewEngine(16, 1)
+	eng.SetUseBook(false)
+
+	tests := []struct {
+		name    string
+		fen     string
+		badMove string
+	}{
+		{
+			name:    "Bishop attacks Queen on d2",
+			fen:     "r2q1rk1/pp1n1pp1/2p1pn1p/6b1/2PP4/2N5/PP1Q1PPP/R3KB1R w KQ - 0 1",
+			badMove: "d2g5",
+		},
+		{
+			name:    "Knight on b4 attacks Queen on d3",
+			fen:     "r1bqk2r/pp1n1ppp/2p1p3/3p4/1nPP4/3QPN2/PP3PPP/RNB1KB1R w KQkq - 0 1",
+			badMove: "a2a3",
+		},
+		{
+			name:    "Defended Rook attacks Queen",
+			fen:     "r2r4/5pk1/8/8/3Q4/8/5PPP/6K1 w - - 0 1",
+			badMove: "h2h3",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := board.ParseFEN(tc.fen)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bm, _ := eng.Search(b, SearchLimits{MaxDepth: 4}, nil)
+			t.Logf("[%s] Bestmove: %s", tc.name, bm)
+			if bm.String() == tc.badMove {
+				t.Errorf("[%s] blundered queen with move %s", tc.name, bm)
+			}
+		})
+	}
+}

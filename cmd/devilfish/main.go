@@ -34,6 +34,7 @@ func printHelp() {
 	fmt.Println("  --no-nnue                   Disable NNUE evaluation (use classical HCE)")
 	fmt.Println("  --book <path>               Path to Polyglot opening book (.bin) file (default: embedded)")
 	fmt.Println("  --no-book                   Disable opening book")
+	fmt.Println("  --own-book <true|false>     Enable or disable opening book (default: true)")
 	fmt.Println("  --syzygy-path <path>        Path to directory containing Syzygy tablebase files (.rtbw / .rtbz)")
 	fmt.Println("\nConfiguration File:")
 	fmt.Println("  If present, configuration is automatically loaded from:")
@@ -54,6 +55,7 @@ func main() {
 	var cliNoNNUE bool
 	var cliBookFile string
 	var cliNoBook bool
+	var cliOwnBook *bool
 	var cliPonder *bool
 	var isBench bool
 	var benchDepth int8 = 7
@@ -161,20 +163,80 @@ func main() {
 		// Handle --book / -book
 		if arg == "-book" || arg == "--book" {
 			if i+1 < len(args) {
-				cliBookFile = args[i+1]
+				nextArg := args[i+1]
+				nextLower := strings.ToLower(nextArg)
+				if nextLower == "false" || nextLower == "off" || nextLower == "none" || nextLower == "0" {
+					f := false
+					cliOwnBook = &f
+				} else if nextLower == "true" || nextLower == "on" || nextLower == "1" {
+					t := true
+					cliOwnBook = &t
+				} else {
+					cliBookFile = nextArg
+					t := true
+					cliOwnBook = &t
+				}
 				i++
 			}
 			continue
 		}
 		if strings.HasPrefix(arg, "--book=") || strings.HasPrefix(arg, "-book=") {
 			parts := strings.SplitN(arg, "=", 2)
-			cliBookFile = parts[1]
+			valLower := strings.ToLower(parts[1])
+			if valLower == "false" || valLower == "off" || valLower == "none" || valLower == "0" {
+				f := false
+				cliOwnBook = &f
+			} else if valLower == "true" || valLower == "on" || valLower == "1" {
+				t := true
+				cliOwnBook = &t
+			} else {
+				cliBookFile = parts[1]
+				t := true
+				cliOwnBook = &t
+			}
 			continue
 		}
 
-		// Handle --no-book
-		if arg == "--no-book" || arg == "-no-book" {
-			cliNoBook = true
+		// Handle --no-book / --no-own-book
+		if arg == "--no-book" || arg == "-no-book" || arg == "--no-own-book" || arg == "-no-own-book" {
+			f := false
+			cliOwnBook = &f
+			continue
+		}
+
+		// Handle --own-book / --use-book
+		if arg == "--own-book" || arg == "-own-book" || arg == "--use-book" || arg == "-use-book" {
+			if i+1 < len(args) {
+				valLower := strings.ToLower(args[i+1])
+				if valLower == "false" || valLower == "off" || valLower == "0" {
+					f := false
+					cliOwnBook = &f
+					i++
+				} else if valLower == "true" || valLower == "on" || valLower == "1" {
+					t := true
+					cliOwnBook = &t
+					i++
+				} else {
+					t := true
+					cliOwnBook = &t
+				}
+			} else {
+				t := true
+				cliOwnBook = &t
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--own-book=") || strings.HasPrefix(arg, "-own-book=") ||
+			strings.HasPrefix(arg, "--use-book=") || strings.HasPrefix(arg, "-use-book=") {
+			parts := strings.SplitN(arg, "=", 2)
+			valLower := strings.ToLower(parts[1])
+			if valLower == "false" || valLower == "off" || valLower == "0" {
+				f := false
+				cliOwnBook = &f
+			} else {
+				t := true
+				cliOwnBook = &t
+			}
 			continue
 		}
 
@@ -271,6 +333,9 @@ func main() {
 	}
 	if cliNoBook {
 		cfg.OwnBook = false
+	}
+	if cliOwnBook != nil {
+		cfg.OwnBook = *cliOwnBook
 	}
 	if cliLogPath != "" {
 		cfg.LogFile = cliLogPath

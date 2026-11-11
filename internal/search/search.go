@@ -52,7 +52,7 @@ type SearchWorker struct {
 	PVLength          [MaxPly]int
 	StaticEvalHistory [MaxPly]int32
 	Accumulators      [MaxPly]nnue.Accumulator
-	EvalCache         [16384]struct {
+	EvalCache         [32768]struct {
 		hash uint64
 		eval int32
 	}
@@ -77,7 +77,7 @@ func (w *SearchWorker) Evaluate(ply int) int32 {
 		if nnue.ActiveEightNetwork != nil {
 			w.NnueEvals++
 			h := w.Board.Hash
-			idx := h & 16383
+			idx := h & 32767
 			if w.EvalCache[idx].hash == h {
 				staticEval = w.EvalCache[idx].eval
 			} else {
@@ -300,13 +300,24 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	myAttackers, myAttackUnits := w.Board.KingAttackersCount(them)
 	hasActiveAttack := myAttackers >= 2 || myAttackUnits >= 4
 
+	threatenedPieces := w.Board.TacticalThreatsOnPieces(us)
+
+	ourQueens := w.Board.PieceBB[types.MakePiece(us, types.Queen)]
+	ourRooks := w.Board.PieceBB[types.MakePiece(us, types.Rook)]
+	ourMinors := w.Board.PieceBB[types.MakePiece(us, types.Knight)] | w.Board.PieceBB[types.MakePiece(us, types.Bishop)]
+
 	// 4. Reverse Futility Pruning (Static Null Move Pruning)
-	if ply > 0 && !isPVNode && !inCheck && !kingInDanger && !prevIsKingThreat && depth <= 4 && abs(beta) < MateThreshold && hasNonPawns {
+	// Never RFP if high-value pieces (Queen, Rook, Minor) are under tactical threat,
+	// because opponent capture would immediately wipe out the static advantage.
+	if ply > 0 && !isPVNode && !inCheck && !kingInDanger && !prevIsKingThreat && (threatenedPieces&(ourQueens|ourRooks|ourMinors)) == 0 && depth <= 4 && abs(beta) < MateThreshold && hasNonPawns {
 		margin := int32(depth) * 75
 		if !improving {
 			margin += int32(depth) * 35
 		}
-		if staticEval-margin >= beta && w.Board.TacticalThreatsOnPieces(us) == 0 {
+		if threatenedPieces != 0 {
+			margin += 120 // Safety margin if pawns are contested
+		}
+		if staticEval-margin >= beta {
 			return beta
 		}
 	}
@@ -314,7 +325,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	// 5. Razoring
 	if ply > 0 && !isPVNode && !inCheck && !kingInDanger && !prevIsKingThreat && depth <= 1 {
 		razorMargin := int32(350)
-		if staticEval+razorMargin <= alpha && w.Board.TacticalThreatsOnPieces(us) == 0 {
+		if staticEval+razorMargin <= alpha {
 			qScore := w.Quiescence(alpha, beta, ply)
 			if qScore <= alpha {
 				return qScore
@@ -323,26 +334,25 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	}
 
 	// 6. Null Move Pruning (NMP)
+	// Never pass if our Queen is under direct tactical threat.
 	pieceCount := bitboard.Count(w.Board.Occupied())
-	if ply > 0 && !isPVNode && !inCheck && !kingInDanger && !prevIsKingThreat && depth >= 3 && staticEval >= beta && hasNonPawns && pieceCount > 6 {
-		if w.Board.TacticalThreatsOnPieces(us) == 0 {
-			r := int8(3 + depth/4)
-			if !improving {
-				r++
-			}
-			if ply+1 < MaxPly {
-				w.Accumulators[ply+1] = w.Accumulators[ply]
-			}
-			w.Board.MakeNullMove()
-			nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
-			w.Board.UnmakeNullMove()
+	if ply > 0 && !isPVNode && !inCheck && !kingInDanger && !prevIsKingThreat && (threatenedPieces&ourQueens) == 0 && depth >= 3 && staticEval >= beta && hasNonPawns && pieceCount > 6 {
+		r := int8(3 + depth/4)
+		if !improving {
+			r++
+		}
+		if ply+1 < MaxPly {
+			w.Accumulators[ply+1] = w.Accumulators[ply]
+		}
+		w.Board.MakeNullMove()
+		nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+		w.Board.UnmakeNullMove()
 
-			if w.TimeMan.Stopped.Load() {
-				return 0
-			}
-			if nullScore >= beta {
-				return beta
-			}
+		if w.TimeMan.Stopped.Load() {
+			return 0
+		}
+		if nullScore >= beta {
+			return beta
 		}
 	}
 
@@ -542,15 +552,14 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		is7thRankPawnPush := attacker == types.Pawn &&
 			((us == types.White && toSq.Rank() == types.Rank7) || (us == types.Black && toSq.Rank() == types.Rank2))
 
-		pawnThreats := w.Board.PawnThreatsOnPieces(us)
-		isThreatEvasion := isQuiet && pawnThreats != 0 && (bitboard.SquareBB[fromSq]&pawnThreats) != 0 && moveSEE >= 0
-		isThreatMove := isQuiet && pawnThreats == 0 && IsTacticalThreat(w.Board, m)
-		isKingThreat := pawnThreats == 0 && IsKingAttack(w.Board, m)
+		isThreatEvasion := isQuiet && threatenedPieces != 0 && (bitboard.SquareBB[fromSq]&threatenedPieces) != 0 && moveSEE >= 0
+		isThreatMove := isQuiet && threatenedPieces == 0 && IsTacticalThreat(w.Board, m)
+		isKingThreat := threatenedPieces == 0 && IsKingAttack(w.Board, m)
 		isKingZoneMove := (bitboard.SquareBB[toSq] & themKingRing) != 0
 
 		// Late Move Pruning (LMP)
 		if !isPVNode && !inCheck && depth <= 4 && isQuiet && movesSearched > 0 &&
-			m != killer1 && m != killer2 && m != counterMove && !isThreatMove && !isKingThreat && !isThreatEvasion && !(hasActiveAttack && isKingZoneMove) {
+			m != killer1 && m != killer2 && m != counterMove && !isThreatMove && !isThreatEvasion && !isAdvancedPawnPush {
 			if !givesCheck {
 				lmpThreshold := 5 + 3*int(depth)*int(depth)
 				if !improving {
@@ -564,7 +573,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		// Futility Pruning
 		if !isPVNode && !inCheck && depth <= 4 && isQuiet && movesSearched > 0 &&
-			m != killer1 && m != killer2 && m != counterMove && !isThreatMove && !isKingThreat && !isThreatEvasion && !(hasActiveAttack && isKingZoneMove) {
+			m != killer1 && m != killer2 && m != counterMove && !isThreatMove && !isThreatEvasion && !isAdvancedPawnPush {
 			futMargin := int32(90) * int32(depth)
 			if staticEval+futMargin <= alpha {
 				if !givesCheck {
@@ -576,7 +585,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		// History Pruning
 		// Prune quiet moves with poor history score at shallow depths
 		if !isPVNode && !inCheck && depth <= 3 && isQuiet && movesSearched > 0 &&
-			m != killer1 && m != killer2 && m != counterMove && !isThreatMove && !isKingThreat && !isThreatEvasion && !(hasActiveAttack && isKingZoneMove) {
+			m != killer1 && m != killer2 && m != counterMove && !isThreatMove && !isThreatEvasion && !isAdvancedPawnPush {
 			if !givesCheck {
 				histScore := w.History.HistoryTable[us][m.From()][m.To()]
 				if prevMove != types.MoveNone && prevMove.To() < 64 && m.To() < 64 {
@@ -597,7 +606,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		// SEE Pruning
 		// Do not prune tactical/killer moves, countermoves, advanced pawn pushes, or moves that give check
-		if !isPVNode && !inCheck && depth <= 3 && m != killer1 && m != killer2 && m != counterMove && !isAdvancedPawnPush && !isThreatMove && !isKingThreat && !isThreatEvasion {
+		if !isPVNode && !inCheck && depth <= 3 && m != killer1 && m != killer2 && m != counterMove && !isAdvancedPawnPush && !isThreatMove && !isThreatEvasion {
 			if !givesCheck {
 				if isQuiet {
 					if depth <= 2 && moveSEE < -int32(depth)*60 {
@@ -675,9 +684,11 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 						reduction = 0
 					}
 
-					// Threat evasion, tactical threat, or King attack threat: don't reduce
-					if isThreatEvasion || isThreatMove || isKingThreat || (hasActiveAttack && isKingZoneMove) {
+					// Threat evasion or tactical threat: don't reduce
+					if isThreatEvasion || isThreatMove {
 						reduction = 0
+					} else if isKingThreat || (hasActiveAttack && isKingZoneMove) {
+						reduction--
 					}
 
 					// History-based reduction adjustment

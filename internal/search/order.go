@@ -65,12 +65,25 @@ func IsTacticalThreat(b *board.Board, m types.Move) bool {
 			return (bitboard.BishopAttacks(toSq, occ) & (themRook | themQueen)) != 0
 		}
 	case types.Rook:
-		if (themQueen | themRook | themMinor) != 0 {
-			return (bitboard.RookAttacks(toSq, occ) & (themQueen | themRook | themMinor)) != 0
+		if themQueen != 0 && (bitboard.RookAttacks(toSq, occ)&themQueen) != 0 {
+			return true
+		}
+		// Also check if Rook attacks an undefended enemy piece (Minor or Queen)
+		attacks := bitboard.RookAttacks(toSq, occ) & (themMinor | themQueen)
+		for attacks != 0 {
+			targetSq := bitboard.PopLSB(&attacks)
+			if !b.IsSquareAttacked(targetSq, them) {
+				return true
+			}
 		}
 	case types.Queen:
-		if (themQueen | themRook | themMinor) != 0 {
-			return (bitboard.QueenAttacks(toSq, occ) & (themQueen | themRook | themMinor)) != 0
+		// Queen only threatens enemy pieces if they are UNDEFENDED (hanging)
+		attacks := bitboard.QueenAttacks(toSq, occ) & (themMinor | themRook)
+		for attacks != 0 {
+			targetSq := bitboard.PopLSB(&attacks)
+			if !b.IsSquareAttacked(targetSq, them) {
+				return true
+			}
 		}
 	}
 	return false

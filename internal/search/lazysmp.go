@@ -19,18 +19,19 @@ import (
 )
 
 type SearchInfo struct {
-	Depth    int8
-	SelDepth int8
-	Score    int32
-	IsMate   bool
-	MateIn   int
-	Nodes    uint64
-	NPS      uint64
-	TimeMs   int64
-	HashFull int
-	TBHits   uint64
-	PV       []types.Move
-	MultiPV  int
+	Depth     int8
+	SelDepth  int8
+	Score     int32
+	IsMate    bool
+	MateIn    int
+	Nodes     uint64
+	NPS       uint64
+	TimeMs    int64
+	HashFull  int
+	TBHits    uint64
+	PV        []types.Move
+	MultiPV   int
+	StringMsg string
 }
 
 type Engine struct {
@@ -108,6 +109,17 @@ func (e *Engine) Search(
 	e.TBHits.Store(0)
 	e.TT.IncrementAge()
 
+	// Identify opening if available
+	opening := book.FindOpening(b)
+	if opening.Name != "" {
+		logger.Infof("Opening: %s", opening)
+		if infoCallback != nil {
+			infoCallback(SearchInfo{
+				StringMsg: fmt.Sprintf("Opening: %s", opening),
+			})
+		}
+	}
+
 	// Opening book probe
 	if e.UseBook && e.Book != nil && !limits.Infinite && !limits.Ponder && e.MultiPV <= 1 {
 		if bookMove := e.Book.Probe(b); bookMove != types.MoveNone {
@@ -115,6 +127,17 @@ func (e *Engine) Search(
 			nextB := b.Clone()
 			if nextB.MakeMove(bookMove) {
 				ponderMove = e.Book.Probe(nextB)
+				if opening.Name == "" {
+					if opAfter := book.FindOpening(nextB); opAfter.Name != "" {
+						opening = opAfter
+						logger.Infof("Opening: %s", opening)
+						if infoCallback != nil {
+							infoCallback(SearchInfo{
+								StringMsg: fmt.Sprintf("Opening: %s", opening),
+							})
+						}
+					}
+				}
 			}
 			pv := []types.Move{bookMove}
 			if ponderMove != types.MoveNone {
@@ -129,7 +152,11 @@ func (e *Engine) Search(
 					PV:       pv,
 				})
 			}
-			logger.Infof("Opening Book Hit: %s (ponder: %s)", bookMove, ponderMove)
+			if opening.Name != "" {
+				logger.Infof("Opening: %s | Book Hit: %s (ponder: %s)", opening, bookMove, ponderMove)
+			} else {
+				logger.Infof("Opening Book Hit: %s (ponder: %s)", bookMove, ponderMove)
+			}
 			return bookMove, ponderMove
 		}
 	}
@@ -171,7 +198,13 @@ func (e *Engine) Search(
 				mateIn = -int((MateScore + rootScore + 1) / 2)
 			}
 
+			wdlStr := syzygy.WDLToString(wdl)
+			logger.Infof("Syzygy tablebase determined best position: %s (%s, DTZ: %d, Score: %d, MateIn: %d)", rootMove, wdlStr, dtz, rootScore, mateIn)
+
 			if infoCallback != nil {
+				infoCallback(SearchInfo{
+					StringMsg: fmt.Sprintf("Syzygy tablebase determined best position: %s (%s, DTZ %d)", rootMove, wdlStr, dtz),
+				})
 				infoCallback(SearchInfo{
 					Depth:    1,
 					SelDepth: 1,
@@ -187,7 +220,6 @@ func (e *Engine) Search(
 				})
 			}
 
-			logger.Infof("Syzygy Root Probe Hit: Move=%s, WDL=%d, DTZ=%d, Score=%d, IsMate=%t, MateIn=%d", rootMove, wdl, dtz, rootScore, isMate, mateIn)
 			e.TT.Store(b.Hash, rootMove, tt.ScoreToTT(rootScore, 0), 127, tt.Exact)
 			return rootMove, types.MoveNone
 		}
@@ -535,35 +567,26 @@ func (e *Engine) Search(
 
 			// Dynamic Time Management: Best move stability, node dominance & fail-low recovery
 			isStable := false
+			hasClockTime := tm.OptTime > 0 && limits.MaxDepth == 0 && limits.MaxNodes == 0 && !tm.Infinite && !tm.Ponder.Load() && !tm.IsMoveTime
+
 			if depth >= 5 && rootBestMove != types.MoveNone {
 				if rootBestMove == prevIterationBestMove {
 					bestMoveStability++
 					isStable = true
 
 					// Emergency early exit: ONLY in severe time trouble (<2.5s) to prevent flagging
-					if !tm.Infinite && !tm.Ponder.Load() && !tm.IsMoveTime && tm.IsEmergency && bestMoveStability >= 2 && depth >= 8 {
+					if hasClockTime && tm.IsEmergency && bestMoveStability >= 2 && depth >= 8 {
 						break
 					}
 
-					// High-confidence early exit:
-					// Require high stability (>= 4 iterations), adequate depth (>= 12 in endgame, >= 10 otherwise),
-					// and that the engine has already consumed >= 75% of its allocated OptTime.
-					minExitDepth := int8(10)
-					if tm.IsEndgame {
-						minExitDepth = 12
-					}
-					elapsed := time.Since(startTime)
-					if !tm.Infinite && !tm.Ponder.Load() && !tm.IsMoveTime &&
-						bestMoveStability >= 4 && depth >= minExitDepth &&
-						elapsed >= time.Duration(float64(tm.OptTime)*0.75) {
-						break
-					}
-
-					if bestMoveStability >= 2 {
-						tm.AdjustOptTime(0.85)
-					}
-					if bestMoveStability >= 4 {
-						tm.AdjustOptTime(0.75)
+					// Dynamic time allocation adjustment based on stability
+					if hasClockTime {
+						if bestMoveStability >= 2 {
+							tm.AdjustOptTime(0.85)
+						}
+						if bestMoveStability >= 4 {
+							tm.AdjustOptTime(0.75)
+						}
 					}
 				} else {
 					bestMoveStability = 0
@@ -571,20 +594,10 @@ func (e *Engine) Search(
 				}
 
 				// Node-based time management: evaluate dominance of root move
-				rootNodes := master.RootMoveNodes[rootBestMove.From()][rootBestMove.To()]
-				if master.LocalNodes > 0 {
+				if hasClockTime && master.LocalNodes > 0 {
+					rootNodes := master.RootMoveNodes[rootBestMove.From()][rootBestMove.To()]
 					nodeRatio := float64(rootNodes) / float64(master.LocalNodes)
-					elapsed := time.Since(startTime)
-					minDomDepth := int8(10)
-					if tm.IsEndgame {
-						minDomDepth = 12
-					}
-					if nodeRatio >= 0.90 && depth >= minDomDepth && bestMoveStability >= 2 && elapsed >= time.Duration(float64(tm.OptTime)*0.70) {
-						// Overwhelming dominance after thorough search: safe to finish
-						if !tm.Infinite && !tm.Ponder.Load() && !tm.IsMoveTime {
-							break
-						}
-					} else if nodeRatio >= 0.70 {
+					if nodeRatio >= 0.70 {
 						tm.AdjustOptTime(0.85)
 					} else if nodeRatio < 0.35 && !tm.IsTimeTrouble {
 						// Disputed position: extend allocated time slightly
@@ -593,7 +606,7 @@ func (e *Engine) Search(
 				}
 
 				// If the score dropped significantly from the previous iteration, extend time to recover (only if not in time trouble)
-				if !tm.IsTimeTrouble && prevIterationScore != 0 && score < prevIterationScore-40 {
+				if hasClockTime && !tm.IsTimeTrouble && prevIterationScore != 0 && score < prevIterationScore-40 {
 					isStable = false
 					tm.AdjustOptTime(1.25)
 				}
@@ -654,6 +667,21 @@ func (e *Engine) Search(
 	}
 	logger.Profilef("Search completed: BestMove=%s, PonderMove=%s, Score=%d, TotalNodes=%d, Elapsed=%v, NPS=%d, TBHits=%d",
 		rootBestMove, rootPonderMove, rootScore, totalNodes, totalElapsed, finalNps, e.TBHits.Load())
+
+	if e.TBHits.Load() > 0 && rootBestMove != types.MoveNone && syzygy.IsAvailable() {
+		tempB := b.Clone()
+		if tempB.MakeMove(rootBestMove) && tempB.Castling == 0 && bitboard.Count(tempB.Occupied()) <= syzygy.MaxPieces() {
+			if wdl, ok := syzygy.ProbeWDL(tempB); ok {
+				resultStr := syzygy.OpponentWDLToOurResult(wdl)
+				logger.Infof("Syzygy tablebase determined best position: %s leads to %s (%d pieces remaining)", rootBestMove, resultStr, bitboard.Count(tempB.Occupied()))
+				if infoCallback != nil {
+					infoCallback(SearchInfo{
+						StringMsg: fmt.Sprintf("Syzygy tablebase determined best position: %s leads to %s", rootBestMove, resultStr),
+					})
+				}
+			}
+		}
+	}
 
 	totalNnueEvals := master.NnueEvals
 	totalNnueUpdates := master.NnueUpdates
@@ -750,6 +778,10 @@ func isLegalMove(b *board.Board, m types.Move) bool {
 }
 
 func FormatInfo(info SearchInfo) string {
+	if info.StringMsg != "" {
+		return fmt.Sprintf("info string %s", info.StringMsg)
+	}
+
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("info depth %d seldepth %d ", info.Depth, info.SelDepth))
 

@@ -25,7 +25,7 @@ import (
 
 const (
 	EngineName    = "Devilfish"
-	EngineVersion = "0.1.0"
+	EngineVersion = "0.1.1"
 	EngineAuthor  = "Peter Tran"
 )
 
@@ -336,17 +336,44 @@ func (u *UCI) cmdSetOption(args []string) {
 			u.engine.SetMultiPV(val)
 			logger.Infof("UCI Option Set: MultiPV=%d", val)
 		}
-	case "ownbook", "usebook":
-		valLower := strings.ToLower(strings.TrimSpace(valStr))
-		if valLower == "true" || valLower == "1" {
-			u.engine.SetUseBook(true)
-		} else if valLower == "false" || valLower == "0" {
-			u.engine.SetUseBook(false)
-		}
-		logger.Infof("UCI Option Set: OwnBook=%t", u.engine.UseBook)
-	case "bookfile", "bookpath", "book":
+	case "ownbook", "usebook", "openingbook", "book":
 		trimmedVal := strings.TrimSpace(valStr)
-		if trimmedVal != "" && trimmedVal != "<embedded>" {
+		valLower := strings.ToLower(trimmedVal)
+		if valLower == "true" || valLower == "1" || valLower == "on" || valLower == "yes" {
+			u.engine.SetUseBook(true)
+			logger.Infof("UCI Option Set: OwnBook=true")
+		} else if valLower == "false" || valLower == "0" || valLower == "off" || valLower == "no" || valLower == "none" || valLower == "<empty>" {
+			u.engine.SetUseBook(false)
+			logger.Infof("UCI Option Set: OwnBook=false")
+		} else if normName == "book" && trimmedVal != "" {
+			if trimmedVal == "<embedded>" {
+				u.bookFile = "<embedded>"
+				u.engine.SetBook(book.DefaultBook())
+				u.engine.SetUseBook(true)
+				logger.Infof("UCI Option Set: Book=<embedded>")
+				u.sendLine("info string reset to embedded opening book")
+			} else {
+				bk, err := book.LoadFile(trimmedVal)
+				if err != nil {
+					logger.Warnf("UCI Option Failed: Book=%s err=%v", trimmedVal, err)
+					u.sendLine(fmt.Sprintf("info string failed to load book file: %v", err))
+				} else {
+					u.bookFile = trimmedVal
+					u.engine.SetBook(bk)
+					u.engine.SetUseBook(true)
+					logger.Infof("UCI Option Set: Book=%s (loaded %d entries)", trimmedVal, bk.EntryCount())
+					u.sendLine(fmt.Sprintf("info string loaded book file %s (%d entries)", trimmedVal, bk.EntryCount()))
+				}
+			}
+		}
+	case "bookfile", "bookpath":
+		trimmedVal := strings.TrimSpace(valStr)
+		valLower := strings.ToLower(trimmedVal)
+		if valLower == "none" || valLower == "<empty>" || valLower == "off" || valLower == "false" {
+			u.engine.SetUseBook(false)
+			logger.Infof("UCI Option Set: BookFile=%s (disabled opening book)", trimmedVal)
+			u.sendLine("info string opening book disabled")
+		} else if trimmedVal != "" && trimmedVal != "<embedded>" {
 			bk, err := book.LoadFile(trimmedVal)
 			if err != nil {
 				logger.Warnf("UCI Option Failed: BookFile=%s err=%v", trimmedVal, err)
@@ -354,6 +381,7 @@ func (u *UCI) cmdSetOption(args []string) {
 			} else {
 				u.bookFile = trimmedVal
 				u.engine.SetBook(bk)
+				u.engine.SetUseBook(true)
 				logger.Infof("UCI Option Set: BookFile=%s (loaded %d entries)", trimmedVal, bk.EntryCount())
 				u.sendLine(fmt.Sprintf("info string loaded book file %s (%d entries)", trimmedVal, bk.EntryCount()))
 			}
@@ -371,6 +399,10 @@ func (u *UCI) cmdUCINewGame() {
 	u.engine.TT.Clear()
 	b, _ := board.ParseFEN(board.StartFEN)
 	u.board = b
+
+	if opening := book.FindOpening(b); opening.Name != "" {
+		logger.Infof("Position Opening: %s", opening)
+	}
 }
 
 func (u *UCI) stopSearch(requestedByGUI bool) {
@@ -457,6 +489,10 @@ func (u *UCI) cmdPosition(args []string) {
 	}
 
 	u.board = b
+
+	if opening := book.FindOpening(b); opening.Name != "" {
+		logger.Infof("Position Opening: %s", opening)
+	}
 }
 
 func (u *UCI) cmdGo(args []string) {
@@ -526,6 +562,13 @@ func (u *UCI) cmdGo(args []string) {
 		case "ponder":
 			limits.Ponder = true
 		}
+	}
+
+	// In UCI protocol: "If no parameters are sent, search until stop."
+	hasTimeLimit := limits.WhiteTime > 0 || limits.BlackTime > 0 || limits.MoveTime > 0
+	hasBoundLimit := limits.MaxDepth > 0 || limits.MaxNodes > 0 || limits.Infinite || limits.Ponder
+	if !hasTimeLimit && !hasBoundLimit {
+		limits.Infinite = true
 	}
 
 	u.searching.Store(true)

@@ -47,7 +47,9 @@ func activateEightFTNEON(out *uint8, pst *int16, thr *int16) {
 			sLeft = EightFTQuant
 		}
 
-		if sRight > EightFTQuant {
+		if sRight < 0 {
+			sRight = 0
+		} else if sRight > EightFTQuant {
 			sRight = EightFTQuant
 		}
 

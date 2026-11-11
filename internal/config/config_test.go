@@ -252,3 +252,46 @@ func TestDefaultConfigPath(t *testing.T) {
 		t.Errorf("expected filename config.json, got %s", filepath.Base(path))
 	}
 }
+
+func TestDisableBookOptionsInConfig(t *testing.T) {
+	cases := []struct {
+		jsonStr      string
+		expectedBook bool
+	}{
+		{`{"own_book": false}`, false},
+		{`{"ownbook": false}`, false},
+		{`{"use_book": false}`, false},
+		{`{"usebook": false}`, false},
+		{`{"opening_book": false}`, false},
+		{`{"openingbook": false}`, false},
+		{`{"book": false}`, false},
+		{`{"book": "none"}`, false},
+		{`{"book": "off"}`, false},
+		{`{"book_file": "none"}`, false},
+		{`{"book_file": "<empty>"}`, false},
+		{`{"book": true}`, true},
+		{`{"own_book": true}`, true},
+	}
+
+	for i, tc := range cases {
+		tmpDir, err := os.MkdirTemp("", "devilfish_book_test_*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfgPath := filepath.Join(tmpDir, "config.json")
+		if err := os.WriteFile(cfgPath, []byte(tc.jsonStr), 0644); err != nil {
+			os.RemoveAll(tmpDir)
+			t.Fatal(err)
+		}
+
+		c, err := Load(cfgPath)
+		os.RemoveAll(tmpDir)
+		if err != nil {
+			t.Errorf("case %d (%s) failed with error: %v", i, tc.jsonStr, err)
+			continue
+		}
+		if c.OwnBook != tc.expectedBook {
+			t.Errorf("case %d (%s): expected OwnBook=%t, got %t", i, tc.jsonStr, tc.expectedBook, c.OwnBook)
+		}
+	}
+}

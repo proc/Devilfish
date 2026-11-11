@@ -93,6 +93,7 @@ func (b *Board) TacticalThreatsOnPieces(us types.Color) bitboard.Bitboard {
 	themKnights := b.PieceBB[types.MakePiece(them, types.Knight)]
 	themBishops := b.PieceBB[types.MakePiece(them, types.Bishop)]
 	themRooks := b.PieceBB[types.MakePiece(them, types.Rook)]
+	themQueens := b.PieceBB[types.MakePiece(them, types.Queen)]
 
 	ourKnights := b.PieceBB[types.MakePiece(us, types.Knight)]
 	ourBishops := b.PieceBB[types.MakePiece(us, types.Bishop)]
@@ -131,6 +132,15 @@ func (b *Board) TacticalThreatsOnPieces(us types.Color) bitboard.Bitboard {
 		for tr != 0 {
 			sq := bitboard.PopLSB(&tr)
 			threats |= ourQueens & bitboard.RookAttacks(sq, occ)
+		}
+	}
+
+	// 3b. Queen threats on queens
+	if themQueens != 0 && ourQueens != 0 {
+		tq := themQueens
+		for tq != 0 {
+			sq := bitboard.PopLSB(&tq)
+			threats |= ourQueens & bitboard.QueenAttacks(sq, occ)
 		}
 	}
 

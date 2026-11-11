@@ -102,10 +102,14 @@ type rawConfig struct {
 	AltMultiPV       *int        `json:"multi_pv"`
 	OwnBook          *bool       `json:"own_book"`
 	AltOwnBook       *bool       `json:"ownbook"`
+	UseBook          *bool       `json:"use_book"`
+	AltUseBook       *bool       `json:"usebook"`
+	OpeningBook      *bool       `json:"opening_book"`
+	AltOpeningBook   *bool       `json:"openingbook"`
+	BookVal          interface{} `json:"book"`
 	BookFile         *string     `json:"book_file"`
 	AltBookFile      *string     `json:"bookfile"`
 	BookPath         *string     `json:"book_path"`
-	AltBookPath      *string     `json:"book"`
 }
 
 func parseSyzygyPath(val interface{}) string {
@@ -215,13 +219,40 @@ func Load(path string) (Config, error) {
 				if n, ok := v.(float64); ok && int(n) >= 1 {
 					cfg.MultiPV = int(n)
 				}
-			case "ownbook", "usebook":
+			case "ownbook", "usebook", "openingbook":
 				if b, ok := v.(bool); ok {
 					cfg.OwnBook = b
+				} else if s, ok := v.(string); ok {
+					sLower := strings.ToLower(strings.TrimSpace(s))
+					if sLower == "false" || sLower == "0" || sLower == "off" || sLower == "none" || sLower == "<empty>" {
+						cfg.OwnBook = false
+					} else if sLower == "true" || sLower == "1" || sLower == "on" {
+						cfg.OwnBook = true
+					}
 				}
-			case "bookfile", "bookpath", "book":
+			case "book":
+				if b, ok := v.(bool); ok {
+					cfg.OwnBook = b
+				} else if s, ok := v.(string); ok {
+					sTrim := strings.TrimSpace(s)
+					sLower := strings.ToLower(sTrim)
+					if sLower == "false" || sLower == "0" || sLower == "off" || sLower == "none" || sLower == "<empty>" {
+						cfg.OwnBook = false
+					} else if sLower == "true" || sLower == "1" || sLower == "on" {
+						cfg.OwnBook = true
+					} else if sTrim != "" {
+						cfg.BookFile = sTrim
+					}
+				}
+			case "bookfile", "bookpath":
 				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-					cfg.BookFile = strings.TrimSpace(s)
+					sTrim := strings.TrimSpace(s)
+					sLower := strings.ToLower(sTrim)
+					if sLower == "none" || sLower == "<empty>" || sLower == "off" || sLower == "false" {
+						cfg.OwnBook = false
+					} else {
+						cfg.BookFile = sTrim
+					}
 				}
 			}
 		}
@@ -231,16 +262,57 @@ func Load(path string) (Config, error) {
 		cfg.OwnBook = *raw.OwnBook
 	} else if raw.AltOwnBook != nil {
 		cfg.OwnBook = *raw.AltOwnBook
+	} else if raw.UseBook != nil {
+		cfg.OwnBook = *raw.UseBook
+	} else if raw.AltUseBook != nil {
+		cfg.OwnBook = *raw.AltUseBook
+	} else if raw.OpeningBook != nil {
+		cfg.OwnBook = *raw.OpeningBook
+	} else if raw.AltOpeningBook != nil {
+		cfg.OwnBook = *raw.AltOpeningBook
+	}
+
+	if raw.BookVal != nil {
+		switch v := raw.BookVal.(type) {
+		case bool:
+			cfg.OwnBook = v
+		case string:
+			sTrim := strings.TrimSpace(v)
+			sLower := strings.ToLower(sTrim)
+			if sLower == "false" || sLower == "0" || sLower == "off" || sLower == "none" || sLower == "<empty>" {
+				cfg.OwnBook = false
+			} else if sLower == "true" || sLower == "1" || sLower == "on" {
+				cfg.OwnBook = true
+			} else if sTrim != "" {
+				cfg.BookFile = sTrim
+			}
+		}
 	}
 
 	if raw.BookFile != nil && *raw.BookFile != "" {
-		cfg.BookFile = strings.TrimSpace(*raw.BookFile)
+		sTrim := strings.TrimSpace(*raw.BookFile)
+		sLower := strings.ToLower(sTrim)
+		if sLower == "none" || sLower == "<empty>" || sLower == "off" || sLower == "false" {
+			cfg.OwnBook = false
+		} else {
+			cfg.BookFile = sTrim
+		}
 	} else if raw.AltBookFile != nil && *raw.AltBookFile != "" {
-		cfg.BookFile = strings.TrimSpace(*raw.AltBookFile)
+		sTrim := strings.TrimSpace(*raw.AltBookFile)
+		sLower := strings.ToLower(sTrim)
+		if sLower == "none" || sLower == "<empty>" || sLower == "off" || sLower == "false" {
+			cfg.OwnBook = false
+		} else {
+			cfg.BookFile = sTrim
+		}
 	} else if raw.BookPath != nil && *raw.BookPath != "" {
-		cfg.BookFile = strings.TrimSpace(*raw.BookPath)
-	} else if raw.AltBookPath != nil && *raw.AltBookPath != "" {
-		cfg.BookFile = strings.TrimSpace(*raw.AltBookPath)
+		sTrim := strings.TrimSpace(*raw.BookPath)
+		sLower := strings.ToLower(sTrim)
+		if sLower == "none" || sLower == "<empty>" || sLower == "off" || sLower == "false" {
+			cfg.OwnBook = false
+		} else {
+			cfg.BookFile = sTrim
+		}
 	}
 
 	if raw.LogFile != nil && *raw.LogFile != "" {

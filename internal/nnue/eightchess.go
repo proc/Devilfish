@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"math/bits"
 	"os"
 	"unsafe"
@@ -371,6 +372,9 @@ func EvaluateEight(net *EightNetwork, b *board.Board) int32 {
 
 	kingSq0 := b.KingSquare(types.White)
 	kingSq1 := b.KingSquare(types.Black)
+	if kingSq0 >= 64 || kingSq1 >= 64 {
+		return 0
+	}
 
 	kingside0 := (int(kingSq0) & 7) >= 4
 	kingside1 := (int(kingSq1) & 7) >= 4
@@ -523,5 +527,26 @@ func EvaluateEight(net *EightNetwork, b *board.Board) int32 {
 	}
 
 	l3Out := sums[0] + net.L3Biases[bucket]
-	return int32(l3Out * EightNetworkScale)
+	rawScore := int32(l3Out * EightNetworkScale)
+	return NormalizeEightScoreToCP(rawScore, b)
+}
+
+// NormalizeEightScoreToCP converts Reckless/EightChess internal raw network score to standard centipawns.
+func NormalizeEightScoreToCP(score int32, b *board.Board) int32 {
+	material := bitboard.Count(b.PieceBB[types.WhitePawn]|b.PieceBB[types.BlackPawn]) +
+		3*bitboard.Count(b.PieceBB[types.WhiteKnight]|b.PieceBB[types.BlackKnight]) +
+		3*bitboard.Count(b.PieceBB[types.WhiteBishop]|b.PieceBB[types.BlackBishop]) +
+		5*bitboard.Count(b.PieceBB[types.WhiteRook]|b.PieceBB[types.BlackRook]) +
+		9*bitboard.Count(b.PieceBB[types.WhiteQueen]|b.PieceBB[types.BlackQueen])
+
+	v := float64(material)
+	if v < 16 {
+		v = 16
+	} else if v > 78 {
+		v = 78
+	}
+	v /= 58.0
+
+	normalization := -285.1*v*v*v + 642.5*v*v - 455.5*v + 464.8
+	return int32(math.Round(100.0 * float64(score) / normalization))
 }

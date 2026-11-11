@@ -156,8 +156,10 @@ loop_act:
 	VSMAX  V31.H8, V1.H8, V1.H8
 	VSMIN  V30.H8, V1.H8, V1.H8
 
-	// Clamp right to [min, 255]
+	// Clamp right to [0, 255]
+	VSMAX  V31.H8, V4.H8, V4.H8
 	VSMIN  V30.H8, V4.H8, V4.H8
+	VSMAX  V31.H8, V5.H8, V5.H8
 	VSMIN  V30.H8, V5.H8, V5.H8
 
 	// Multiply left * right -> int32

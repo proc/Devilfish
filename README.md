@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="devilfish-logo.svg" alt="Devilfish Logo" width="220" />
+</p>
+
 # Devilfish ♟️🦈
 
 **Devilfish** is a modern, high-performance, UCI-compliant chess engine written in Golang. It features 64-bit magic bitboard move generation, dual NNUE and tapered classical evaluation, an advanced search algorithm (PVS with aspiration windows, aggressive Late Move Reductions, and forward pruning), and multithreading powered by **Lazy Symmetric Multiprocessing (Lazy SMP)** over a lockless shared Transposition Table.

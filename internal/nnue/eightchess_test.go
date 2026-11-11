@@ -62,8 +62,8 @@ func TestEmbeddedEightChess(t *testing.T) {
 	}
 
 	score := EvaluateEight(net, b)
-	if score != 90 {
-		t.Errorf("expected embedded network startpos score 90, got %d", score)
+	if score != 28 {
+		t.Errorf("expected embedded network startpos score 28, got %d", score)
 	}
 }
 
@@ -86,7 +86,9 @@ func TestActivateEightFTNEON(t *testing.T) {
 			sLeft = EightFTQuant
 		}
 
-		if sRight > EightFTQuant {
+		if sRight < 0 {
+			sRight = 0
+		} else if sRight > EightFTQuant {
 			sRight = EightFTQuant
 		}
 
