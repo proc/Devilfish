@@ -2,6 +2,8 @@ package nnue
 
 import (
 	"math/bits"
+	"os"
+	"unsafe"
 
 	"devilfish/internal/bitboard"
 	"devilfish/internal/board"
@@ -46,6 +48,10 @@ const (
 )
 
 var eightZeroAcc [EightL1Size]int16
+
+// rowPrefetch enables prefetching the weight rows of each accumulator
+// update. DEVILFISH_PREFETCH=0 turns it off, to measure its effect.
+var rowPrefetch = os.Getenv("DEVILFISH_PREFETCH") != "0"
 
 // eightSnap is the part of a position the feature differences are read from.
 type eightSnap struct {
@@ -249,6 +255,23 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 			cur.valid = false
 			return false
 		}
+	}
+
+	// Start fetching every weight row this update will read, before reading
+	// any: the rows are scattered over ~83 MB, so most come from L3 or
+	// memory, and issuing the requests together lets them overlap. The first
+	// two cache lines of each row are enough; the hardware prefetcher
+	// follows the rest of a row once it is being read. (Measured: fetching
+	// whole rows up front is slower than not prefetching at all.)
+	for pov := 0; pov < 2 && rowPrefetch; pov++ {
+		if pieceInc[pov] {
+			a, r := &s.pieceAdd[pov], &s.pieceRem[pov]
+			prefetchRows(unsafe.Pointer(&net.FTPieceWeights[0]), &a.rows[0], a.n, 11, 2)
+			prefetchRows(unsafe.Pointer(&net.FTPieceWeights[0]), &r.rows[0], r.n, 11, 2)
+		}
+		a, r := &s.thrAdd[pov], &s.thrRem[pov]
+		prefetchRows(unsafe.Pointer(&net.FTThreatWeights[0]), &a.rows[0], a.n, 10, 2)
+		prefetchRows(unsafe.Pointer(&net.FTThreatWeights[0]), &r.rows[0], r.n, 10, 2)
 	}
 
 	s.Evals++
