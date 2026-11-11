@@ -192,6 +192,9 @@ func (u *UCI) cmdUCI() {
 		bookFile = "<embedded>"
 	}
 	u.sendLine(fmt.Sprintf("option name BookFile type string default %s", bookFile))
+	for _, ps := range search.TunableParams() {
+		u.sendLine(fmt.Sprintf("option name %s type spin default %d min %d max %d", ps.Name, *ps.Ptr, ps.Min, ps.Max))
+	}
 	u.sendLine("uciok")
 }
 
@@ -390,6 +393,13 @@ func (u *UCI) cmdSetOption(args []string) {
 			u.engine.SetBook(book.DefaultBook())
 			logger.Infof("UCI Option Set: BookFile=<embedded> (reset to embedded book)")
 			u.sendLine("info string reset to embedded opening book")
+		}
+	default:
+		// Search tunables (see internal/search/params.go)
+		if v, err := strconv.Atoi(strings.TrimSpace(valStr)); err == nil {
+			if search.SetParam(optName, int32(v)) {
+				logger.Infof("UCI Option Set: %s=%d", optName, v)
+			}
 		}
 	}
 }

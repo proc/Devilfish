@@ -1,7 +1,6 @@
 package search
 
 import (
-	"math"
 	"sync/atomic"
 
 	"devilfish/internal/bitboard"
@@ -20,19 +19,8 @@ const (
 	MateThreshold int32 = 29000
 )
 
+// LMRTable is built from P.LMRBase / P.LMRDivisor by rebuildLMRTable (params.go).
 var LMRTable [128][128]int8
-
-func init() {
-	for d := 1; d < 128; d++ {
-		for m := 1; m < 128; m++ {
-			r := 0.4 + math.Log(float64(d))*math.Log(float64(m))/2.3
-			if r < 0 {
-				r = 0
-			}
-			LMRTable[d][m] = int8(r)
-		}
-	}
-}
 
 type SearchWorker struct {
 	ID                int
@@ -312,9 +300,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	// Never RFP if high-value pieces (Queen, Rook, Minor) are under tactical threat,
 	// because opponent capture would immediately wipe out the static advantage.
 	if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && !kingInDanger && !prevIsKingThreat && (threatenedPieces&(ourQueens|ourRooks|ourMinors)) == 0 && depth <= 4 && abs(beta) < MateThreshold && hasNonPawns {
-		margin := int32(depth) * 75
+		margin := int32(depth) * P.RFPMargin
 		if !improving {
-			margin += int32(depth) * 35
+			margin += int32(depth) * P.RFPNonImpr
 		}
 		if threatenedPieces != 0 {
 			margin += 120 // Safety margin if pawns are contested
@@ -326,7 +314,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 	// 5. Razoring
 	if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && !kingInDanger && !prevIsKingThreat && depth <= 1 {
-		razorMargin := int32(350)
+		razorMargin := P.RazorMargin
 		if staticEval+razorMargin <= alpha {
 			qScore := w.Quiescence(alpha, beta, ply)
 			if qScore <= alpha {
@@ -345,7 +333,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			r++
 		}
 		// Reduce more the further static eval sits above beta
-		if evalR := (staticEval - beta) / 200; evalR > 0 {
+		if evalR := (staticEval - beta) / P.NMPEvalDiv; evalR > 0 {
 			if evalR > 3 {
 				evalR = 3
 			}
@@ -575,9 +563,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		if !isPVNode && !inCheck && depth <= 4 && isQuiet && movesSearched > 0 &&
 			m != killer1 && m != killer2 && m != counterMove && !isThreatMove && !isThreatEvasion && !isAdvancedPawnPush {
 			if !givesCheck {
-				lmpThreshold := 5 + 3*int(depth)*int(depth)
+				lmpThreshold := 5 + int(P.LMPMultImpr)*int(depth)*int(depth)
 				if !improving {
-					lmpThreshold = 3 + 2*int(depth)*int(depth)
+					lmpThreshold = 3 + int(P.LMPMultNonImp)*int(depth)*int(depth)
 				}
 				if legalMoves >= lmpThreshold {
 					continue
@@ -588,7 +576,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		// Futility Pruning
 		if !isPVNode && !inCheck && depth <= 4 && isQuiet && movesSearched > 0 &&
 			m != killer1 && m != killer2 && m != counterMove && !isThreatMove && !isThreatEvasion && !isAdvancedPawnPush {
-			futMargin := int32(90) * int32(depth)
+			futMargin := P.FutMargin * int32(depth)
 			if staticEval+futMargin <= alpha {
 				if !givesCheck {
 					continue
@@ -608,9 +596,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				if prevMove2 != types.MoveNone && prevMove2.To() < 64 && m.To() < 64 {
 					histScore += w.History.ContHistory2[prevMove2.To()][m.To()]
 				}
-				histMargin := -int32(depth) * 1024
+				histMargin := -int32(depth) * P.HistPrImpr
 				if !improving {
-					histMargin = -int32(depth) * 512
+					histMargin = -int32(depth) * P.HistPrNonImp
 				}
 				if histScore < histMargin {
 					continue
@@ -623,11 +611,11 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		if !isPVNode && !inCheck && depth <= 3 && movesSearched > 0 && m != killer1 && m != killer2 && m != counterMove && !isAdvancedPawnPush && !isThreatMove && !isThreatEvasion {
 			if !givesCheck {
 				if isQuiet {
-					if depth <= 2 && moveSEE < -int32(depth)*60 {
+					if depth <= 2 && moveSEE < -int32(depth)*P.SEEQuietMul {
 						continue
 					}
 				} else {
-					if moveSEE < -int32(depth)*200 {
+					if moveSEE < -int32(depth)*P.SEENoisyMul {
 						continue
 					}
 				}
