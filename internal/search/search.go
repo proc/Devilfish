@@ -95,10 +95,9 @@ func (w *SearchWorker) Evaluate(ply int) int32 {
 		w.ClassicalEvals++
 		staticEval = eval.EvaluateClassical(w.Board)
 	}
-	// Rule of the square in pawn endings, which the network misjudges
-	staticEval += eval.PawnRaceBonus(w.Board)
-	corr := w.History.GetCorrection(w.Board.SideToMove, w.Board.PawnHash)
-	return staticEval + corr
+	v := staticEval + w.History.GetCorrection(w.Board)
+	// Fade the eval toward a draw as the fifty-move counter runs up
+	return v * (200 - int32(w.Board.HalfmoveClock)) / 200
 }
 
 func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *atomic.Uint64, tbHits *atomic.Uint64) *SearchWorker {
@@ -559,7 +558,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 				if !inCheck && excludedMove == types.MoveNone && score > rawEval && score < MateThreshold {
 					diff := score - rawEval
-					w.History.UpdateCorrHist(us, w.Board.PawnHash, diff, depth)
+					w.History.UpdateCorrHist(w.Board, diff, depth)
 				}
 
 				if ply == 0 {
@@ -928,7 +927,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 			if !inCheck && excludedMove == types.MoveNone && score > rawEval && score < MateThreshold {
 				diff := score - rawEval
-				w.History.UpdateCorrHist(us, w.Board.PawnHash, diff, depth)
+				w.History.UpdateCorrHist(w.Board, diff, depth)
 			}
 
 			if ply == 0 {
@@ -1008,7 +1007,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	if !inCheck && excludedMove == types.MoveNone && alpha < MateThreshold && alpha > -MateThreshold &&
 		(bestType == tt.Exact || alpha < rawEval) {
 		diff := alpha - rawEval
-		w.History.UpdateCorrHist(us, w.Board.PawnHash, diff, depth)
+		w.History.UpdateCorrHist(w.Board, diff, depth)
 	}
 
 	if ply == 0 && bestMove == types.MoveNone && bestRootMove != types.MoveNone {

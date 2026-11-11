@@ -1,6 +1,8 @@
 package search
 
 import (
+	"devilfish/internal/bitboard"
+	"devilfish/internal/board"
 	"devilfish/internal/types"
 )
 
@@ -14,7 +16,10 @@ type SearchHistory struct {
 	ContHistory2   [64][64]int32
 	ContHistory4   [64][64]int32
 	CaptureHistory [7][64][7]int32
-	CorrHist       [2][16384]int16
+	CorrHist       [2][corrSize]int16 // pawn structure
+	NonPawnCorr    [2][2][corrSize]int16
+	MinorCorr      [2][corrSize]int16
+	ContCorr       [2][64][64]int16
 }
 
 func NewSearchHistory() *SearchHistory {
@@ -29,7 +34,10 @@ func (h *SearchHistory) Clear() {
 	h.ContHistory2 = [64][64]int32{}
 	h.ContHistory4 = [64][64]int32{}
 	h.CaptureHistory = [7][64][7]int32{}
-	h.CorrHist = [2][16384]int16{}
+	h.CorrHist = [2][corrSize]int16{}
+	h.NonPawnCorr = [2][2][corrSize]int16{}
+	h.MinorCorr = [2][corrSize]int16{}
+	h.ContCorr = [2][64][64]int16{}
 }
 
 func (h *SearchHistory) UpdateKillers(ply int, m types.Move) {
@@ -192,42 +200,120 @@ func (h *SearchHistory) PenalizeContHistory4(prevMove4, m types.Move, depth int8
 	}
 }
 
-func (h *SearchHistory) GetCorrection(side types.Color, pawnHash uint64) int32 {
-	if side >= 2 {
-		return 0
+// Correction history learns how far the static eval tends to be off for
+// positions sharing some feature, and adds that back onto the eval. Each
+// table is keyed on a different feature; they are trained on the error left
+// after all of them are applied, so their contributions add up.
+const (
+	corrSize      = 16384
+	corrUnit      = 128   // entries are stored in cp*corrUnit
+	corrLimit     = 16384 // |entry| bound, i.e. 128 cp
+	corrMaxBonus  = 4096
+	corrMaxOutput = 128 // cp
+)
+
+// corrKeys holds the table indices for one position.
+type corrKeys struct {
+	stm      types.Color
+	pawn     uint32
+	nonPawn  [2]uint32 // each colour's pieces other than pawns, kings included
+	minor    uint32    // knights, bishops and kings of both colours
+	contLast types.Square
+	contPrev types.Square
+	hasCont  bool
+}
+
+func newCorrKeys(b *board.Board) corrKeys {
+	k := corrKeys{stm: b.SideToMove, pawn: uint32(b.PawnHash % corrSize)}
+	var np [2]uint64
+	var minor uint64
+	for pt := types.Knight; pt <= types.King; pt++ {
+		for c := types.White; c <= types.Black; c++ {
+			p := types.MakePiece(c, pt)
+			for bb := b.PieceBB[p]; bb != 0; {
+				z := board.ZobristPiece[p][bitboard.PopLSB(&bb)]
+				np[c] ^= z
+				if pt == types.Knight || pt == types.Bishop || pt == types.King {
+					minor ^= z
+				}
+			}
+		}
 	}
-	corr := int32(h.CorrHist[side][pawnHash%16384]) / 128
-	if corr > 64 {
-		return 64
+	k.nonPawn[0] = uint32(np[0] % corrSize)
+	k.nonPawn[1] = uint32(np[1] % corrSize)
+	k.minor = uint32(minor % corrSize)
+	// The last two moves (theirs, then ours), when neither was a null move
+	if n := len(b.UndoStack); n >= 2 {
+		last, prev := b.UndoStack[n-1].Move, b.UndoStack[n-2].Move
+		if last != types.MoveNone && prev != types.MoveNone {
+			k.contLast, k.contPrev, k.hasCont = last.To(), prev.To(), true
+		}
 	}
-	if corr < -64 {
-		return -64
+	return k
+}
+
+// GetCorrection returns the eval correction in centipawns for b, from the
+// side to move's point of view.
+func (h *SearchHistory) GetCorrection(b *board.Board) int32 {
+	k := newCorrKeys(b)
+	s := k.stm
+	sum := 2*int32(h.CorrHist[s][k.pawn]) +
+		int32(h.NonPawnCorr[s][0][k.nonPawn[0]]) +
+		int32(h.NonPawnCorr[s][1][k.nonPawn[1]]) +
+		int32(h.MinorCorr[s][k.minor])
+	if k.hasCont {
+		sum += int32(h.ContCorr[s][k.contLast][k.contPrev])
+	}
+	// Weights: pawn 1, each of the others 1/2
+	corr := sum / (2 * corrUnit)
+	if corr > corrMaxOutput {
+		return corrMaxOutput
+	}
+	if corr < -corrMaxOutput {
+		return -corrMaxOutput
 	}
 	return corr
 }
 
-func (h *SearchHistory) UpdateCorrHist(side types.Color, pawnHash uint64, diff int32, depth int8) {
-	if side >= 2 {
-		return
-	}
-	if diff > 400 {
-		diff = 400
-	} else if diff < -400 {
-		diff = -400
-	}
+// UpdateCorrHist trains every table on diff, the search result minus the
+// already-corrected static eval, weighted by depth.
+func (h *SearchHistory) UpdateCorrHist(b *board.Board, diff int32, depth int8) {
+	k := newCorrKeys(b)
+	s := k.stm
 	weight := int32(depth)
 	if weight > 16 {
 		weight = 16
 	}
-	idx := pawnHash % 16384
-	cur := int32(h.CorrHist[side][idx])
-	newVal := cur + (diff*128-cur)*weight/256
-	if newVal > 16384 {
-		newVal = 16384
-	} else if newVal < -16384 {
-		newVal = -16384
+	bonus := diff * corrUnit * weight / 32
+	if bonus > corrMaxBonus {
+		bonus = corrMaxBonus
+	} else if bonus < -corrMaxBonus {
+		bonus = -corrMaxBonus
 	}
-	h.CorrHist[side][idx] = int16(newVal)
+	corrGravity(&h.CorrHist[s][k.pawn], bonus)
+	corrGravity(&h.NonPawnCorr[s][0][k.nonPawn[0]], bonus)
+	corrGravity(&h.NonPawnCorr[s][1][k.nonPawn[1]], bonus)
+	corrGravity(&h.MinorCorr[s][k.minor], bonus)
+	if k.hasCont {
+		corrGravity(&h.ContCorr[s][k.contLast][k.contPrev], bonus)
+	}
+}
+
+// corrGravity adds bonus to *e, pulling large entries back toward zero so
+// they stay within ±corrLimit.
+func corrGravity(e *int16, bonus int32) {
+	abs := bonus
+	if abs < 0 {
+		abs = -abs
+	}
+	cur := int32(*e)
+	v := cur + bonus - cur*abs/corrLimit
+	if v > corrLimit {
+		v = corrLimit
+	} else if v < -corrLimit {
+		v = -corrLimit
+	}
+	*e = int16(v)
 }
 
 func (h *SearchHistory) UpdateCounterMove(prevMove, m types.Move) {

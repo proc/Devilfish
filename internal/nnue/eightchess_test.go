@@ -1,27 +1,24 @@
 package nnue
 
 import (
-	"os"
 	"testing"
 
 	"devilfish/internal/board"
 )
 
+// TestEightChessLoadingAndEval checks the embedded network against reference
+// raw outputs (network units, before NormalizeEightScoreToCP), so it catches
+// errors in the inference itself independently of the cp normalization.
 func TestEightChessLoadingAndEval(t *testing.T) {
-	path := "../../eightchess_1024_tuned768.nnue"
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		t.Skip("eightchess_1024_tuned768.nnue not found in project root, skipping")
-	}
-
-	net, err := LoadEightFile(path)
+	net, err := LoadEightBytes(embeddedEightNNUE)
 	if err != nil {
-		t.Fatalf("failed to load 8chess network: %v", err)
+		t.Fatalf("failed to load embedded 8chess network: %v", err)
 	}
 
 	tests := []struct {
-		name          string
-		fen           string
-		expectedScore int32
+		name     string
+		fen      string
+		rawScore int32
 	}{
 		{"startpos", board.StartFEN, 90},
 		{"after 1.e4", "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1", 8},
@@ -36,11 +33,10 @@ func TestEightChessLoadingAndEval(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to parse FEN %s: %v", tc.fen, err)
 			}
+			want := NormalizeEightScoreToCP(tc.rawScore, b)
 			score := EvaluateEight(net, b)
-			t.Logf("Position %s: got %d cp, expected %d cp", tc.name, score, tc.expectedScore)
-			diff := score - tc.expectedScore
-			if diff < -2 || diff > 2 {
-				t.Errorf("score mismatch for %s: got %d, expected %d", tc.name, score, tc.expectedScore)
+			if diff := score - want; diff < -2 || diff > 2 {
+				t.Errorf("%s: got %d cp, want %d cp (raw %d)", tc.name, score, want, tc.rawScore)
 			}
 		})
 	}

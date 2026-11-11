@@ -329,24 +329,36 @@ func TestContinuationHistory4(t *testing.T) {
 
 func TestCorrectionHistory(t *testing.T) {
 	hist := NewSearchHistory()
-	pawnHash := uint64(0x123456789ABCDEF0)
+	b, _ := board.ParseFEN("r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3")
 
-	corrInit := hist.GetCorrection(types.White, pawnHash)
-	if corrInit != 0 {
-		t.Errorf("expected initial correction 0, got %d", corrInit)
+	if c := hist.GetCorrection(b); c != 0 {
+		t.Errorf("expected initial correction 0, got %d", c)
 	}
 
-	// Update with positive error diff (search score was higher than static eval)
-	hist.UpdateCorrHist(types.White, pawnHash, 100, 4)
-	corrAfter := hist.GetCorrection(types.White, pawnHash)
-	if corrAfter <= 0 {
-		t.Errorf("expected positive correction after update, got %d", corrAfter)
+	// Search keeps finding the position better than the eval says
+	for i := 0; i < 50; i++ {
+		hist.UpdateCorrHist(b, 100, 8)
+	}
+	c := hist.GetCorrection(b)
+	if c <= 0 || c > corrMaxOutput {
+		t.Errorf("expected positive correction within ±%d after updates, got %d", corrMaxOutput, c)
 	}
 
-	// White and Black indices are distinct
-	corrBlack := hist.GetCorrection(types.Black, pawnHash)
-	if corrBlack != 0 {
-		t.Errorf("expected black correction to remain 0, got %d", corrBlack)
+	// The same pieces with the other side to move use separate entries
+	other, _ := board.ParseFEN("r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 2 3")
+	if c := hist.GetCorrection(other); c != 0 {
+		t.Errorf("expected black-to-move correction to remain 0, got %d", c)
+	}
+
+	// Entries stay bounded however long the same error repeats
+	for i := 0; i < 10000; i++ {
+		hist.UpdateCorrHist(b, 400, 16)
+	}
+	if c := hist.GetCorrection(b); c > corrMaxOutput {
+		t.Errorf("correction %d exceeds bound %d", c, corrMaxOutput)
+	}
+	if v := hist.CorrHist[types.White][b.PawnHash%corrSize]; v > corrLimit {
+		t.Errorf("pawn entry %d exceeds limit %d", v, corrLimit)
 	}
 }
 
