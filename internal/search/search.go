@@ -419,7 +419,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	// 4. Reverse Futility Pruning (Static Null Move Pruning)
 	// Never RFP if high-value pieces (Queen, Rook, Minor) are under tactical threat,
 	// because opponent capture would immediately wipe out the static advantage.
-	if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && !kingInDanger && !prevIsKingThreat && (threatenedPieces&(ourQueens|ourRooks|ourMinors)) == 0 && depth <= 4 && abs(beta) < MateThreshold && hasNonPawns {
+	if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && !kingInDanger && !prevIsKingThreat && (threatenedPieces&(ourQueens|ourRooks|ourMinors)) == 0 && int32(depth) <= P.RFPDepth && abs(beta) < MateThreshold && hasNonPawns {
 		margin := int32(depth) * P.RFPMargin
 		if !improving {
 			margin += int32(depth) * P.RFPNonImpr
@@ -672,9 +672,18 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		// computed; quiet moves get one only if a rule below asks for it.
 		moveSEE, seeKnown := mp.LastSEE()
 		// givesCheck is only read by the pruning rules and by LMR.
+		// Pruning rules (non-PV) never prune a checking move, and with the
+		// reduced-depth rules below they can apply at any depth.
 		givesCheck := false
-		if !inCheck && movesSearched > 0 && ((!isPVNode && depth <= 4) || (depth >= 3 && movesSearched >= 2)) {
+		if !inCheck && movesSearched > 0 && (!isPVNode || (depth >= 3 && movesSearched >= 2)) {
 			givesCheck = w.Board.GivesCheck(m)
+		}
+
+		// The depth this move would be searched at after its late-move
+		// reduction; the futility, history and quiet SEE rules judge it there.
+		lmrDepth := int32(depth) - int32(LMRTable[min(int(depth), 127)][min(movesSearched+1, 127)])
+		if lmrDepth < 0 {
+			lmrDepth = 0
 		}
 		isAdvancedPawnPush := isQuiet && attacker == types.Pawn &&
 			((us == types.White && toSq >= types.A6) || (us == types.Black && toSq <= types.H3))
@@ -693,7 +702,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		isKingZoneMove := (bitboard.SquareBB[toSq] & themKingRing) != 0
 
 		// Late Move Pruning (LMP)
-		if !isPVNode && !inCheck && depth <= 4 && isQuiet && movesSearched > 0 &&
+		if !isPVNode && !inCheck && int32(depth) <= P.LMPDepth && isQuiet && movesSearched > 0 &&
 			m != killer1 && m != killer2 && m != counterMove && !isThreatMove && !isThreatEvasion && !isAdvancedPawnPush {
 			if !givesCheck {
 				lmpThreshold := 5 + int(P.LMPMultImpr)*int(depth)*int(depth)
@@ -707,9 +716,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 
 		// Futility Pruning
-		if !isPVNode && !inCheck && depth <= 4 && isQuiet && movesSearched > 0 &&
+		if !isPVNode && !inCheck && lmrDepth <= P.FutDepth && isQuiet && movesSearched > 0 &&
 			m != killer1 && m != killer2 && m != counterMove && !isThreatMove && !isThreatEvasion && !isAdvancedPawnPush {
-			futMargin := P.FutMargin * int32(depth)
+			futMargin := P.FutMargin * max(lmrDepth, 1)
 			if staticEval+futMargin <= alpha {
 				if !givesCheck {
 					continue
@@ -719,7 +728,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		// History Pruning
 		// Prune quiet moves with poor history score at shallow depths
-		if !isPVNode && !inCheck && depth <= 3 && isQuiet && movesSearched > 0 &&
+		if !isPVNode && !inCheck && lmrDepth <= P.HistDepth && isQuiet && movesSearched > 0 &&
 			m != killer1 && m != killer2 && m != counterMove && !isThreatMove && !isThreatEvasion && !isAdvancedPawnPush {
 			if !givesCheck {
 				histScore := w.History.HistoryTable[us][m.From()][m.To()]
@@ -729,9 +738,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				if prevMove2 != types.MoveNone && prevMove2.To() < 64 && m.To() < 64 {
 					histScore += w.History.ContHistory2[prevMove2.To()][m.To()]
 				}
-				histMargin := -int32(depth) * P.HistPrImpr
+				histMargin := -max(lmrDepth, 1) * P.HistPrImpr
 				if !improving {
-					histMargin = -int32(depth) * P.HistPrNonImp
+					histMargin = -max(lmrDepth, 1) * P.HistPrNonImp
 				}
 				if histScore < histMargin {
 					continue
@@ -741,13 +750,13 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		// SEE Pruning
 		// Do not prune tactical/killer moves, countermoves, advanced pawn pushes, or moves that give check
-		if !isPVNode && !inCheck && depth <= 3 && movesSearched > 0 && m != killer1 && m != killer2 && m != counterMove && !isAdvancedPawnPush && !isThreatMove && !isThreatEvasion {
-			if !givesCheck && (!isQuiet || depth <= 2) {
+		if !isPVNode && !inCheck && int32(depth) <= P.SEEDepth && movesSearched > 0 && m != killer1 && m != killer2 && m != counterMove && !isAdvancedPawnPush && !isThreatMove && !isThreatEvasion {
+			if !givesCheck {
 				if !seeKnown {
 					moveSEE, seeKnown = eval.SEE(w.Board, m), true
 				}
 				if isQuiet {
-					if moveSEE < -int32(depth)*P.SEEQuietMul {
+					if moveSEE < -max(lmrDepth, 1)*P.SEEQuietMul {
 						continue
 					}
 				} else {

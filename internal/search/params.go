@@ -21,6 +21,15 @@ type Params struct {
 	HistPrNonImp  int32 // same, not improving
 	SEEQuietMul   int32 // SEE pruning margin per ply, quiet moves
 	SEENoisyMul   int32 // SEE pruning margin per ply, captures
+
+	// Depth limits of the pruning rules. Futility, history and quiet SEE
+	// pruning compare against the move's reduced depth (depth minus its
+	// late-move reduction), the others against the node's depth.
+	RFPDepth  int32 // reverse futility pruning
+	LMPDepth  int32 // late-move pruning
+	FutDepth  int32 // futility pruning (reduced depth)
+	HistDepth int32 // history pruning (reduced depth)
+	SEEDepth  int32 // SEE pruning
 }
 
 // P is the live parameter set used by Search.
@@ -38,6 +47,11 @@ var P = Params{
 	HistPrNonImp:  512,
 	SEEQuietMul:   60,
 	SEENoisyMul:   200,
+	RFPDepth:      8,
+	LMPDepth:      8,
+	FutDepth:      8,
+	HistDepth:     6,
+	SEEDepth:      8,
 }
 
 // ParamSpec describes one tunable for UCI option listing and the tuner.
@@ -63,6 +77,11 @@ func TunableParams() []ParamSpec {
 		{"HistPrNonImp", &P.HistPrNonImp, 64, 4096},
 		{"SEEQuietMul", &P.SEEQuietMul, 10, 200},
 		{"SEENoisyMul", &P.SEENoisyMul, 50, 500},
+		{"RFPDepth", &P.RFPDepth, 1, 14},
+		{"LMPDepth", &P.LMPDepth, 1, 14},
+		{"FutDepth", &P.FutDepth, 1, 14},
+		{"HistDepth", &P.HistDepth, 1, 14},
+		{"SEEDepth", &P.SEEDepth, 1, 14},
 	}
 }
 
