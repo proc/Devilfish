@@ -1,0 +1,68 @@
+diff -ruN tte/internal/search/params.go tl/internal/search/params.go
+--- a/internal/search/params.go	2026-11-11 12:45:20.200508874 -0800
++++ b/internal/search/params.go	2026-11-11 13:01:53.021574864 -0800
+@@ -10,6 +10,7 @@
+ type Params struct {
+ 	LMRBase       int32 // LMR table base, in hundredths (40 = 0.40)
+ 	LMRDivisor    int32 // LMR table divisor, in hundredths (230 = 2.30)
++	LMRHistDiv    int32 // LMR: one ply less/more reduction per this much history
+ 	RFPMargin     int32 // reverse futility margin per ply of depth
+ 	RFPNonImpr    int32 // extra RFP margin per ply when not improving
+ 	RazorMargin   int32
+@@ -36,6 +37,7 @@
+ var P = Params{
+ 	LMRBase:       40,
+ 	LMRDivisor:    230,
++	LMRHistDiv:    5000,
+ 	RFPMargin:     75,
+ 	RFPNonImpr:    35,
+ 	RazorMargin:   350,
+@@ -66,6 +68,7 @@
+ 	return []ParamSpec{
+ 		{"LMRBase", &P.LMRBase, 0, 200},
+ 		{"LMRDivisor", &P.LMRDivisor, 100, 500},
++		{"LMRHistDiv", &P.LMRHistDiv, 1000, 20000},
+ 		{"RFPMargin", &P.RFPMargin, 20, 200},
+ 		{"RFPNonImpr", &P.RFPNonImpr, 0, 150},
+ 		{"RazorMargin", &P.RazorMargin, 100, 800},
+diff -ruN tte/internal/search/search.go tl/internal/search/search.go
+--- a/internal/search/search.go	2026-11-11 12:45:47.809946725 -0800
++++ b/internal/search/search.go	2026-11-11 13:01:53.021824734 -0800
+@@ -541,6 +541,9 @@
+ 	bestRootScore := -Infinity
+ 	var searchedMoves [256]types.Move
+ 	movesSearched := 0
++	// A capture/promotion TT move suggests the position is tactical: quiet
++	// alternatives are less likely to matter, so they get reduced more.
++	ttMoveNoisy := ttMove != types.MoveNone && (ttMove.IsCapture() || ttMove.IsPromotion())
+ 	legalMoves := 0
+ 	bestType := tt.UpperBound
+ 
+@@ -869,16 +872,18 @@
+ 					if prevMove4 != types.MoveNone && prevMove4.To() < 64 && toSq < 64 {
+ 						hist += w.History.ContHistory4[prevMove4.To()][toSq]
+ 					}
+-					if hist > 4000 {
+-						reduction--
+-						if hist > 8000 {
+-							reduction--
+-						}
+-					} else if hist < -4000 {
++					// Continuous history adjustment: one ply per LMRHistDiv
++					// of combined history, capped at three plies each way.
++					hAdj := hist / P.LMRHistDiv
++					if hAdj > 3 {
++						hAdj = 3
++					} else if hAdj < -3 {
++						hAdj = -3
++					}
++					reduction -= int8(hAdj)
++
++					if ttMoveNoisy {
+ 						reduction++
+-						if hist < -8000 {
+-							reduction++
+-						}
+ 					}
+ 				} else {
+ 					// Tactical moves / Captures (Noisy LMR)

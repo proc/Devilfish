@@ -1,0 +1,64 @@
+diff -ruN tte/internal/search/search.go tc/internal/search/search.go
+--- a/internal/search/search.go	2026-11-11 12:45:47.809946725 -0800
++++ b/internal/search/search.go	2026-11-11 13:01:53.023652652 -0800
+@@ -283,11 +283,6 @@
+ 
+ 	inCheck := w.Board.IsInCheck(w.Board.SideToMove)
+ 
+-	// Check extension
+-	if inCheck {
+-		depth++
+-	}
+-
+ 	// Leaf / Quiescence search
+ 	if depth <= 0 {
+ 		return w.Quiescence(alpha, beta, ply)
+@@ -546,6 +541,11 @@
+ 
+ 	// Staged Move Generation: Search TT move first before generating all moves
+ 	if ttMove != types.MoveNone && ttMove != excludedMove && (ply > 0 || !w.isRootExcluded(ttMove)) && movegen.IsPseudoLegal(w.Board, ttMove) {
++		// Check extension (parent side): only for checks that don't lose
++		// material, and never stacked on top of a singular extension.
++		if extension == 0 && w.Board.GivesCheck(ttMove) && eval.SEE(w.Board, ttMove) >= 0 {
++			extension = 1
++		}
+ 		w.pushAccumulator(ply, ttMove)
+ 		if w.Board.MakeMove(ttMove) {
+ 			w.TT.Prefetch(w.Board.Hash)
+@@ -692,13 +692,9 @@
+ 		// SEE: captures and promotions carry the value the picker already
+ 		// computed; quiet moves get one only if a rule below asks for it.
+ 		moveSEE, seeKnown := mp.LastSEE()
+-		// givesCheck is only read by the pruning rules and by LMR.
+-		// Pruning rules (non-PV) never prune a checking move, and with the
+-		// reduced-depth rules below they can apply at any depth.
+-		givesCheck := false
+-		if !inCheck && movesSearched > 0 && (!isPVNode || (depth >= 3 && movesSearched >= 2)) {
+-			givesCheck = w.Board.GivesCheck(m)
+-		}
++		// givesCheck is read by the pruning rules, LMR and the check
++		// extension, so it is computed for every move.
++		givesCheck := w.Board.GivesCheck(m)
+ 
+ 		// The depth this move would be searched at after its late-move
+ 		// reduction; the futility, history and quiet SEE rules judge it there.
+@@ -803,10 +799,18 @@
+ 			startNodes = w.LocalNodes
+ 		}
+ 
+-		// The singular extension belongs to the TT move only; here only 7th-rank pushes extend
++		// The singular extension belongs to the TT move only; here 7th-rank
++		// pushes and checks that don't lose material extend (at most one ply).
+ 		var moveExtension int8
+ 		if is7thRankPawnPush && depth >= 3 {
+ 			moveExtension = 1
++		} else if givesCheck {
++			if !seeKnown {
++				moveSEE, seeKnown = eval.SEE(w.Board, m), true
++			}
++			if moveSEE >= 0 {
++				moveExtension = 1
++			}
+ 		}
+ 
+ 		var reduction int8

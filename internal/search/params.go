@@ -10,6 +10,7 @@ import (
 type Params struct {
 	LMRBase       int32 // LMR table base, in hundredths (40 = 0.40)
 	LMRDivisor    int32 // LMR table divisor, in hundredths (230 = 2.30)
+	LMRHistDiv    int32 // LMR: one ply less/more reduction per this much history
 	RFPMargin     int32 // reverse futility margin per ply of depth
 	RFPNonImpr    int32 // extra RFP margin per ply when not improving
 	RazorMargin   int32
@@ -21,6 +22,7 @@ type Params struct {
 	HistPrNonImp  int32 // same, not improving
 	SEEQuietMul   int32 // SEE pruning margin per ply, quiet moves
 	SEENoisyMul   int32 // SEE pruning margin per ply, captures
+	QSFutMargin   int32 // quiescence per-capture futility margin
 
 	// Depth limits of the pruning rules. Futility, history and quiet SEE
 	// pruning compare against the move's reduced depth (depth minus its
@@ -36,6 +38,7 @@ type Params struct {
 var P = Params{
 	LMRBase:       40,
 	LMRDivisor:    230,
+	LMRHistDiv:    5000,
 	RFPMargin:     75,
 	RFPNonImpr:    35,
 	RazorMargin:   350,
@@ -47,6 +50,7 @@ var P = Params{
 	HistPrNonImp:  512,
 	SEEQuietMul:   60,
 	SEENoisyMul:   200,
+	QSFutMargin:   175,
 	RFPDepth:      8,
 	LMPDepth:      8,
 	FutDepth:      8,
@@ -66,6 +70,7 @@ func TunableParams() []ParamSpec {
 	return []ParamSpec{
 		{"LMRBase", &P.LMRBase, 0, 200},
 		{"LMRDivisor", &P.LMRDivisor, 100, 500},
+		{"LMRHistDiv", &P.LMRHistDiv, 1000, 20000},
 		{"RFPMargin", &P.RFPMargin, 20, 200},
 		{"RFPNonImpr", &P.RFPNonImpr, 0, 150},
 		{"RazorMargin", &P.RazorMargin, 100, 800},
@@ -77,6 +82,7 @@ func TunableParams() []ParamSpec {
 		{"HistPrNonImp", &P.HistPrNonImp, 64, 4096},
 		{"SEEQuietMul", &P.SEEQuietMul, 10, 200},
 		{"SEENoisyMul", &P.SEENoisyMul, 50, 500},
+		{"QSFutMargin", &P.QSFutMargin, 0, 600},
 		{"RFPDepth", &P.RFPDepth, 1, 14},
 		{"LMPDepth", &P.LMPDepth, 1, 14},
 		{"FutDepth", &P.FutDepth, 1, 14},

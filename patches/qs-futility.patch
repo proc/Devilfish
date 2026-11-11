@@ -1,0 +1,66 @@
+diff -ruN tte/internal/search/params.go tq/internal/search/params.go
+--- a/internal/search/params.go	2026-11-11 12:45:20.200508874 -0800
++++ b/internal/search/params.go	2026-11-11 13:01:53.025418050 -0800
+@@ -21,6 +21,7 @@
+ 	HistPrNonImp  int32 // same, not improving
+ 	SEEQuietMul   int32 // SEE pruning margin per ply, quiet moves
+ 	SEENoisyMul   int32 // SEE pruning margin per ply, captures
++	QSFutMargin   int32 // quiescence per-capture futility margin
+ 
+ 	// Depth limits of the pruning rules. Futility, history and quiet SEE
+ 	// pruning compare against the move's reduced depth (depth minus its
+@@ -47,6 +48,7 @@
+ 	HistPrNonImp:  512,
+ 	SEEQuietMul:   60,
+ 	SEENoisyMul:   200,
++	QSFutMargin:   175,
+ 	RFPDepth:      8,
+ 	LMPDepth:      8,
+ 	FutDepth:      8,
+@@ -77,6 +79,7 @@
+ 		{"HistPrNonImp", &P.HistPrNonImp, 64, 4096},
+ 		{"SEEQuietMul", &P.SEEQuietMul, 10, 200},
+ 		{"SEENoisyMul", &P.SEENoisyMul, 50, 500},
++		{"QSFutMargin", &P.QSFutMargin, 0, 600},
+ 		{"RFPDepth", &P.RFPDepth, 1, 14},
+ 		{"LMPDepth", &P.LMPDepth, 1, 14},
+ 		{"FutDepth", &P.FutDepth, 1, 14},
+diff -ruN tte/internal/search/search.go tq/internal/search/search.go
+--- a/internal/search/search.go	2026-11-11 12:45:47.809946725 -0800
++++ b/internal/search/search.go	2026-11-11 13:01:53.038950693 -0800
+@@ -1100,6 +1100,7 @@
+ 	inCheck := w.Board.IsInCheck(w.Board.SideToMove)
+ 
+ 	// Stand-pat score
++	futBase := int32(-Infinity) // standPat + QS futility margin
+ 	if !inCheck {
+ 		if ttFound && ttEval != tt.EvalNone {
+ 			netEval = ttEval
+@@ -1107,6 +1108,7 @@
+ 			netEval = w.rawEval(ply)
+ 		}
+ 		standPat := w.adjustEval(netEval)
++		futBase = standPat + P.QSFutMargin
+ 		if standPat >= beta {
+ 			return beta
+ 		}
+@@ -1159,6 +1161,19 @@
+ 	for i := 0; i < ml.Count; i++ {
+ 		m := PickNextMove(&ml, scores[:ml.Count], i)
+ 
++		// Per-capture futility pruning: if even winning the captured piece
++		// plus a margin cannot lift the stand-pat score above alpha, the
++		// capture is futile (non-promotions that don't give check only).
++		if !inCheck && m.IsCapture() && !m.IsPromotion() {
++			victim := w.Board.Pieces[m.To()].Type()
++			if m.IsEnPassant() {
++				victim = types.Pawn
++			}
++			if futBase+eval.SEEPieceValues[victim] <= alpha && !w.Board.GivesCheck(m) {
++				continue
++			}
++		}
++
+ 		// SEE pruning in quiescence: skip losing captures if not in check and move does not give check
+ 		// SEE first: GivesCheck then only runs for the losing captures.
+ 		if !inCheck && eval.SEE(w.Board, m) < 0 && !w.Board.GivesCheck(m) {

@@ -48,9 +48,20 @@ type Entry struct {
 // Bits 56..59: NodeType (4 bits)
 // Bits 60..63: Age (4 bits)
 
+// EvalNone marks an entry without a static evaluation (e.g. side in check).
+const EvalNone int32 = -32768
+
+// An entry's data word: move (16 bits), score (16), static eval (16),
+// depth (8), bound type (4), age (4). Scores and evals fit in int16: every
+// score is within +-Infinity (32000).
 func packData(m types.Move, score int32, depth int8, nodeType uint8, age uint8) uint64 {
+	return packDataEval(m, score, EvalNone, depth, nodeType, age)
+}
+
+func packDataEval(m types.Move, score, eval int32, depth int8, nodeType uint8, age uint8) uint64 {
 	return uint64(m) |
-		(uint64(uint32(score)) << 16) |
+		(uint64(uint16(int16(score))) << 16) |
+		(uint64(uint16(int16(eval))) << 32) |
 		(uint64(uint8(depth)) << 48) |
 		(uint64(nodeType&0x0F) << 56) |
 		(uint64(age&0x0F) << 60)
@@ -58,11 +69,15 @@ func packData(m types.Move, score int32, depth int8, nodeType uint8, age uint8) 
 
 func unpackData(data uint64) (m types.Move, score int32, depth int8, nodeType uint8, age uint8) {
 	m = types.Move(data & 0xFFFF)
-	score = int32(uint32((data >> 16) & 0xFFFFFFFF))
+	score = int32(int16(uint16(data >> 16)))
 	depth = int8(uint8((data >> 48) & 0xFF))
 	nodeType = uint8((data >> 56) & 0x0F)
 	age = uint8((data >> 60) & 0x0F)
 	return
+}
+
+func unpackEval(data uint64) int32 {
+	return int32(int16(uint16(data >> 32)))
 }
 
 // The table is an array of buckets of bucketSize entries, one 64-byte cache
@@ -141,6 +156,20 @@ func (tt *TT) Prefetch(hash uint64) {
 	prefetch(unsafe.Pointer(&tt.entries[(hash&tt.mask)*bucketSize]))
 }
 
+// ProbeEval is Probe that also returns the entry's static evaluation, or
+// EvalNone if it has none.
+func (tt *TT) ProbeEval(hash uint64) (m types.Move, score, eval int32, depth int8, nodeType uint8, found bool) {
+	b := tt.bucket(hash)
+	for i := range b {
+		key, data := b[i].Key, b[i].Data
+		if key == hash^data && data != 0 {
+			m, score, depth, nodeType, _ = unpackData(data)
+			return m, score, unpackEval(data), depth, nodeType, true
+		}
+	}
+	return types.MoveNone, 0, EvalNone, 0, 0, false
+}
+
 func (tt *TT) Probe(hash uint64) (m types.Move, score int32, depth int8, nodeType uint8, found bool) {
 	b := tt.bucket(hash)
 	for i := range b {
@@ -166,6 +195,12 @@ func (tt *TT) worth(data uint64) int {
 }
 
 func (tt *TT) Store(hash uint64, m types.Move, score int32, depth int8, nodeType uint8) {
+	tt.StoreEval(hash, m, score, EvalNone, depth, nodeType)
+}
+
+// StoreEval is Store with the position's static evaluation (EvalNone if
+// unknown; an evaluation already stored for the position is then kept).
+func (tt *TT) StoreEval(hash uint64, m types.Move, score, eval int32, depth int8, nodeType uint8) {
 	b := tt.bucket(hash)
 
 	// Same position already stored: update it in place.
@@ -176,22 +211,26 @@ func (tt *TT) Store(hash uint64, m types.Move, score int32, depth int8, nodeType
 			continue
 		}
 		existingMove, existingScore, currDepth, existingType, currAge := unpackData(currData)
+		existingEval := unpackEval(currData)
 
 		// Never overwrite a valid move with MoveNone (e.g. on UpperBound fail-low)
 		if m == types.MoveNone && existingMove != types.MoveNone {
 			m = existingMove
 		}
+		if eval == EvalNone {
+			eval = existingEval
+		}
 
 		// Don't overwrite deeper entries from the current generation unless this is an exact score
 		if currAge == tt.age && currDepth > depth && nodeType != Exact {
-			if m != types.MoveNone && existingMove == types.MoveNone {
-				newData := packData(m, existingScore, currDepth, existingType, currAge)
+			if (m != types.MoveNone && existingMove == types.MoveNone) || (eval != EvalNone && existingEval == EvalNone) {
+				newData := packDataEval(m, existingScore, eval, currDepth, existingType, currAge)
 				entry.Data = newData
 				entry.Key = hash ^ newData
 			}
 			return
 		}
-		newData := packData(m, score, depth, nodeType, tt.age)
+		newData := packDataEval(m, score, eval, depth, nodeType, tt.age)
 		entry.Data = newData
 		entry.Key = hash ^ newData
 		return
@@ -213,7 +252,7 @@ func (tt *TT) Store(hash uint64, m types.Move, score int32, depth int8, nodeType
 			return
 		}
 	}
-	newData := packData(m, score, depth, nodeType, tt.age)
+	newData := packDataEval(m, score, eval, depth, nodeType, tt.age)
 	victim.Data = newData
 	victim.Key = hash ^ newData
 }

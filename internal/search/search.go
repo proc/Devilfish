@@ -66,7 +66,16 @@ func (w *SearchWorker) isRootExcluded(m types.Move) bool {
 	return false
 }
 
+// Evaluate returns the static evaluation of the current position: the
+// network (or classical) evaluation with the search's adjustments applied.
 func (w *SearchWorker) Evaluate(ply int) int32 {
+	return w.adjustEval(w.rawEval(ply))
+}
+
+// rawEval is the network (or classical) evaluation before adjustment. It
+// depends only on the position and the evaluation settings, so it is also
+// kept in the transposition table and reused from there.
+func (w *SearchWorker) rawEval(ply int) int32 {
 	var staticEval int32
 	if nnue.Enabled {
 		if nnue.ActiveEightNetwork != nil {
@@ -95,7 +104,13 @@ func (w *SearchWorker) Evaluate(ply int) int32 {
 		w.ClassicalEvals++
 		staticEval = eval.EvaluateClassical(w.Board)
 	}
-	v := staticEval + w.History.GetCorrection(w.Board)
+	return staticEval
+}
+
+// adjustEval applies the correction history and the fifty-move fade to a
+// raw evaluation of the current position.
+func (w *SearchWorker) adjustEval(raw int32) int32 {
+	v := raw + w.History.GetCorrection(w.Board)
 	// Fade the eval toward a draw as the fifty-move counter runs up
 	return v * (200 - int32(w.Board.HalfmoveClock)) / 200
 }
@@ -268,11 +283,6 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 	inCheck := w.Board.IsInCheck(w.Board.SideToMove)
 
-	// Check extension
-	if inCheck {
-		depth++
-	}
-
 	// Leaf / Quiescence search
 	if depth <= 0 {
 		return w.Quiescence(alpha, beta, ply)
@@ -284,7 +294,8 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 	// 3. Transposition Table Probe
 	ttMove := types.MoveNone
-	ttEntryMove, ttScore, ttDepth, ttType, ttFound := w.TT.Probe(w.Board.Hash)
+	ttEntryMove, ttScore, ttEval, ttDepth, ttType, ttFound := w.TT.ProbeEval(w.Board.Hash)
+	netEval := tt.EvalNone // raw evaluation of this node, once known
 	if ttFound {
 		ttMove = ttEntryMove
 		ttScore = tt.ScoreFromTT(ttScore, ply)
@@ -368,7 +379,12 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		staticEval = -Infinity
 		rawEval = -Infinity
 	} else {
-		staticEval = w.Evaluate(ply)
+		if ttFound && ttEval != tt.EvalNone {
+			netEval = ttEval
+		} else {
+			netEval = w.rawEval(ply)
+		}
+		staticEval = w.adjustEval(netEval)
 		rawEval = staticEval
 		if ttFound && abs(ttScore) < MateThreshold {
 			if ttType == tt.Exact || (ttType == tt.LowerBound && ttScore > staticEval) || (ttType == tt.UpperBound && ttScore < staticEval) {
@@ -520,11 +536,19 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	bestRootScore := -Infinity
 	var searchedMoves [256]types.Move
 	movesSearched := 0
+	// A capture/promotion TT move suggests the position is tactical: quiet
+	// alternatives are less likely to matter, so they get reduced more.
+	ttMoveNoisy := ttMove != types.MoveNone && (ttMove.IsCapture() || ttMove.IsPromotion())
 	legalMoves := 0
 	bestType := tt.UpperBound
 
 	// Staged Move Generation: Search TT move first before generating all moves
 	if ttMove != types.MoveNone && ttMove != excludedMove && (ply > 0 || !w.isRootExcluded(ttMove)) && movegen.IsPseudoLegal(w.Board, ttMove) {
+		// Check extension (parent side): only for checks that don't lose
+		// material, and never stacked on top of a singular extension.
+		if extension == 0 && w.Board.GivesCheck(ttMove) && eval.SEE(w.Board, ttMove) >= 0 {
+			extension = 1
+		}
 		w.pushAccumulator(ply, ttMove)
 		if w.Board.MakeMove(ttMove) {
 			w.TT.Prefetch(w.Board.Hash)
@@ -553,7 +577,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			// Beta Cutoff (Fail-High)
 			if score >= beta {
 				if excludedMove == types.MoveNone && (ply > 0 || len(w.ExcludedRootMoves) == 0) {
-					w.TT.Store(w.Board.Hash, ttMove, tt.ScoreToTT(score, ply), depth, tt.LowerBound)
+					w.TT.StoreEval(w.Board.Hash, ttMove, tt.ScoreToTT(score, ply), netEval, depth, tt.LowerBound)
 				}
 
 				if !inCheck && excludedMove == types.MoveNone && score > rawEval && score < MateThreshold {
@@ -635,7 +659,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			}
 
 			if probScore >= probBeta {
-				w.TT.Store(w.Board.Hash, m, tt.ScoreToTT(beta, ply), probDepth, tt.LowerBound)
+				w.TT.StoreEval(w.Board.Hash, m, tt.ScoreToTT(beta, ply), netEval, probDepth, tt.LowerBound)
 				return beta
 			}
 		}
@@ -671,13 +695,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		// SEE: captures and promotions carry the value the picker already
 		// computed; quiet moves get one only if a rule below asks for it.
 		moveSEE, seeKnown := mp.LastSEE()
-		// givesCheck is only read by the pruning rules and by LMR.
-		// Pruning rules (non-PV) never prune a checking move, and with the
-		// reduced-depth rules below they can apply at any depth.
-		givesCheck := false
-		if !inCheck && movesSearched > 0 && (!isPVNode || (depth >= 3 && movesSearched >= 2)) {
-			givesCheck = w.Board.GivesCheck(m)
-		}
+		// givesCheck is read by the pruning rules, LMR and the check
+		// extension, so it is computed for every move.
+		givesCheck := w.Board.GivesCheck(m)
 
 		// The depth this move would be searched at after its late-move
 		// reduction; the futility, history and quiet SEE rules judge it there.
@@ -782,10 +802,18 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			startNodes = w.LocalNodes
 		}
 
-		// The singular extension belongs to the TT move only; here only 7th-rank pushes extend
+		// The singular extension belongs to the TT move only; here 7th-rank
+		// pushes and checks that don't lose material extend (at most one ply).
 		var moveExtension int8
 		if is7thRankPawnPush && depth >= 3 {
 			moveExtension = 1
+		} else if givesCheck {
+			if !seeKnown {
+				moveSEE, seeKnown = eval.SEE(w.Board, m), true
+			}
+			if moveSEE >= 0 {
+				moveExtension = 1
+			}
 		}
 
 		var reduction int8
@@ -848,16 +876,18 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					if prevMove4 != types.MoveNone && prevMove4.To() < 64 && toSq < 64 {
 						hist += w.History.ContHistory4[prevMove4.To()][toSq]
 					}
-					if hist > 4000 {
-						reduction--
-						if hist > 8000 {
-							reduction--
-						}
-					} else if hist < -4000 {
+					// Continuous history adjustment: one ply per LMRHistDiv
+					// of combined history, capped at three plies each way.
+					hAdj := hist / P.LMRHistDiv
+					if hAdj > 3 {
+						hAdj = 3
+					} else if hAdj < -3 {
+						hAdj = -3
+					}
+					reduction -= int8(hAdj)
+
+					if ttMoveNoisy {
 						reduction++
-						if hist < -8000 {
-							reduction++
-						}
 					}
 				} else {
 					// Tactical moves / Captures (Noisy LMR)
@@ -931,7 +961,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		// Beta Cutoff (Fail-High)
 		if score >= beta {
 			if excludedMove == types.MoveNone && (ply > 0 || len(w.ExcludedRootMoves) == 0) {
-				w.TT.Store(w.Board.Hash, m, tt.ScoreToTT(score, ply), depth, tt.LowerBound)
+				w.TT.StoreEval(w.Board.Hash, m, tt.ScoreToTT(score, ply), netEval, depth, tt.LowerBound)
 			}
 
 			if !inCheck && excludedMove == types.MoveNone && score > rawEval && score < MateThreshold {
@@ -1030,7 +1060,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	}
 
 	if excludedMove == types.MoveNone && (ply > 0 || len(w.ExcludedRootMoves) == 0) {
-		w.TT.Store(w.Board.Hash, bestMove, tt.ScoreToTT(alpha, ply), depth, bestType)
+		w.TT.StoreEval(w.Board.Hash, bestMove, tt.ScoreToTT(alpha, ply), netEval, depth, bestType)
 	}
 	return alpha
 }
@@ -1064,7 +1094,8 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 	// TT probe: any stored bound is at least as deep as a quiescence search.
 	// Stores go in at depth 0; tt.Store never lets those displace a current-generation entry.
 	origAlpha := alpha
-	_, ttScore, _, ttType, ttFound := w.TT.Probe(w.Board.Hash)
+	_, ttScore, ttEval, _, ttType, ttFound := w.TT.ProbeEval(w.Board.Hash)
+	netEval := tt.EvalNone
 	if ttFound {
 		ttScore = tt.ScoreFromTT(ttScore, ply)
 		switch {
@@ -1078,8 +1109,15 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 	inCheck := w.Board.IsInCheck(w.Board.SideToMove)
 
 	// Stand-pat score
+	futBase := int32(-Infinity) // standPat + QS futility margin
 	if !inCheck {
-		standPat := w.Evaluate(ply)
+		if ttFound && ttEval != tt.EvalNone {
+			netEval = ttEval
+		} else {
+			netEval = w.rawEval(ply)
+		}
+		standPat := w.adjustEval(netEval)
+		futBase = standPat + P.QSFutMargin
 		if standPat >= beta {
 			return beta
 		}
@@ -1132,6 +1170,19 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 	for i := 0; i < ml.Count; i++ {
 		m := PickNextMove(&ml, scores[:ml.Count], i)
 
+		// Per-capture futility pruning: if even winning the captured piece
+		// plus a margin cannot lift the stand-pat score above alpha, the
+		// capture is futile (non-promotions that don't give check only).
+		if !inCheck && m.IsCapture() && !m.IsPromotion() {
+			victim := w.Board.Pieces[m.To()].Type()
+			if m.IsEnPassant() {
+				victim = types.Pawn
+			}
+			if futBase+eval.SEEPieceValues[victim] <= alpha && !w.Board.GivesCheck(m) {
+				continue
+			}
+		}
+
 		// SEE pruning in quiescence: skip losing captures if not in check and move does not give check
 		// SEE first: GivesCheck then only runs for the losing captures.
 		if !inCheck && eval.SEE(w.Board, m) < 0 && !w.Board.GivesCheck(m) {
@@ -1154,7 +1205,7 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 
 		if score >= beta {
 			if !ttFound {
-				w.TT.Store(w.Board.Hash, m, tt.ScoreToTT(beta, ply), 0, tt.LowerBound)
+				w.TT.StoreEval(w.Board.Hash, m, tt.ScoreToTT(beta, ply), netEval, 0, tt.LowerBound)
 			}
 			return beta
 		}
@@ -1172,7 +1223,7 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 		if alpha > origAlpha {
 			bound = tt.Exact
 		}
-		w.TT.Store(w.Board.Hash, types.MoveNone, tt.ScoreToTT(alpha, ply), 0, bound)
+		w.TT.StoreEval(w.Board.Hash, types.MoveNone, tt.ScoreToTT(alpha, ply), netEval, 0, bound)
 	}
 	return alpha
 }

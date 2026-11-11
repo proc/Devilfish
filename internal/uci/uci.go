@@ -266,6 +266,7 @@ func (u *UCI) cmdSetOption(args []string) {
 		} else if valLower == "false" || valLower == "0" {
 			nnue.Enabled = false
 		}
+		u.engine.TT.Clear() // it holds static evaluations from the previous setting
 		logger.Infof("UCI Option Set: UseNNUE=%t", nnue.Enabled)
 	case "evalfile":
 		trimmedVal := strings.TrimSpace(valStr)
@@ -276,12 +277,14 @@ func (u *UCI) cmdSetOption(args []string) {
 				u.sendLine(fmt.Sprintf("info string failed to load nnue file: %v", err))
 			} else {
 				u.evalFile = trimmedVal
+				u.engine.TT.Clear() // it holds static evaluations from the old network
 				logger.Infof("UCI Option Set: EvalFile=%s (successfully loaded)", trimmedVal)
 				u.sendLine(fmt.Sprintf("info string loaded nnue file %s", trimmedVal))
 			}
 		} else if trimmedVal == "<embedded>" {
 			u.evalFile = "<embedded>"
 			nnue.ResetToDefault()
+			u.engine.TT.Clear()
 			logger.Infof("UCI Option Set: EvalFile=<embedded> (reset to embedded network)")
 			u.sendLine("info string reset to embedded nnue network")
 		}
