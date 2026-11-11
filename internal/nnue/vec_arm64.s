@@ -258,3 +258,83 @@ loop_act:
 	CBNZ   R6, loop_act
 
 	RET
+
+// ---------------------------------------------------------------------------
+// First dense layer, sparse form. See refL1Nonzero and refL1Sparse in
+// vec_ref.go for the definitions, and eightL1 for how they are used.
+//
+// Instructions that older Go assemblers do not know are written as WORD with
+// the mnemonic alongside.
+// ---------------------------------------------------------------------------
+
+// func l1NonzeroNEON(ft *[1024]uint8, nz *uint32) int
+// For each non-zero byte of ft, in order, writes index | value<<16 to nz;
+// returns the count. Each 16-byte block becomes a 64-bit mask with four bits
+// per byte (CMTST gives 0xFF per non-zero byte, SHRN #4 narrows each byte
+// pair to one), and the set nibbles are walked with RBIT+CLZ.
+TEXT ·l1NonzeroNEON(SB), NOSPLIT|NOFRAME, $0-24
+	MOVD ft+0(FP), R0
+	MOVD nz+8(FP), R1
+	MOVD R1, R10        // first entry
+	MOVD $0, R2         // input index at the start of the block
+	MOVD $15, R12
+block:
+	VLD1.P 16(R0), [V0.B16]
+	WORD $0x4e208c01 // CMTST V1.16B, V0.16B, V0.16B
+	WORD $0x0f0c8422 // SHRN V2.8B, V1.8H, #4
+	FMOVD F2, R3        // the mask
+	CBZ   R3, next
+	SUB   $16, R0, R7   // start of this block
+bits:
+	RBIT  R3, R4
+	CLZ   R4, R4        // bit position: 4 * byte offset
+	LSR   $2, R4, R5    // byte offset in the block
+	MOVBU (R7)(R5), R8  // value
+	ADD   R2, R5, R6    // input index
+	ORR   R8<<16, R6, R9
+	MOVW.P R9, 4(R1)
+	LSL   R4, R12, R11
+	BIC   R11, R3, R3   // clear this byte's nibble
+	CBNZ  R3, bits
+next:
+	ADD $16, R2, R2
+	CMP $1024, R2
+	BLT block
+	SUB R10, R1, R1
+	LSR $2, R1, R1
+	MOVD R1, ret+16(FP)
+	RET
+
+// func l1SparseNEON(nz *uint32, n int, wt *[1024][16]int8, out *[16]int32)
+// Per entry: sign-extend the 16-byte weight row to int16, broadcast the value
+// to every int16 lane, and multiply-accumulate into four int32 vectors
+// (outputs 0-3, 4-7, 8-11, 12-15). Values are at most 255 and weights at
+// least -128, so each product is exact in the widening multiply.
+TEXT ·l1SparseNEON(SB), NOSPLIT|NOFRAME, $0-32
+	MOVD nz+0(FP), R0
+	MOVD n+8(FP), R1
+	MOVD wt+16(FP), R2
+	MOVD out+24(FP), R3
+	VEOR V0.B16, V0.B16, V0.B16
+	VEOR V1.B16, V1.B16, V1.B16
+	VEOR V2.B16, V2.B16, V2.B16
+	VEOR V3.B16, V3.B16, V3.B16
+	CBZ  R1, done
+loop:
+	MOVWU.P 4(R0), R4
+	AND  $0xFFFF, R4, R5  // input index
+	LSR  $16, R4, R6      // value
+	ADD  R5<<4, R2, R7    // its weight row
+	VLD1 (R7), [V4.B16]
+	WORD $0x0f08a485 // SXTL V5.8H, V4.8B (weights 0..7)
+	WORD $0x4f08a486 // SXTL2 V6.8H, V4.16B (weights 8..15)
+	WORD $0x4e020cc7 // DUP V7.8H, W6 (value)
+	WORD $0x0e6780a0 // SMLAL V0.4S, V5.4H, V7.4H
+	WORD $0x4e6780a1 // SMLAL2 V1.4S, V5.8H, V7.8H
+	WORD $0x0e6780c2 // SMLAL V2.4S, V6.4H, V7.4H
+	WORD $0x4e6780c3 // SMLAL2 V3.4S, V6.8H, V7.8H
+	SUB  $1, R1, R1
+	CBNZ R1, loop
+done:
+	VST1 [V0.S4, V1.S4, V2.S4, V3.S4], (R3)
+	RET

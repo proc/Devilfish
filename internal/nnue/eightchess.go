@@ -219,18 +219,18 @@ func getThreatIndex(piece int, from int, attacked int, to int, mirrored bool, po
 
 // EightNetwork holds the deserialized weights of an 8Chess 1024-wide NNUE model.
 type EightNetwork struct {
-	FTThreatWeights []int8                  // [EightThreatFeatures * EightL1Size]
-	FTPieceWeights  []int16                 // [EightPieceFeatures * EightL1Size]
-	FTBiases        [EightL1Size]int16      // [EightL1Size]
+	FTThreatWeights []int8             // [EightThreatFeatures * EightL1Size]
+	FTPieceWeights  []int16            // [EightPieceFeatures * EightL1Size]
+	FTBiases        [EightL1Size]int16 // [EightL1Size]
 	L1Weights       [EightOutputBuckets][EightL2Size * EightL1Size]int8
 	// L1WeightsByInput holds the same numbers as L1Weights, indexed
 	// [bucket][input][output]. Derived at load time; see eightL1.
 	L1WeightsByInput [EightOutputBuckets][EightL1Size][EightL2Size]int8
-	L1Biases        [EightOutputBuckets][EightL2Size]float32
-	L2Weights       [EightOutputBuckets][EightL2Size][EightL3Size]float32
-	L2Biases        [EightOutputBuckets][EightL3Size]float32
-	L3Weights       [EightOutputBuckets][EightL3Size]float32
-	L3Biases        [EightOutputBuckets]float32
+	L1Biases         [EightOutputBuckets][EightL2Size]float32
+	L2Weights        [EightOutputBuckets][EightL2Size][EightL3Size]float32
+	L2Biases         [EightOutputBuckets][EightL3Size]float32
+	L3Weights        [EightOutputBuckets][EightL3Size]float32
+	L3Biases         [EightOutputBuckets]float32
 }
 
 var ActiveEightNetwork *EightNetwork
@@ -574,52 +574,25 @@ func eightL1Ref(ftOut *[EightL1Size]uint8, l1w *[EightL2Size * EightL1Size]int8,
 }
 
 // eightL1 computes the same sums as eightL1Ref, faster. The inputs come out of
-// a clipped pairwise product, so most are zero (about one byte in nine in
-// middlegame positions) even inside a non-zero group of four; only the
-// non-zero bytes are visited. For each one the sixteen weights are read from a
-// copy of the layer laid out by input (EightNetwork.L1WeightsByInput), so they
-// sit together in one 16-byte run, and the sixteen sums stay in locals.
+// a clipped pairwise product, so most are zero (about one in nine are not, in
+// middlegame positions). One SIMD kernel (l1Nonzero) lists the non-zero
+// inputs; another (l1Sparse) then adds value * weight row for each, reading the sixteen weights of an input as one 16-byte row of the
+// layer stored by input (EightNetwork.L1WeightsByInput).
 func eightL1(ftOut *[EightL1Size]uint8, wt *[EightL1Size][EightL2Size]int8, preActivations *[EightL2Size]int32) {
-	var a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15 int32
-	for c := 0; c < EightL1Size/8; c++ {
-		oct := binary.LittleEndian.Uint64(ftOut[c*8 : c*8+8])
-		for oct != 0 {
-			k := bits.TrailingZeros64(oct) >> 3
-			v := int32(byte(oct >> (8 * k)))
-			oct &^= 0xFF << (8 * k)
-			w := &wt[c*8+k]
-			a0 += v * int32(w[0])
-			a1 += v * int32(w[1])
-			a2 += v * int32(w[2])
-			a3 += v * int32(w[3])
-			a4 += v * int32(w[4])
-			a5 += v * int32(w[5])
-			a6 += v * int32(w[6])
-			a7 += v * int32(w[7])
-			a8 += v * int32(w[8])
-			a9 += v * int32(w[9])
-			a10 += v * int32(w[10])
-			a11 += v * int32(w[11])
-			a12 += v * int32(w[12])
-			a13 += v * int32(w[13])
-			a14 += v * int32(w[14])
-			a15 += v * int32(w[15])
-		}
+	// One entry per non-zero input: index in the low 16 bits, value in the
+	// high 16. The x86 kernels take inputs two at a time, so the list is
+	// padded to even length with a zero-value entry.
+	var nz [EightL1Size + 1]uint32
+	n := l1Nonzero(ftOut, &nz)
+	if n&1 != 0 {
+		nz[n] = 0
+		n++
 	}
-	preActivations[0] += a0
-	preActivations[1] += a1
-	preActivations[2] += a2
-	preActivations[3] += a3
-	preActivations[4] += a4
-	preActivations[5] += a5
-	preActivations[6] += a6
-	preActivations[7] += a7
-	preActivations[8] += a8
-	preActivations[9] += a9
-	preActivations[10] += a10
-	preActivations[11] += a11
-	preActivations[12] += a12
-	preActivations[13] += a13
-	preActivations[14] += a14
-	preActivations[15] += a15
+	var out [EightL2Size]int32
+	if n > 0 {
+		l1Sparse(&nz[0], n, wt, &out)
+	}
+	for j := range out {
+		preActivations[j] += out[j]
+	}
 }

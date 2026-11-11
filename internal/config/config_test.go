@@ -3,13 +3,14 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.Threads != 10 {
-		t.Errorf("expected default threads 10, got %d", cfg.Threads)
+	if cfg.Threads != runtime.NumCPU() {
+		t.Errorf("expected default threads %d (CPU count), got %d", runtime.NumCPU(), cfg.Threads)
 	}
 	if cfg.Hash != 128 {
 		t.Errorf("expected default hash 128, got %d", cfg.Hash)
@@ -37,7 +38,7 @@ func TestLoadNonExistentCreatesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error for missing file, got %v", err)
 	}
-	if cfg.Threads != 10 || cfg.Hash != 128 || cfg.Ponder || !cfg.UseNNUE || cfg.EvalFile != "<embedded>" {
+	if cfg.Threads != runtime.NumCPU() || cfg.Hash != 128 || cfg.Ponder || !cfg.UseNNUE || cfg.EvalFile != "<embedded>" {
 		t.Errorf("expected default config, got %+v", cfg)
 	}
 
@@ -51,7 +52,7 @@ func TestLoadNonExistentCreatesFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to reload created config: %v", err)
 	}
-	if reloaded.Threads != 10 || reloaded.Hash != 128 || reloaded.Ponder || !reloaded.UseNNUE || reloaded.EvalFile != "<embedded>" {
+	if reloaded.Threads != runtime.NumCPU() || reloaded.Hash != 128 || reloaded.Ponder || !reloaded.UseNNUE || reloaded.EvalFile != "<embedded>" {
 		t.Errorf("expected reloaded config matching default, got %+v", reloaded)
 	}
 }

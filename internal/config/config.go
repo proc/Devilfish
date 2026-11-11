@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -27,7 +28,7 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		Threads:          10,
+		Threads:          runtime.NumCPU(),
 		Hash:             128,
 		Ponder:           false,
 		UseNNUE:          true,

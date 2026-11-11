@@ -1,79 +1,44 @@
-//go:build !arm64
+//go:build !arm64 && !amd64
 
 package nnue
 
-import "unsafe"
+// Architectures without hand-written kernels use the portable versions.
+// The function names follow the arm64 originals.
 
 const SIMDInstructionSet = "Scalar Generic"
 
 func addVectorNEON(acc *[HiddenSize]int16, weights *[HiddenSize]int16) {
-	for i := 0; i < HiddenSize; i++ {
-		acc[i] += weights[i]
-	}
+	refAddVector(acc, weights)
 }
 
 func subVectorNEON(acc *[HiddenSize]int16, weights *[HiddenSize]int16) {
-	for i := 0; i < HiddenSize; i++ {
-		acc[i] -= weights[i]
-	}
+	refSubVector(acc, weights)
 }
 
 func addVector1024NEON(acc *[EightL1Size]int16, weights *int16) {
-	wSlice := unsafe.Slice(weights, EightL1Size)
-	for i := 0; i < EightL1Size; i++ {
-		acc[i] += wSlice[i]
-	}
-}
-
-func addThreatVector1024NEON(acc *[EightL1Size]int16, weights *int8) {
-	wSlice := unsafe.Slice(weights, EightL1Size)
-	for i := 0; i < EightL1Size; i++ {
-		acc[i] += int16(wSlice[i])
-	}
+	refAddVector1024(acc, weights)
 }
 
 func subVector1024NEON(acc *[EightL1Size]int16, weights *int16) {
-	wSlice := unsafe.Slice(weights, EightL1Size)
-	for i := 0; i < EightL1Size; i++ {
-		acc[i] -= wSlice[i]
-	}
+	refSubVector1024(acc, weights)
+}
+
+func addThreatVector1024NEON(acc *[EightL1Size]int16, weights *int8) {
+	refAddThreatVector1024(acc, weights)
 }
 
 func subThreatVector1024NEON(acc *[EightL1Size]int16, weights *int8) {
-	wSlice := unsafe.Slice(weights, EightL1Size)
-	for i := 0; i < EightL1Size; i++ {
-		acc[i] -= int16(wSlice[i])
-	}
+	refSubThreatVector1024(acc, weights)
 }
 
 func activateEightFTNEON(out *uint8, pst *int16, thr *int16) {
-	outSlice := unsafe.Slice(out, EightL1Size/2)
-	pstSlice := unsafe.Slice(pst, EightL1Size)
-	thrSlice := unsafe.Slice(thr, EightL1Size)
+	refActivateEightFT(out, pst, thr)
+}
 
-	for i := 0; i < EightL1Size/2; i++ {
-		sLeft := int32(pstSlice[i] + thrSlice[i])
-		sRight := int32(pstSlice[i+EightL1Size/2] + thrSlice[i+EightL1Size/2])
+func l1Sparse(nz *uint32, n int, wt *[EightL1Size][EightL2Size]int8, out *[EightL2Size]int32) {
+	refL1Sparse(nz, n, wt, out)
+}
 
-		if sLeft < 0 {
-			sLeft = 0
-		} else if sLeft > EightFTQuant {
-			sLeft = EightFTQuant
-		}
-
-		if sRight < 0 {
-			sRight = 0
-		} else if sRight > EightFTQuant {
-			sRight = EightFTQuant
-		}
-
-		prod := (sLeft * sRight) >> EightFTShift
-		if prod < 0 {
-			prod = 0
-		} else if prod > 255 {
-			prod = 255
-		}
-
-		outSlice[i] = uint8(prod)
-	}
+func l1Nonzero(ft *[EightL1Size]uint8, nz *[EightL1Size + 1]uint32) int {
+	return refL1Nonzero(ft, nz)
 }

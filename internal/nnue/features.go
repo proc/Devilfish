@@ -42,7 +42,7 @@ func UsesAccumulator() bool {
 
 // Refresh recomputes the accumulators for White and Black completely from scratch.
 func Refresh(b *board.Board, acc *Accumulator) {
-	if ActiveNetwork == nil || ActiveEightNetwork != nil {
+	if ActiveNetwork == nil {
 		return
 	}
 
@@ -69,7 +69,7 @@ func Refresh(b *board.Board, acc *Accumulator) {
 
 // Update incrementally updates next Accumulator from curr Accumulator based on move m.
 func Update(curr *Accumulator, next *Accumulator, m types.Move, b *board.Board) {
-	if ActiveNetwork == nil || ActiveEightNetwork != nil {
+	if ActiveNetwork == nil {
 		return
 	}
 
