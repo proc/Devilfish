@@ -25,7 +25,7 @@ import (
 
 const (
 	EngineName    = "Devilfish"
-	EngineVersion = "0.1.1"
+	EngineVersion = "1.0.1"
 	EngineAuthor  = "Peter Tran"
 )
 
