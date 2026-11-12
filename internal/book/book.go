@@ -19,8 +19,10 @@ type Entry struct {
 	Learn  uint32
 }
 
+// Book is either a Polyglot book (entries) or an EPD opening suite (epd).
 type Book struct {
 	entries []Entry
+	epd     *epdBook
 }
 
 // Read parses raw Polyglot binary book data.
@@ -42,10 +44,21 @@ func Read(data []byte) (*Book, error) {
 	return &Book{entries: entries}, nil
 }
 
-// LoadFile loads an opening book from the given filesystem path (or returns DefaultBook if empty or "<embedded>").
+// LoadFile loads an opening book. Besides a filesystem path it accepts:
+//   - "" or "<embedded>": the builtin Polyglot book (DefaultBook)
+//   - "<pohl>": the embedded Pohl.epd opening suite (PohlBook)
+//
+// Paths ending in .epd or .epd.gz are read as EPD opening suites; anything else
+// as a Polyglot .bin book.
 func LoadFile(path string) (*Book, error) {
 	if path == "" || path == "<embedded>" {
 		return DefaultBook(), nil
+	}
+	if s := findEmbeddedSuite(path); s != nil {
+		return s.load()
+	}
+	if isEPDPath(path) {
+		return loadEPDFile(path)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -54,10 +67,13 @@ func LoadFile(path string) (*Book, error) {
 	return Read(data)
 }
 
-// EntryCount returns the number of entries in the book.
+// EntryCount returns the number of entries in the book (positions, for an EPD book).
 func (b *Book) EntryCount() int {
 	if b == nil {
 		return 0
+	}
+	if b.epd != nil {
+		return b.epd.size()
 	}
 	return len(b.entries)
 }
@@ -69,10 +85,53 @@ type candidateMove struct {
 
 // Probe searches the book for the given position and returns a legal move, selected probabilistically by weight.
 func (bk *Book) Probe(b *board.Board) types.Move {
-	if bk == nil || len(bk.entries) == 0 {
+	if bk == nil {
+		return types.MoveNone
+	}
+	if bk.epd != nil {
+		return bk.epd.probe(b)
+	}
+	if len(bk.entries) == 0 {
 		return types.MoveNone
 	}
 
+	candidates := bk.polyglotMoves(b)
+	if len(candidates) == 0 {
+		return types.MoveNone
+	}
+
+	if len(candidates) == 1 {
+		return candidates[0].move
+	}
+
+	// Weighted random selection
+	var totalWeight uint32
+	for _, c := range candidates {
+		w := uint32(c.weight)
+		if w == 0 {
+			w = 1
+		}
+		totalWeight += w
+	}
+
+	pick := rand.Uint32N(totalWeight)
+	var cumulative uint32
+	for _, c := range candidates {
+		w := uint32(c.weight)
+		if w == 0 {
+			w = 1
+		}
+		cumulative += w
+		if pick < cumulative {
+			return c.move
+		}
+	}
+
+	return candidates[0].move
+}
+
+// polyglotMoves returns the legal book moves stored for b, with their weights.
+func (bk *Book) polyglotMoves(b *board.Board) []candidateMove {
 	key := Hash(b)
 
 	// Binary search for key in sorted entries
@@ -81,13 +140,13 @@ func (bk *Book) Probe(b *board.Board) types.Move {
 	})
 
 	if idx >= len(bk.entries) || bk.entries[idx].Key != key {
-		return types.MoveNone
+		return nil
 	}
 
 	// Generate legal moves on board to validate book moves
 	legalMoves := movegen.GenerateLegalMoves(b)
 	if len(legalMoves) == 0 {
-		return types.MoveNone
+		return nil
 	}
 
 	var candidates []candidateMove
@@ -140,36 +199,5 @@ func (bk *Book) Probe(b *board.Board) types.Move {
 		}
 	}
 
-	if len(candidates) == 0 {
-		return types.MoveNone
-	}
-
-	if len(candidates) == 1 {
-		return candidates[0].move
-	}
-
-	// Weighted random selection
-	var totalWeight uint32
-	for _, c := range candidates {
-		w := uint32(c.weight)
-		if w == 0 {
-			w = 1
-		}
-		totalWeight += w
-	}
-
-	pick := rand.Uint32N(totalWeight)
-	var cumulative uint32
-	for _, c := range candidates {
-		w := uint32(c.weight)
-		if w == 0 {
-			w = 1
-		}
-		cumulative += w
-		if pick < cumulative {
-			return c.move
-		}
-	}
-
-	return candidates[0].move
+	return candidates
 }

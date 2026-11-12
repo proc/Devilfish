@@ -1,6 +1,7 @@
 package search
 
 import (
+	"math"
 	"sync/atomic"
 	"time"
 
@@ -41,6 +42,41 @@ type TimeManager struct {
 	IsMoveTime    bool
 	PieceCount    int
 	IsEndgame     bool
+
+	// BaseOptTime is OptTime as first allocated; AdjustOptTime keeps OptTime
+	// within [MinExtend, MaxExtend] times it, so repeated in-search
+	// extensions cannot compound up to MaxTime.
+	BaseOptTime time.Duration
+	MinExtend   float64
+	MaxExtend   float64
+	// ClockLead is our expected thinking time over the next moves divided by
+	// the opponent's (1 when equal or unknown).
+	ClockLead float64
+}
+
+// Tuning for the clock-lead adjustment. Each side's budget is its clock plus
+// the increments of the next leadHorizon moves. Above leadThreshold the
+// allocation is scaled up by sqrt(lead/leadThreshold), at most leadMaxScale:
+// spare time is turned into deeper search instead of being left on the clock.
+const (
+	leadHorizon   = 20
+	leadThreshold = 1.2
+	leadMaxScale  = 1.5
+
+	// softStopFactor: an iteration still running at this multiple of OptTime
+	// is stopped, rather than being allowed to run on to MaxTime.
+	softStopFactor = 1.6
+
+	// longClockMs: from this much time left, extensions may go further.
+	longClockMs = 600000
+)
+
+// clockLeadScale returns the factor to scale our budget by for a given lead.
+func clockLeadScale(lead float64) float64 {
+	if lead <= leadThreshold {
+		return 1
+	}
+	return min(math.Sqrt(lead/leadThreshold), leadMaxScale)
 }
 
 func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool, nodes *atomic.Uint64, boards ...*board.Board) *TimeManager {
@@ -73,13 +109,17 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 		return tm
 	}
 
-	var myTime, myInc int64
+	var myTime, myInc, oppTime, oppInc int64
 	if side == types.White {
-		myTime = limits.WhiteTime
-		myInc = limits.WhiteInc
+		myTime, myInc = limits.WhiteTime, limits.WhiteInc
+		oppTime, oppInc = limits.BlackTime, limits.BlackInc
 	} else {
-		myTime = limits.BlackTime
-		myInc = limits.BlackInc
+		myTime, myInc = limits.BlackTime, limits.BlackInc
+		oppTime, oppInc = limits.WhiteTime, limits.WhiteInc
+	}
+	tm.ClockLead = 1
+	if myTime > 0 && oppTime > 0 {
+		tm.ClockLead = float64(myTime+leadHorizon*myInc) / float64(oppTime+leadHorizon*oppInc)
 	}
 
 	moveOverhead := limits.MoveOverhead
@@ -124,13 +164,13 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 		if tm.IsTimeTrouble && moves < 10 {
 			moves = 10
 		}
-		optTimeMs = (usableTime / (moves + 2)) + (myInc * 3 / 4)
+		optTimeMs = (usableTime / (moves + 3)) + (myInc * 3 / 4)
 		if tm.IsEmergency {
 			maxMultiplier = 1.15
 		} else if tm.IsTimeTrouble {
 			maxMultiplier = 1.3
 		} else {
-			maxMultiplier = 1.8
+			maxMultiplier = 1.6
 		}
 	} else {
 		if myTime < 2000 {
@@ -140,20 +180,23 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 			divisor = 65
 			maxMultiplier = 1.25
 		} else if myTime < 15000 {
-			divisor = 55
-			maxMultiplier = 1.4
+			divisor = 50
+			maxMultiplier = 1.5
 		} else if myTime < 30000 {
-			divisor = 48
+			divisor = 46
 			maxMultiplier = 1.6
 		} else if myTime <= 60000 { // Bullet (<= 1 min)
-			divisor = 44
+			divisor = 42
 			maxMultiplier = 1.8
 		} else if myTime <= 180000 { // Blitz (<= 3 min)
-			divisor = 40
+			divisor = 38
 			maxMultiplier = 2.0
-		} else { // Rapid / Classical
-			divisor = 36
+		} else if myTime < longClockMs { // Rapid
+			divisor = 34
 			maxMultiplier = 2.2
+		} else { // Long clock: plenty of time to think
+			divisor = 30
+			maxMultiplier = 2.5
 		}
 
 		// Dynamic Endgame Time Scaling:
@@ -162,26 +205,26 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 		// Allocate more time per move by reducing the divisor.
 		if tm.IsEndgame && !tm.IsEmergency {
 			if tm.PieceCount <= 6 {
-				// Deep endgame / pawn race / king opposition: ~50% more time
-				divisor = divisor * 55 / 100
-				if divisor < 16 {
-					divisor = 16
-				}
-				maxMultiplier += 0.4
-			} else if tm.PieceCount <= 10 {
-				// Minor piece / rook endgame: ~35% more time
-				divisor = divisor * 68 / 100
-				if divisor < 18 {
-					divisor = 18
-				}
-				maxMultiplier += 0.3
-			} else {
-				// Early endgame / transition: ~20% more time
-				divisor = divisor * 82 / 100
+				// Deep endgame / pawn race / king opposition: ~40% more time
+				divisor = divisor * 70 / 100
 				if divisor < 22 {
 					divisor = 22
 				}
-				maxMultiplier += 0.2
+				maxMultiplier += 0.25
+			} else if tm.PieceCount <= 10 {
+				// Minor piece / rook endgame: ~25% more time
+				divisor = divisor * 80 / 100
+				if divisor < 26 {
+					divisor = 26
+				}
+				maxMultiplier += 0.15
+			} else {
+				// Early endgame / transition: ~10% more time
+				divisor = divisor * 90 / 100
+				if divisor < 30 {
+					divisor = 30
+				}
+				maxMultiplier += 0.1
 			}
 		}
 
@@ -190,13 +233,23 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 
 	maxTimeMs = int64(float64(optTimeMs) * maxMultiplier)
 
+	// Ahead on the clock: invest the lead in deeper search. Not in time
+	// trouble, where every millisecond still counts.
+	if s := clockLeadScale(tm.ClockLead); s > 1 && !tm.IsTimeTrouble {
+		optTimeMs = int64(float64(optTimeMs) * s)
+		maxTimeMs = int64(float64(maxTimeMs) * s)
+	}
+
 	// Hard safety caps: the engine must never spend an excessive fraction of its clock on a single move
-	maxFraction := 0.20
+	maxFraction := 0.15
 	if tm.IsEndgame && !tm.IsTimeTrouble {
-		maxFraction = 0.25
+		maxFraction = 0.18
+	}
+	if tm.ClockLead >= 1.5 && !tm.IsTimeTrouble {
+		maxFraction += 0.03
 	}
 	if tm.IsTimeTrouble {
-		maxFraction = 0.12
+		maxFraction = 0.10
 	}
 	if tm.IsEmergency {
 		maxFraction = 0.08
@@ -217,6 +270,13 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 
 	tm.OptTime = time.Duration(optTimeMs) * time.Millisecond
 	tm.MaxTime = time.Duration(maxTimeMs) * time.Millisecond
+	tm.BaseOptTime = tm.OptTime
+	// In-search adjustments may grow the budget further when there is time
+	// to spare: a clock lead or a long clock.
+	tm.MinExtend, tm.MaxExtend = 0.35, 2.0
+	if (tm.ClockLead >= 1.5 || myTime >= longClockMs) && !tm.IsTimeTrouble {
+		tm.MaxExtend = 2.5
+	}
 
 	return tm
 }
@@ -244,9 +304,16 @@ func (tm *TimeManager) CheckLimits() bool {
 		return false
 	}
 
-	if tm.MaxTime > 0 && time.Since(tm.StartTime) >= tm.MaxTime {
-		tm.Stopped.Store(true)
-		return true
+	if tm.MaxTime > 0 {
+		elapsed := time.Since(tm.StartTime)
+		limit := tm.MaxTime
+		if !tm.IsMoveTime && tm.OptTime > 0 {
+			limit = min(limit, time.Duration(float64(tm.OptTime)*softStopFactor))
+		}
+		if elapsed >= limit {
+			tm.Stopped.Store(true)
+			return true
+		}
 	}
 
 	return false
@@ -314,7 +381,8 @@ func (tm *TimeManager) CanStartNewIteration(lastIterDuration time.Duration, isSt
 		if tm.IsTimeTrouble && projected > tm.OptTime {
 			return false
 		}
-		if projected > tm.MaxTime {
+		// Unsettled moves may run past OptTime, but only to halfway to MaxTime.
+		if projected > tm.OptTime+(tm.MaxTime-tm.OptTime)/2 {
 			return false
 		}
 	}
@@ -327,6 +395,11 @@ func (tm *TimeManager) AdjustOptTime(factor float64) {
 		return
 	}
 	newOptMs := int64(float64(tm.OptTime.Milliseconds()) * factor)
+	// Keep the cumulative effect of all adjustments within bounds of the
+	// original allocation.
+	if base := tm.BaseOptTime.Milliseconds(); base > 0 && tm.MaxExtend > 0 {
+		newOptMs = min(max(newOptMs, int64(float64(base)*tm.MinExtend)), int64(float64(base)*tm.MaxExtend))
+	}
 	if newOptMs < 10 {
 		newOptMs = 10
 	}

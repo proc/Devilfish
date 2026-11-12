@@ -127,9 +127,27 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
      "syzygy_path": "/path/to/syzygy",
      "syzygy_probe_depth": 1,
      "syzygy_50_move_rule": true,
-     "syzygy_probe_limit": 6
+     "syzygy_probe_limit": 6,
+     "own_book": true,
+     "book_file": "<embedded>"
    }
    ```
+   `book_file` selects the opening book:
+   - `"<embedded>"` (default): the built-in Polyglot book of mainline theory.
+   - `"<pohl>"`: the embedded **Pohl.epd** opening suite (223,081 positions after 8 moves). The engine steers each game toward a randomly chosen suite position that is still reachable, reconstructing a legal move order on the fly (preferring mainline move orders), and leaves the book once that position is reached or the opponent deviates from every suite line.
+   - A path to a Polyglot `.bin` file, or to any EPD suite (`.epd` / `.epd.gz`), which is used the same way as `<pohl>`.
+
+   The embedded suites are stored packed (`internal/book/*.epdb.gz`) and decoded only when selected. To embed another suite, pack it with `go run ./cmd/epdpack -in suite.epd -out internal/book/suite.epdb.gz` and register it in `internal/book/epdbook.go`.
+
+   Every UCI option can be set in `config.json`. The settings above cover the standard ones (`Hash`, `Threads`, `Ponder`, `UseNNUE`, `EvalFile`, the `Syzygy*` options, `LogFile`, `Move Overhead`, `MultiPV`, `OwnBook`, `BookFile`). The search tunables (`LMRBase`, `LMRDivisor`, `LMRHistDiv`, `RFPMargin`, `RFPNonImpr`, `RazorMargin`, `NMPEvalDiv`, `LMPMultImpr`, `LMPMultNonImp`, `FutMargin`, `HistPrImpr`, `HistPrNonImp`, `SEEQuietMul`, `SEENoisyMul`, `QSFutMargin`, `CheckExtSEE`, `QSChecks`, `RFPDepth`, `LMPDepth`, `FutDepth`, `HistDepth`, `SEEDepth`) go in a `search_params` object or directly at the top level, by their UCI name (case, spaces, `_` and `-` are ignored):
+   ```json
+   {
+     "hash": 256,
+     "search_params": { "RFPDepth": 6, "LMRBase": 45 },
+     "FutMargin": 100
+   }
+   ```
+   Values are clamped to each option's range (see the `uci` command's output), and a name that matches no option is reported on stderr and ignored. Tunables left out keep their built-in defaults; a GUI's `setoption` still overrides the file.
 2. **Command-Line Arguments** (override config file):
    - `-t`, `--threads <N>`: Set number of Lazy SMP search threads.
    - `-hash`, `--hash <MB>`: Set Transposition Table size in MB.
@@ -137,6 +155,7 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
    - `--eval-file <path>`: Specify external `.nnue` network file.
    - `--no-nnue`: Disable NNUE evaluation and use classical HCE.
    - `--syzygy-path <path>`: Specify directory containing Syzygy `.rtbw` and `.rtbz` files.
+   - `--book <path|<embedded>|<pohl>>`: Select the opening book; `--no-book` disables it.
 3. **Runtime UCI Options**:
    - `setoption name Threads value <N>`
    - `setoption name Hash value <MB>`
@@ -147,6 +166,8 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
    - `setoption name SyzygyProbeDepth value <depth>`
    - `setoption name Syzygy50MoveRule value <true|false>`
    - `setoption name SyzygyProbeLimit value <limit>`
+   - `setoption name OwnBook value <true|false>`
+   - `setoption name BookFile value <path|<embedded>|<pohl>>`
 
 #### Protocol Support & Robustness:
 - Standard UCI Commands: `uci`, `isready`, `ucinewgame`, `position`, `go`, `stop`, `ponderhit`, `quit`, `ping`.
@@ -154,7 +175,7 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
 - **Airtight Ping Timer Compliance**: Guaranteed immediate `readyok` and `bestmove` responses to satisfy GUI ping timeouts under all race conditions.
 - **UCI Pondering**: Full compliance with GUI `go ponder` instructions, cleanly waiting for `ponderhit` or `stop` without premature exits.
 - **Continuous Background Auto-Pondering**: When not explicitly commanded by a GUI, the engine calculates the predicted opponent continuation silently in the background, pre-warming the transposition table for instant tactical responses.
-- Diagnostic commands: `d` / `display`, `eval`, `perft <depth>`, `bench [depth] [threads]`.
+- Diagnostic commands: `d` / `display`, `eval`, `perft <depth>`, `bench [depth] [threads]`, `wac [ms]`, `testsuite <wac|file.epd> [ms]`.
 
 ### 9. Performance & Benchmarks
 
@@ -182,6 +203,35 @@ Nodes/sec  : 5342663
 ---
 
 ## Building & Running
+
+#### Tactical strength: Win At Chess (WAC)
+
+The 300-position **Win At Chess** suite (Fred Reinfeld, in the 2018 revision distributed with the Arasan engine, which fixes broken positions and lists alternative solutions) is embedded for measuring tactical strength:
+
+```bash
+./devilfish wac            # 1000 ms per position
+./devilfish wac 5000       # 5 s per position
+./devilfish testsuite my_suite.epd 2000   # any EPD suite with bm/am operations
+```
+
+The same commands work inside the UCI loop (`wac 1000`, `testsuite wac 1000`). Each position is searched from a cleared hash table with the opening book off, using the configured threads and hash. A position counts as solved when the final best move is one of its `bm` moves (and none of its `am` moves); the time shown is when the engine settled on the right move for good. The run ends with the score, nodes/sec and the ids of failed positions.
+
+```text
+Running test suite wac: 300 positions, 1000 ms each, 2 threads, 64 MB hash
+  1/300 WAC.001  ok   played Qg6     expected bm Qg6 (12 ms)
+  2/300 WAC.002  ok   played Rxb2    expected bm Rxb2 (791 ms)
+...
+===============================================
+Solved     : 284/300 (94.7%)
+Total time : 3m43.146s
+Nodes/sec  : 1055950
+Failed     : WAC.074 WAC.087 WAC.089 WAC.131 WAC.141 WAC.145 WAC.157 WAC.163 WAC.193 WAC.208 WAC.222 WAC.230 WAC.241 WAC.268 WAC.270 WAC.291
+===============================================
+```
+
+Compare scores at the same time per position, thread count and hardware; WAC is easy for modern engines, so the interesting signal is the last ~5% and the time to solution.
+
+Two experimental search options, both off by default, target WAC-style sacrifices: `setoption name CheckExtSEE value <n>` also extends checks that lose up to `n` centipawns of material (2000 extends every check), and `setoption name QSChecks value 1` tries quiet checks at the first quiescence ply. On a 1 s/position single-thread run neither changed the WAC score (279/300 with or without them), so confirm any change with engine-vs-engine games before enabling it.
 
 ### Requirements
 - Go 1.20+ (tested on Go 1.27)

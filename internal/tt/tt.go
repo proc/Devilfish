@@ -2,8 +2,10 @@ package tt
 
 import (
 	"math/bits"
+	"time"
 	"unsafe"
 
+	"devilfish/internal/hugemem"
 	"devilfish/internal/types"
 )
 
@@ -90,25 +92,32 @@ type TT struct {
 	entries []Entry
 	mask    uint64 // bucket index mask
 	age     uint8
+	mem     hugemem.Block // backing memory (huge pages where available)
 }
 
-func New(sizeMB int) *TT {
+// entryCount returns the power-of-two entry count for a table of sizeMB.
+func entryCount(sizeMB int) uint64 {
 	if sizeMB < 1 {
 		sizeMB = 1
 	}
-	bytes := uint64(sizeMB) * 1024 * 1024
-	entrySize := uint64(16) // 8 bytes Key + 8 bytes Data
-	numEntries := bytes / entrySize
+	numEntries := uint64(sizeMB) * 1024 * 1024 / 16 // 8 bytes Key + 8 bytes Data
 
 	// Round to nearest power of 2 (round up if within 25% of next power of 2)
 	pow2 := uint64(1) << (63 - bits.LeadingZeros64(numEntries))
 	if pow2*2 <= numEntries || float64(numEntries)/float64(pow2*2) >= 0.75 {
 		pow2 *= 2
 	}
+	return pow2
+}
+
+func New(sizeMB int) *TT {
+	pow2 := entryCount(sizeMB)
+	entries, mem := hugemem.Make[Entry](int(pow2))
 	return &TT{
-		entries: make([]Entry, pow2),
+		entries: entries,
 		mask:    pow2/bucketSize - 1,
 		age:     0,
+		mem:     mem,
 	}
 }
 
@@ -117,20 +126,14 @@ func (tt *TT) SizeMB() int {
 }
 
 func (tt *TT) Resize(sizeMB int) {
-	if sizeMB < 1 {
-		sizeMB = 1
-	}
-	bytes := uint64(sizeMB) * 1024 * 1024
-	entrySize := uint64(16)
-	numEntries := bytes / entrySize
-
-	pow2 := uint64(1) << (63 - bits.LeadingZeros64(numEntries))
-	if pow2*2 <= numEntries || float64(numEntries)/float64(pow2*2) >= 0.75 {
-		pow2 *= 2
-	}
-	tt.entries = make([]Entry, pow2)
+	pow2 := entryCount(sizeMB)
+	old := tt.mem
+	tt.entries, tt.mem = hugemem.Make[Entry](int(pow2))
 	tt.mask = pow2/bucketSize - 1
 	tt.age = 0
+	// A search thread may still be inside a probe of the old table (GUIs can
+	// change Hash while pondering), so release it only after a grace period.
+	time.AfterFunc(10*time.Second, old.Free)
 }
 
 func (tt *TT) Clear() {

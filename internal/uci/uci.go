@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -92,6 +93,7 @@ func New(in io.Reader, out io.Writer, cfg config.Config) *UCI {
 	} else {
 		eng.SetBook(book.DefaultBook())
 	}
+	applySearchParams(cfg.SearchParams)
 	return &UCI{
 		board:         b,
 		engine:        eng,
@@ -101,6 +103,34 @@ func New(in io.Reader, out io.Writer, cfg config.Config) *UCI {
 		bookFile:      bookFile,
 		in:            bufio.NewReader(in),
 		out:           out,
+	}
+}
+
+// applySearchParams sets search tunables from config.json. Names match the UCI
+// option names, ignoring case, spaces, underscores and hyphens; values are
+// clamped to the option's range. Unknown names are reported on stderr, which
+// GUIs do not read as UCI output.
+func applySearchParams(params map[string]int) {
+	names := make([]string, 0, len(params))
+	for name := range params {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		v := params[name]
+		found := false
+		for _, ps := range search.TunableParams() {
+			if config.NormalizeKey(ps.Name) == config.NormalizeKey(name) {
+				search.SetParam(ps.Name, int32(v))
+				logger.Infof("Config: %s=%d", ps.Name, *ps.Ptr)
+				found = true
+				break
+			}
+		}
+		if !found {
+			logger.Warnf("Config: unknown setting %q ignored", name)
+			fmt.Fprintf(os.Stderr, "Warning: config.json: unknown setting %q ignored\n", name)
+		}
 	}
 }
 
@@ -161,6 +191,10 @@ func (u *UCI) Loop() {
 			u.cmdDisplay()
 		case "bench":
 			u.cmdBench(parts[1:])
+		case "testsuite":
+			u.cmdTestSuite(parts[1:])
+		case "wac":
+			u.cmdTestSuite(append([]string{"wac"}, parts[1:]...))
 		default:
 			// Unknown command
 		}

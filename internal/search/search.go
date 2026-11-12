@@ -546,7 +546,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	if ttMove != types.MoveNone && ttMove != excludedMove && (ply > 0 || !w.isRootExcluded(ttMove)) && movegen.IsPseudoLegal(w.Board, ttMove) {
 		// Check extension (parent side): only for checks that don't lose
 		// material, and never stacked on top of a singular extension.
-		if extension == 0 && w.Board.GivesCheck(ttMove) && eval.SEE(w.Board, ttMove) >= 0 {
+		if extension == 0 && w.Board.GivesCheck(ttMove) && eval.SEE(w.Board, ttMove) >= -P.CheckExtSEE {
 			extension = 1
 		}
 		w.pushAccumulator(ply, ttMove)
@@ -811,7 +811,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			if !seeKnown {
 				moveSEE, seeKnown = eval.SEE(w.Board, m), true
 			}
-			if moveSEE >= 0 {
+			if moveSEE >= -P.CheckExtSEE {
 				moveExtension = 1
 			}
 		}
@@ -1066,6 +1066,13 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 }
 
 func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
+	return w.quiescence(alpha, beta, ply, 0)
+}
+
+// quiescence searches captures (and, at its first ply when P.QSChecks is set,
+// quiet checks that don't hang the checking piece). qply counts plies since
+// the main search handed over.
+func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 	if w.TimeMan.Stopped.Load() {
 		return 0
 	}
@@ -1132,7 +1139,8 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 	}
 
 	var ml movegen.MoveList
-	movegen.GenerateMoves(w.Board, !inCheck, &ml)
+	qsChecks := !inCheck && qply == 0 && P.QSChecks != 0
+	movegen.GenerateMoves(w.Board, !inCheck && !qsChecks, &ml)
 
 	var checkers bitboard.Bitboard
 	if inCheck {
@@ -1170,6 +1178,13 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 	for i := 0; i < ml.Count; i++ {
 		m := PickNextMove(&ml, scores[:ml.Count], i)
 
+		// Quiet moves are only generated for the first-ply checks.
+		if qsChecks && !m.IsCapture() && !m.IsPromotion() {
+			if !w.Board.GivesCheck(m) || eval.SEE(w.Board, m) < 0 {
+				continue
+			}
+		}
+
 		// Per-capture futility pruning: if even winning the captured piece
 		// plus a margin cannot lift the stand-pat score above alpha, the
 		// capture is futile (non-promotions that don't give check only).
@@ -1196,7 +1211,7 @@ func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
 		w.TT.Prefetch(w.Board.Hash)
 
 		legalMoves++
-		score := -w.Quiescence(-beta, -alpha, ply+1)
+		score := -w.quiescence(-beta, -alpha, ply+1, qply+1)
 		w.Board.UnmakeMove(m)
 
 		if w.TimeMan.Stopped.Load() {

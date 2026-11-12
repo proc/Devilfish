@@ -335,10 +335,15 @@ func (mp *MovePicker) Next() types.Move {
 					mp.quietScores[i] = histScore
 				}
 			}
+			// Sort once (stable, best first) rather than scanning the rest of
+			// the list for every move handed out.
+			sortQuiets(&mp.quiets, mp.quietScores[:mp.quiets.Count])
+			fallthrough
 
 		case StageQuiets:
+			mp.stage = StageQuiets
 			for mp.quietIndex < mp.quiets.Count {
-				m := PickNextMove(&mp.quiets, mp.quietScores[:mp.quiets.Count], mp.quietIndex)
+				m := mp.quiets.Moves[mp.quietIndex]
 				mp.quietIndex++
 
 				if m == mp.ttMove || m == mp.excludedMove || m == mp.killer1 || m == mp.killer2 || m == mp.counterMove {
@@ -374,5 +379,19 @@ func (mp *MovePicker) Next() types.Move {
 		case StageDone:
 			return types.MoveNone
 		}
+	}
+}
+
+// sortQuiets sorts moves by descending score with an insertion sort, which is
+// fast for the short lists move generation produces and keeps equal-scored
+// moves in generation order.
+func sortQuiets(ml *movegen.MoveList, scores []int32) {
+	for i := 1; i < len(scores); i++ {
+		m, sc := ml.Moves[i], scores[i]
+		j := i - 1
+		for ; j >= 0 && scores[j] < sc; j-- {
+			ml.Moves[j+1], scores[j+1] = ml.Moves[j], scores[j]
+		}
+		ml.Moves[j+1], scores[j+1] = m, sc
 	}
 }

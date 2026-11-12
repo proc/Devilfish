@@ -296,3 +296,51 @@ func TestDisableBookOptionsInConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestPohlBookInConfig(t *testing.T) {
+	for _, js := range []string{`{"book_file": "<pohl>"}`, `{"bookfile": "<pohl>"}`, `{"book": "<pohl>"}`} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(js), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.BookFile != "<pohl>" || !cfg.OwnBook {
+			t.Errorf("%s: got BookFile=%q OwnBook=%t", js, cfg.BookFile, cfg.OwnBook)
+		}
+	}
+}
+
+func TestSearchParamsInConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	js := `{
+		"threads": 2,
+		"move_overhead": 50,
+		"search_params": {"LMRBase": 45, "rfp_depth": 6},
+		"FutMargin": 100,
+		"QSChecks": true,
+		"NotAKnob": "text"
+	}`
+	if err := os.WriteFile(path, []byte(js), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{"LMRBase": 45, "rfp_depth": 6, "FutMargin": 100, "QSChecks": 1}
+	if len(cfg.SearchParams) != len(want) {
+		t.Fatalf("got %v, want %v", cfg.SearchParams, want)
+	}
+	for k, v := range want {
+		if cfg.SearchParams[k] != v {
+			t.Errorf("%s: got %d, want %d", k, cfg.SearchParams[k], v)
+		}
+	}
+	// Regular settings are still read as before and are not tunables.
+	if cfg.Threads != 2 || cfg.MoveOverhead != 50 {
+		t.Errorf("threads %d, move_overhead %d", cfg.Threads, cfg.MoveOverhead)
+	}
+}

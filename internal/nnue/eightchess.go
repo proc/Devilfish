@@ -11,6 +11,7 @@ import (
 
 	"devilfish/internal/bitboard"
 	"devilfish/internal/board"
+	"devilfish/internal/hugemem"
 	"devilfish/internal/types"
 )
 
@@ -272,14 +273,17 @@ func LoadEightBytes(data []byte) (*EightNetwork, error) {
 	net := &EightNetwork{}
 
 	// 1. FT Threat Weights: offset 0, size 68,468,736 (66864 * 1024 bytes)
-	net.FTThreatWeights = make([]int8, EightThreatFeatures*EightL1Size)
+	// The two feature-transformer tables (~83 MB) are read row by row at
+	// random, so they go on huge pages where the OS allows. They live as long
+	// as the process; loading another network does not release them.
+	net.FTThreatWeights, _ = hugemem.Make[int8](EightThreatFeatures * EightL1Size)
 	threatRaw := data[0 : EightThreatFeatures*EightL1Size]
 	for i, b := range threatRaw {
 		net.FTThreatWeights[i] = int8(b)
 	}
 
 	// 2. FT Piece Weights: offset 68,468,736, size 15,728,640 (7680 * 1024 int16s = 15,728,640 bytes)
-	net.FTPieceWeights = make([]int16, EightPieceFeatures*EightL1Size)
+	net.FTPieceWeights, _ = hugemem.Make[int16](EightPieceFeatures * EightL1Size)
 	pieceOffset := EightThreatFeatures * EightL1Size
 	pieceRaw := data[pieceOffset : pieceOffset+EightPieceFeatures*EightL1Size*2]
 	for i := 0; i < EightPieceFeatures*EightL1Size; i++ {

@@ -26,17 +26,17 @@ func searchFor(t *testing.T, fen string, depth int8) (types.Move, int32) {
 	return mv, score
 }
 
-// TestForcedMate verifies the engine finds a forced mate and reports a mate
-// score (>= MateThreshold). The position has a simple but non-trivial mating
-// combination (Rf8+ followed by Qf8#).
+// TestForcedMate verifies the engine finds a forced mate in 4 and reports a
+// mate score. Several first moves mate equally fast (Qf8+ and Qf7+ both do),
+// so the test checks the mate distance rather than one particular move.
 func TestForcedMate(t *testing.T) {
 	fen := "6k1/8/8/8/8/8/5Q2/5RK1 w - - 0 1"
 	mv, score := searchFor(t, fen, 10)
-	if mv.String() != "f2f8" {
-		t.Errorf("%s: expected forced-mate move f2f8, got %s", fen, mv)
-	}
 	if score < MateThreshold {
-		t.Errorf("%s: expected mate score >= %d, got %d", fen, MateThreshold, score)
+		t.Fatalf("%s: expected mate score >= %d, got %d (move %s)", fen, MateThreshold, score, mv)
+	}
+	if plies := MateScore - score; plies > 7 {
+		t.Errorf("%s: %s mates in %d plies, expected mate in 4 (7 plies)", fen, mv, plies)
 	}
 }
 

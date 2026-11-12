@@ -22,6 +22,8 @@ func printHelp() {
 	fmt.Println("Usage:")
 	fmt.Println("  devilfish [flags]           Start UCI loop (standard mode for GUIs like Arena, Cutechess, Banksia)")
 	fmt.Println("  devilfish bench [depth]     Run benchmark suite")
+	fmt.Println("  devilfish wac [ms]          Run the Win At Chess tactical suite (300 positions, default 1000 ms each)")
+	fmt.Println("  devilfish testsuite <wac|file.epd> [ms]  Run an EPD test suite with bm/am moves")
 	fmt.Println("  devilfish --version         Show version information")
 	fmt.Println("  devilfish --help            Show this help message")
 	fmt.Println("\nConfiguration Flags:")
@@ -32,7 +34,7 @@ func printHelp() {
 	fmt.Println("  --multipv <N>               Number of principal variations to calculate (default: 1)")
 	fmt.Println("  --eval-file <path>          Path to custom NNUE network file (default: embedded)")
 	fmt.Println("  --no-nnue                   Disable NNUE evaluation (use classical HCE)")
-	fmt.Println("  --book <path>               Path to Polyglot opening book (.bin) file (default: embedded)")
+	fmt.Println("  --book <path>               Opening book: Polyglot .bin, EPD suite (.epd/.epd.gz), <embedded> (default) or <pohl>")
 	fmt.Println("  --no-book                   Disable opening book")
 	fmt.Println("  --own-book <true|false>     Enable or disable opening book (default: true)")
 	fmt.Println("  --syzygy-path <path>        Path to directory containing Syzygy tablebase files (.rtbw / .rtbz)")
@@ -58,6 +60,7 @@ func main() {
 	var cliOwnBook *bool
 	var cliPonder *bool
 	var isBench bool
+	var suiteArgs []string // non-nil: run a test suite
 	var benchDepth int8 = 7
 
 	args := os.Args[1:]
@@ -72,6 +75,19 @@ func main() {
 		if arg == "-v" || arg == "--version" || arg == "version" {
 			fmt.Printf("%s %s by %s\n", uci.EngineName, uci.EngineVersion, uci.EngineAuthor)
 			return
+		}
+
+		if arg == "wac" || arg == "testsuite" {
+			suiteArgs = []string{}
+			if arg == "wac" {
+				suiteArgs = append(suiteArgs, "wac")
+			}
+			// Operands: a suite name/path and/or a movetime in ms.
+			for i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				suiteArgs = append(suiteArgs, args[i+1])
+				i++
+			}
+			continue
 		}
 
 		if arg == "bench" {
@@ -394,6 +410,14 @@ func main() {
 	if isBench {
 		u := uci.New(os.Stdin, os.Stdout, cfg)
 		u.Bench(benchDepth)
+		return
+	}
+	if suiteArgs != nil {
+		u := uci.New(os.Stdin, os.Stdout, cfg)
+		res := u.RunTestSuite(suiteArgs)
+		if res.Total == 0 {
+			os.Exit(1)
+		}
 		return
 	}
 	go func() {

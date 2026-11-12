@@ -23,6 +23,8 @@ type Params struct {
 	SEEQuietMul   int32 // SEE pruning margin per ply, quiet moves
 	SEENoisyMul   int32 // SEE pruning margin per ply, captures
 	QSFutMargin   int32 // quiescence per-capture futility margin
+	CheckExtSEE   int32 // extend checks whose SEE is at least -CheckExtSEE (0: only non-losing checks)
+	QSChecks      int32 // 1: try quiet checks (SEE >= 0) at the first quiescence ply
 
 	// Depth limits of the pruning rules. Futility, history and quiet SEE
 	// pruning compare against the move's reduced depth (depth minus its
@@ -51,6 +53,8 @@ var P = Params{
 	SEEQuietMul:   60,
 	SEENoisyMul:   200,
 	QSFutMargin:   175,
+	CheckExtSEE:   0,
+	QSChecks:      0,
 	RFPDepth:      8,
 	LMPDepth:      8,
 	FutDepth:      8,
@@ -83,6 +87,8 @@ func TunableParams() []ParamSpec {
 		{"SEEQuietMul", &P.SEEQuietMul, 10, 200},
 		{"SEENoisyMul", &P.SEENoisyMul, 50, 500},
 		{"QSFutMargin", &P.QSFutMargin, 0, 600},
+		{"CheckExtSEE", &P.CheckExtSEE, 0, 2000},
+		{"QSChecks", &P.QSChecks, 0, 1},
 		{"RFPDepth", &P.RFPDepth, 1, 14},
 		{"LMPDepth", &P.LMPDepth, 1, 14},
 		{"FutDepth", &P.FutDepth, 1, 14},

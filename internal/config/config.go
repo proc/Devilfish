@@ -24,6 +24,45 @@ type Config struct {
 	MultiPV          int    `json:"multipv"`
 	OwnBook          bool   `json:"own_book"`
 	BookFile         string `json:"book_file"`
+
+	// SearchParams sets the search tunables (the UCI spin options such as
+	// LMRBase or RFPDepth), by option name. They come from a "search_params"
+	// object or from top-level keys that are not one of the settings above;
+	// names are checked when they are applied (uci.New), not here.
+	SearchParams map[string]int `json:"search_params,omitempty"`
+}
+
+// knownKeys are the normalized top-level keys Load handles itself; any other
+// top-level key with a numeric or boolean value is taken as a search tunable.
+var knownKeys = map[string]bool{
+	"threads": true, "hash": true, "ponder": true, "autoponder": true, "usennue": true, "evalfile": true,
+	"syzygypath": true, "syzygy": true, "tbpath": true, "tablebases": true, "tablebasepath": true,
+	"syzygyprobedepth": true, "syzygy50moverule": true, "syzygyprobelimit": true,
+	"logfile": true, "log": true, "logpath": true, "logfilepath": true, "logfilelocation": true,
+	"moveoverhead": true, "overhead": true, "multipv": true,
+	"ownbook": true, "usebook": true, "openingbook": true, "book": true, "bookfile": true, "bookpath": true,
+	"searchparams": true,
+}
+
+// NormalizeKey lowercases a setting or option name and drops spaces,
+// underscores and hyphens, so "Move Overhead", "move_overhead" and
+// "moveOverhead" all compare equal.
+func NormalizeKey(k string) string {
+	return strings.ToLower(strings.NewReplacer(" ", "", "_", "", "-", "").Replace(k))
+}
+
+// paramValue converts a JSON value to a tunable's integer value.
+func paramValue(v interface{}) (int, bool) {
+	switch x := v.(type) {
+	case float64:
+		return int(x), true
+	case bool:
+		if x {
+			return 1, true
+		}
+		return 0, true
+	}
+	return 0, false
 }
 
 func DefaultConfig() Config {
@@ -191,7 +230,27 @@ func Load(path string) (Config, error) {
 	if err := json.Unmarshal(data, &genericMap); err == nil {
 		for k, v := range genericMap {
 			normKey := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(k, "_", ""), "-", ""))
+			if !knownKeys[NormalizeKey(k)] {
+				if n, ok := paramValue(v); ok {
+					if cfg.SearchParams == nil {
+						cfg.SearchParams = map[string]int{}
+					}
+					cfg.SearchParams[k] = n
+				}
+				continue
+			}
 			switch normKey {
+			case "searchparams":
+				if obj, ok := v.(map[string]interface{}); ok {
+					for name, pv := range obj {
+						if n, ok := paramValue(pv); ok {
+							if cfg.SearchParams == nil {
+								cfg.SearchParams = map[string]int{}
+							}
+							cfg.SearchParams[name] = n
+						}
+					}
+				}
 			case "syzygypath", "syzygy", "tbpath", "tablebases", "tablebasepath":
 				if cfg.SyzygyPath == "" {
 					cfg.SyzygyPath = parseSyzygyPath(v)
