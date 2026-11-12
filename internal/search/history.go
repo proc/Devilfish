@@ -54,10 +54,7 @@ func (h *SearchHistory) UpdateHistory(side types.Color, m types.Move, depth int8
 	if m.IsCapture() {
 		return
 	}
-	bonus := int32(depth) * int32(depth)
-	if bonus > 16384 {
-		bonus = 16384
-	}
+	bonus := quietStatBonus(depth)
 	from := m.From()
 	to := m.To()
 
@@ -69,10 +66,7 @@ func (h *SearchHistory) PenalizeHistory(side types.Color, m types.Move, depth in
 	if m.IsCapture() {
 		return
 	}
-	penalty := int32(depth) * int32(depth)
-	if penalty > 16384 {
-		penalty = 16384
-	}
+	penalty := quietStatBonus(depth)
 	from := m.From()
 	to := m.To()
 
@@ -84,10 +78,7 @@ func (h *SearchHistory) UpdateContHistory(prevMove, m types.Move, depth int8) {
 	if prevMove == types.MoveNone || m.IsCapture() || m.IsPromotion() {
 		return
 	}
-	bonus := int32(depth) * int32(depth)
-	if bonus > 16384 {
-		bonus = 16384
-	}
+	bonus := quietStatBonus(depth)
 	pTo := prevMove.To()
 	to := m.To()
 	if pTo < 64 && to < 64 {
@@ -100,10 +91,7 @@ func (h *SearchHistory) PenalizeContHistory(prevMove, m types.Move, depth int8) 
 	if prevMove == types.MoveNone || m.IsCapture() || m.IsPromotion() {
 		return
 	}
-	penalty := int32(depth) * int32(depth)
-	if penalty > 16384 {
-		penalty = 16384
-	}
+	penalty := quietStatBonus(depth)
 	pTo := prevMove.To()
 	to := m.To()
 	if pTo < 64 && to < 64 {
@@ -116,10 +104,7 @@ func (h *SearchHistory) UpdateContHistory2(prevMove2, m types.Move, depth int8) 
 	if prevMove2 == types.MoveNone || m.IsCapture() || m.IsPromotion() {
 		return
 	}
-	bonus := int32(depth) * int32(depth)
-	if bonus > 16384 {
-		bonus = 16384
-	}
+	bonus := quietStatBonus(depth)
 	pTo := prevMove2.To()
 	to := m.To()
 	if pTo < 64 && to < 64 {
@@ -132,10 +117,7 @@ func (h *SearchHistory) PenalizeContHistory2(prevMove2, m types.Move, depth int8
 	if prevMove2 == types.MoveNone || m.IsCapture() || m.IsPromotion() {
 		return
 	}
-	penalty := int32(depth) * int32(depth)
-	if penalty > 16384 {
-		penalty = 16384
-	}
+	penalty := quietStatBonus(depth)
 	pTo := prevMove2.To()
 	to := m.To()
 	if pTo < 64 && to < 64 {
@@ -172,10 +154,7 @@ func (h *SearchHistory) UpdateContHistory4(prevMove4, m types.Move, depth int8) 
 	if prevMove4 == types.MoveNone || m.IsCapture() || m.IsPromotion() {
 		return
 	}
-	bonus := int32(depth) * int32(depth)
-	if bonus > 16384 {
-		bonus = 16384
-	}
+	bonus := quietStatBonus(depth)
 	pTo := prevMove4.To()
 	to := m.To()
 	if pTo < 64 && to < 64 {
@@ -188,10 +167,7 @@ func (h *SearchHistory) PenalizeContHistory4(prevMove4, m types.Move, depth int8
 	if prevMove4 == types.MoveNone || m.IsCapture() || m.IsPromotion() {
 		return
 	}
-	penalty := int32(depth) * int32(depth)
-	if penalty > 16384 {
-		penalty = 16384
-	}
+	penalty := quietStatBonus(depth)
 	pTo := prevMove4.To()
 	to := m.To()
 	if pTo < 64 && to < 64 {
@@ -320,4 +296,15 @@ func (h *SearchHistory) UpdateCounterMove(prevMove, m types.Move) {
 	if prevMove != types.MoveNone && !m.IsCapture() && !m.IsCastle() {
 		h.CounterMoves[prevMove.From()][prevMove.To()] = m
 	}
+}
+
+// quietStatBonus is the update size for the quiet-move history tables. The
+// gravity update (h += b - h*b/16384) saturates at +-16384, and history
+// pruning, LMR and move ordering all read these tables on that scale, so the
+// bonus has to be large enough to move values across it within a few
+// updates. (It used to be depth^2: at most ~100, which left real history
+// scores in the hundreds, so history pruning almost never fired and the
+// history term in LMR almost never changed a reduction.)
+func quietStatBonus(depth int8) int32 {
+	return min(max(160*int32(depth)-80, 16), 1600)
 }
