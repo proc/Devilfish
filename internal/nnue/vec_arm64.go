@@ -60,7 +60,19 @@ func l2Layer(w *[EightL2Size][EightL3Size]float32, bias *[EightL3Size]float32, x
 	l2LayerNEON(w, bias, x, out)
 }
 
-// eightL1Layer is the first dense layer (see eightL1).
+//go:noescape
+func l1SparseIdxNEON(idx *uint16, n int, ft *[EightL1Size]uint8, wt *[EightL1Size][EightL2Size]int8, out *[EightL2Size]int32)
+
+// eightL1Layer is the first dense layer. It computes what eightL1 computes,
+// but finds the non-zero inputs without branches (l1NonzeroIdx): the scan in
+// l1NonzeroNEON walks the set bits of each block in a loop whose length
+// depends on the data, and mispredicted on most blocks.
 func eightL1Layer(ft *[EightL1Size]uint8, wFile *[EightL2Size * EightL1Size]int8, wByInput *[EightL1Size][EightL2Size]int8, pre *[EightL2Size]int32) {
-	eightL1(ft, wByInput, pre)
+	var idx [EightL1Size + 8]uint16
+	n := l1NonzeroIdx(ft, &idx)
+	var out [EightL2Size]int32
+	l1SparseIdxNEON(&idx[0], n, ft, wByInput, &out)
+	for j := range out {
+		pre[j] += out[j]
+	}
 }

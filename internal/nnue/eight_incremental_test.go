@@ -202,6 +202,20 @@ func BenchmarkEightL1Ref(b *testing.B) {
 	}
 }
 
+func BenchmarkEightL1Layer(b *testing.B) {
+	net := ActiveEightNetwork
+	if net == nil {
+		b.Skip("8Chess network not embedded")
+	}
+	ins, buckets := eightTestInputs(b)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var out [EightL2Size]int32
+		k := i % len(ins)
+		eightL1Layer(&ins[k], &net.L1Weights[buckets[k]], &net.L1WeightsByInput[buckets[k]], &out)
+	}
+}
+
 func BenchmarkEightL1(b *testing.B) {
 	net := ActiveEightNetwork
 	if net == nil {

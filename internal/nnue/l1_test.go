@@ -50,5 +50,11 @@ func TestEightL1SparseMatchesDense(t *testing.T) {
 		if got != want {
 			t.Fatalf("trial %d (density %.3f): got %v want %v", trial, density, got, want)
 		}
+		// The layer as this architecture runs it.
+		var layer [EightL2Size]int32
+		eightL1Layer(&ft, &flat, &wt, &layer)
+		if layer != want {
+			t.Fatalf("trial %d (density %.3f): eightL1Layer got %v want %v", trial, density, layer, want)
+		}
 	}
 }
