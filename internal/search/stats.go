@@ -35,6 +35,13 @@ type SearchStats struct {
 	LMRSearches   uint64 // moves searched at reduced depth
 	LMRPlies      uint64 // total plies of reduction
 	LMRReSearches uint64 // reduced searches that beat alpha and were repeated
+	LMREligible   uint64 // late moves at depth >= 3, not in check: candidates for reduction
+	LMRTableZero  uint64 // of those, the table itself gave no reduction
+	LMRNoCheck    uint64 // not reduced because the move gives check
+	LMRNoThreat   uint64 // not reduced: makes or escapes a threat
+	LMRNoPawn     uint64 // not reduced: advanced pawn push
+	LMRNoCapture  uint64 // not reduced: capture or promotion
+	LMRNoAdjust   uint64 // reduction cancelled by the history/killer/improving adjustments
 	PVSReSearches uint64 // null-window searches repeated with the full window
 
 	NodesWithMoves uint64 // nodes that searched at least one move
@@ -81,6 +88,13 @@ func (s *SearchStats) Add(o *SearchStats) {
 	s.LMRSearches += o.LMRSearches
 	s.LMRPlies += o.LMRPlies
 	s.LMRReSearches += o.LMRReSearches
+	s.LMREligible += o.LMREligible
+	s.LMRTableZero += o.LMRTableZero
+	s.LMRNoCheck += o.LMRNoCheck
+	s.LMRNoThreat += o.LMRNoThreat
+	s.LMRNoPawn += o.LMRNoPawn
+	s.LMRNoCapture += o.LMRNoCapture
+	s.LMRNoAdjust += o.LMRNoAdjust
 	s.PVSReSearches += o.PVSReSearches
 	s.NodesWithMoves += o.NodesWithMoves
 	s.BetaCuts += o.BetaCuts

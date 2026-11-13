@@ -413,6 +413,18 @@ func (u *UCI) benchStats(depth int8) {
 	mrow("searched", st.MovesSearched, "")
 	mrow("  at reduced depth", st.LMRSearches, fmt.Sprintf("%.2f plies on average; %.1f%% had to be searched again", float64(st.LMRPlies)/float64(max(st.LMRSearches, 1)), pct(st.LMRReSearches, st.LMRSearches)))
 	line("")
+	line("Late-move reductions                 count   %% of candidates (late moves at depth >= 3, not in check)")
+	lrow := func(name string, n uint64) {
+		line("  %-24s %12d  %5.1f%%", name, n, pct(n, st.LMREligible))
+	}
+	lrow("reduced", st.LMRSearches)
+	lrow("table gives 0", st.LMRTableZero)
+	lrow("gives check", st.LMRNoCheck)
+	lrow("capture or promotion", st.LMRNoCapture)
+	lrow("makes/escapes a threat", st.LMRNoThreat)
+	lrow("advanced pawn push", st.LMRNoPawn)
+	lrow("cancelled by adjustments", st.LMRNoAdjust)
+	line("")
 	line("Quiescence")
 	line("  stand-pat cutoffs    %11.1f%%  of quiescence nodes", pct(st.QStandPatCuts, st.QNodes))
 	qc := st.QMoves + st.QFutPruned + st.QSEEPruned

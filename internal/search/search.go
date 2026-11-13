@@ -241,7 +241,7 @@ func (w *SearchWorker) pushAccumulator(ply int, m types.Move) {
 	}
 }
 
-func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode bool, canMultiCut bool, excludedMove types.Move, prevMove types.Move, prevMove2 types.Move, prevMove4 types.Move) int32 {
+func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode bool, excludedMove types.Move, prevMove types.Move, prevMove2 types.Move, prevMove4 types.Move) int32 {
 	if w.TimeMan.Stopped.Load() {
 		return 0
 	}
@@ -446,10 +446,19 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	ourRooks := w.Board.PieceBB[types.MakePiece(us, types.Rook)]
 	ourMinors := w.Board.PieceBB[types.MakePiece(us, types.Knight)] | w.Board.PieceBB[types.MakePiece(us, types.Bishop)]
 
+	// Guards on reverse futility and null-move pruning (see Params.RFPGuard):
+	// a static evaluation says nothing about a mating attack in progress, and
+	// little about a piece that is about to be captured.
+	kingGuard := kingInDanger || prevIsKingThreat
+	rfpAllowed := P.RFPGuard == 0 ||
+		(P.RFPGuard == 2 && !kingGuard) ||
+		(P.RFPGuard == 1 && !kingGuard && (threatenedPieces&(ourQueens|ourRooks|ourMinors)) == 0)
+	nmpAllowed := P.NMPGuard == 0 ||
+		(P.NMPGuard == 2 && !kingGuard) ||
+		(P.NMPGuard == 1 && !kingGuard && (threatenedPieces&ourQueens) == 0)
+
 	// 4. Reverse Futility Pruning (Static Null Move Pruning)
-	// Never RFP if high-value pieces (Queen, Rook, Minor) are under tactical threat,
-	// because opponent capture would immediately wipe out the static advantage.
-	if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && (P.RFPGuard == 0 || (!kingInDanger && !prevIsKingThreat && (threatenedPieces&(ourQueens|ourRooks|ourMinors)) == 0)) && int32(depth) <= P.RFPDepth && abs(beta) < MateThreshold && hasNonPawns {
+	if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && rfpAllowed && int32(depth) <= P.RFPDepth && abs(beta) < MateThreshold && hasNonPawns {
 		margin := int32(depth) * P.RFPMargin
 		if !improving {
 			margin += int32(depth) * P.RFPNonImpr
@@ -489,7 +498,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	// Never pass if our Queen is under direct tactical threat, and never twice in a row
 	// (prevMove is MoveNone below the root only directly after a null move).
 	pieceCount := bitboard.Count(w.Board.Occupied())
-	if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && prevMove != types.MoveNone && (P.NMPGuard == 0 || (!kingInDanger && !prevIsKingThreat && (threatenedPieces&ourQueens) == 0)) && depth >= 3 && staticEval >= beta && hasNonPawns && pieceCount > 6 {
+	if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && prevMove != types.MoveNone && nmpAllowed && depth >= 3 && staticEval >= beta && hasNonPawns && pieceCount > 6 {
 		st.NMPTries++
 		r := int8(3 + depth/4)
 		if !improving {
@@ -506,7 +515,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			w.Accumulators[ply+1] = w.Accumulators[ply]
 		}
 		w.Board.MakeNullMove()
-		nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+		nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
 		w.Board.UnmakeNullMove()
 
 		if w.TimeMan.Stopped.Load() {
@@ -544,7 +553,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 
 		st.SETries++
-		sScore := w.Search(sDepth, singularBeta-1, singularBeta, ply, false, false, ttMove, prevMove, prevMove2, prevMove4)
+		sScore := w.Search(sDepth, singularBeta-1, singularBeta, ply, false, ttMove, prevMove, prevMove2, prevMove4)
 
 		if w.TimeMan.Stopped.Load() {
 			return 0
@@ -561,6 +570,59 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			extension = 1
 			if !isPVNode && sScore < singularBeta-25 {
 				extension = 2
+			}
+		}
+	}
+
+	// 7. ProbCut: if a good capture, searched to reduced depth, already beats
+	// beta by a margin, a full-depth search of this node would almost
+	// certainly fail high too. Tried before the hash move's full-depth
+	// search, so that a cutoff saves it. Skipped when the hash table already
+	// says the position is unlikely to reach the raised bound.
+	if P.ProbCut != 0 && ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && depth >= 5 && abs(beta) < MateThreshold {
+		probBeta := beta + P.ProbCutMargin
+		if !(ttFound && ttDepth >= depth-3 && ttScore < probBeta) {
+			probDepth := depth - 4
+
+			var probList movegen.MoveList
+			movegen.GenerateMoves(w.Board, true, &probList)
+
+			var probScores [256]int32
+			ScoreMoves(w.Board, &probList, probScores[:probList.Count], ttMove, ply, prevMove, prevMove2, prevMove4, w.History)
+
+			probTried := false
+			for i := 0; i < probList.Count; i++ {
+				m := PickNextMove(&probList, probScores[:probList.Count], i)
+				// Only captures that can plausibly lift the score to probBeta
+				if eval.SEE(w.Board, m) < probBeta-staticEval {
+					continue
+				}
+				w.pushAccumulator(ply, m)
+				if !w.Board.MakeMove(m) {
+					continue
+				}
+				w.TT.Prefetch(w.Board.Hash)
+				if !probTried {
+					probTried = true
+					st.ProbTries++
+				}
+
+				// A quiescence search first: most candidates fail here, cheaply.
+				probScore := -w.Quiescence(-probBeta, -probBeta+1, ply+1)
+				if probScore >= probBeta && probDepth > 0 {
+					probScore = -w.Search(probDepth, -probBeta, -probBeta+1, ply+1, false, types.MoveNone, m, prevMove, prevMove2)
+				}
+				w.Board.UnmakeMove(m)
+
+				if w.TimeMan.Stopped.Load() {
+					return 0
+				}
+
+				if probScore >= probBeta {
+					st.ProbCuts++
+					w.TT.StoreEval(w.Board.Hash, m, tt.ScoreToTT(probScore, ply), netEval, depth-3, tt.LowerBound)
+					return beta
+				}
 			}
 		}
 	}
@@ -596,7 +658,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				startNodes = w.LocalNodes
 			}
 
-			score := -w.Search(depth-1+extension, -beta, -alpha, ply+1, isPVNode, true, types.MoveNone, ttMove, prevMove, prevMove2)
+			score := -w.Search(depth-1+extension, -beta, -alpha, ply+1, isPVNode, types.MoveNone, ttMove, prevMove, prevMove2)
 			w.Board.UnmakeMove(ttMove)
 			movesSearched++
 
@@ -658,55 +720,6 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				w.PVArray[ply][0] = ttMove
 				copy(w.PVArray[ply][1:1+w.PVLength[ply+1]], w.PVArray[ply+1][:w.PVLength[ply+1]])
 				w.PVLength[ply] = 1 + w.PVLength[ply+1]
-			}
-		}
-	}
-
-	// 7. ProbCut (Probability Cut)
-	// If a shallow capture search with elevated beta fails high, the node is almost certainly a CUT node.
-	if ply > 0 && canMultiCut && !isPVNode && !inCheck && depth >= 5 && abs(beta) < MateThreshold && staticEval >= beta+150 {
-		probBeta := beta + 200
-		probDepth := depth - 3
-		if probDepth < 1 {
-			probDepth = 1
-		}
-
-		var probList movegen.MoveList
-		movegen.GenerateMoves(w.Board, true, &probList)
-
-		probTried := false
-		var probScores [256]int32
-		ScoreMoves(w.Board, &probList, probScores[:probList.Count], ttMove, ply, prevMove, prevMove2, prevMove4, w.History)
-
-		for i := 0; i < probList.Count; i++ {
-			m := PickNextMove(&probList, probScores[:probList.Count], i)
-			if m == ttMove || m == excludedMove {
-				continue
-			}
-			// Skip captures that can't plausibly reach probBeta
-			if eval.SEE(w.Board, m) < probBeta-staticEval {
-				continue
-			}
-			w.pushAccumulator(ply, m)
-			if !w.Board.MakeMove(m) {
-				continue
-			}
-
-			if !probTried {
-				probTried = true
-				st.ProbTries++
-			}
-			probScore := -w.Search(probDepth, -probBeta, -probBeta+1, ply+1, false, false, types.MoveNone, m, prevMove, prevMove2)
-			w.Board.UnmakeMove(m)
-
-			if w.TimeMan.Stopped.Load() {
-				return 0
-			}
-
-			if probScore >= probBeta {
-				st.ProbCuts++
-				w.TT.StoreEval(w.Board.Hash, m, tt.ScoreToTT(beta, ply), netEval, probDepth, tt.LowerBound)
-				return beta
 			}
 		}
 	}
@@ -873,7 +886,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		// Principal Variation Search & LMR
 		if movesSearched == 0 {
 			// First move: full window (extended if 7th rank pawn push)
-			score = -w.Search(depth-1+moveExtension, -beta, -alpha, ply+1, isPVNode, true, types.MoveNone, m, prevMove, prevMove2)
+			score = -w.Search(depth-1+moveExtension, -beta, -alpha, ply+1, isPVNode, types.MoveNone, m, prevMove, prevMove2)
 		} else {
 			// Late Move Reductions (LMR)
 			if depth >= 3 && movesSearched >= 2 && !inCheck {
@@ -985,6 +998,24 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				if reduction > depth-2 {
 					reduction = depth - 2
 				}
+
+				st.LMREligible++
+				if reduction == 0 {
+					switch {
+					case LMRTable[dIdx][mIdx] == 0:
+						st.LMRTableZero++
+					case givesCheck && P.LMRChecks == 0:
+						st.LMRNoCheck++
+					case !isQuiet:
+						st.LMRNoCapture++
+					case isThreatEvasion || isThreatMove:
+						st.LMRNoThreat++
+					case isAdvancedPawnPush || is7thRankPawnPush:
+						st.LMRNoPawn++
+					default:
+						st.LMRNoAdjust++
+					}
+				}
 			}
 
 			// Null-window search with reduction
@@ -992,18 +1023,18 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				st.LMRSearches++
 				st.LMRPlies += uint64(reduction)
 			}
-			score = -w.Search(depth-1+moveExtension-reduction, -alpha-1, -alpha, ply+1, false, false, types.MoveNone, m, prevMove, prevMove2)
+			score = -w.Search(depth-1+moveExtension-reduction, -alpha-1, -alpha, ply+1, false, types.MoveNone, m, prevMove, prevMove2)
 
 			// If reduced search fails high, re-search at full depth with null window
 			if reduction > 0 && score > alpha && !w.TimeMan.Stopped.Load() {
 				st.LMRReSearches++
-				score = -w.Search(depth-1+moveExtension, -alpha-1, -alpha, ply+1, false, true, types.MoveNone, m, prevMove, prevMove2)
+				score = -w.Search(depth-1+moveExtension, -alpha-1, -alpha, ply+1, false, types.MoveNone, m, prevMove, prevMove2)
 			}
 
 			// If null-window fails high and in PV node, re-search with full PV window
 			if isPVNode && score > alpha && !w.TimeMan.Stopped.Load() {
 				st.PVSReSearches++
-				score = -w.Search(depth-1+moveExtension, -beta, -alpha, ply+1, true, true, types.MoveNone, m, prevMove, prevMove2)
+				score = -w.Search(depth-1+moveExtension, -beta, -alpha, ply+1, true, types.MoveNone, m, prevMove, prevMove2)
 			}
 		}
 

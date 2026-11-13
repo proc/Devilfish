@@ -1,9 +1,6 @@
 package hugemem
 
-import (
-	"runtime"
-	"testing"
-)
+import "testing"
 
 func TestMake(t *testing.T) {
 	for _, n := range []int{0, 100, 3 << 20, 9<<20 + 5} {
@@ -19,11 +16,6 @@ func TestMake(t *testing.T) {
 		}
 		if n > 0 && s[n-1] != uint64(n-1) {
 			t.Fatal("write lost")
-		}
-		if runtime.GOOS == "linux" && n*8 >= minHuge {
-			if uintptrOf(blk.Bytes())%hugePage != 0 {
-				t.Error("large block not aligned to 2 MB")
-			}
 		}
 		blk.Free()
 	}

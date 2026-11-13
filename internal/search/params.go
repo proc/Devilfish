@@ -36,10 +36,13 @@ type Params struct {
 	SEEDepth  int32 // SEE pruning
 
 	// Switches for rules that hold the pruning back.
-	RFPGuard  int32 // 1: no reverse futility pruning with a piece under threat or the king under pressure
-	NMPGuard  int32 // 1: no null move with the queen under threat or the king under pressure
+	RFPGuard  int32 // no reverse futility pruning: 2 with the king under pressure, 1 also with a piece under threat, 0 no guard
+	NMPGuard  int32 // no null move: 2 with the king under pressure, 1 also with the queen under threat, 0 no guard
 	CheckExt  int32 // check extension: 2 at every node, 1 at PV nodes only, 0 never
 	LMRChecks int32 // 1: moves that give check take late-move reductions (one ply less)
+
+	ProbCut       int32 // 1: ProbCut before the hash move, at every non-PV node of depth >= 5; 0: off (no gain measured in self-play)
+	ProbCutMargin int32 // ProbCut searches against beta plus this
 }
 
 // P is the live parameter set used by Search.
@@ -66,10 +69,20 @@ var P = Params{
 	FutDepth:      8,
 	HistDepth:     6,
 	SEEDepth:      8,
-	RFPGuard:      1,
-	NMPGuard:      1,
-	CheckExt:      2,
-	LMRChecks:     0,
+	// Reverse futility pruning unguarded; null move guarded only by king
+	// safety. With both guards at 1 the tree was three times the size. With
+	// both at 0 it is no smaller than this, but a quiet mating threat behind
+	// a sacrifice (WAC 55, mate in 4) goes unseen until depth 16: the null
+	// move hands the attacker the extra tempo the mate needs.
+	RFPGuard: 0,
+	NMPGuard: 2,
+	// Every check extended and never reduced. Extending at PV nodes only and
+	// reducing checks also won in self-play, but misses more tactics.
+	CheckExt:  2,
+	LMRChecks: 0,
+
+	ProbCut:       0,
+	ProbCutMargin: 200,
 }
 
 // ParamSpec describes one tunable for UCI option listing and the tuner.
@@ -104,10 +117,12 @@ func TunableParams() []ParamSpec {
 		{"FutDepth", &P.FutDepth, 1, 14},
 		{"HistDepth", &P.HistDepth, 1, 14},
 		{"SEEDepth", &P.SEEDepth, 1, 14},
-		{"RFPGuard", &P.RFPGuard, 0, 1},
-		{"NMPGuard", &P.NMPGuard, 0, 1},
+		{"RFPGuard", &P.RFPGuard, 0, 2},
+		{"NMPGuard", &P.NMPGuard, 0, 2},
 		{"CheckExt", &P.CheckExt, 0, 2},
 		{"LMRChecks", &P.LMRChecks, 0, 1},
+		{"ProbCut", &P.ProbCut, 0, 1},
+		{"ProbCutMargin", &P.ProbCutMargin, 50, 500},
 	}
 }
 
