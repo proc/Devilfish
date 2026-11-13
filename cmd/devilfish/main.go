@@ -21,7 +21,9 @@ func printHelp() {
 	fmt.Printf("%s - A Modern, High-Performance Chess Engine in Go\n\n", uci.EngineName)
 	fmt.Println("Usage:")
 	fmt.Println("  devilfish [flags]           Start UCI loop (standard mode for GUIs like Arena, Cutechess, Banksia)")
-	fmt.Println("  devilfish bench [depth]     Run benchmark suite")
+	for _, l := range uci.BenchUsage {
+		fmt.Println("  devilfish " + l)
+	}
 	fmt.Println("  devilfish wac [ms]          Run the Win At Chess tactical suite (300 positions, default 1000 ms each)")
 	fmt.Println("  devilfish testsuite <wac|file.epd> [ms]  Run an EPD test suite with bm/am moves")
 	fmt.Println("  devilfish --version         Show version information")
@@ -59,9 +61,8 @@ func main() {
 	var cliNoBook bool
 	var cliOwnBook *bool
 	var cliPonder *bool
-	var isBench bool
+	var benchArgs []string // non-nil: run a benchmark
 	var suiteArgs []string // non-nil: run a test suite
-	var benchDepth int8 = 7
 
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
@@ -91,13 +92,11 @@ func main() {
 		}
 
 		if arg == "bench" {
-			isBench = true
-			if i+1 < len(args) {
-				d, err := strconv.Atoi(args[i+1])
-				if err == nil && d > 0 {
-					benchDepth = int8(d)
-					i++
-				}
+			// Operands: a mode and/or its numbers (see uci.BenchUsage).
+			benchArgs = []string{}
+			for i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				benchArgs = append(benchArgs, args[i+1])
+				i++
 			}
 			continue
 		}
@@ -407,9 +406,9 @@ func main() {
 		statusStr, netInfo.FilePath, netInfo.Architecture, netInfo.SIMD, netInfo.NumParameters, float64(netInfo.SizeBytes)/1024.0)
 
 	// 5. Run benchmark or UCI loop
-	if isBench {
+	if benchArgs != nil {
 		u := uci.New(os.Stdin, os.Stdout, cfg)
-		u.Bench(benchDepth)
+		u.RunBench(benchArgs)
 		return
 	}
 	if suiteArgs != nil {

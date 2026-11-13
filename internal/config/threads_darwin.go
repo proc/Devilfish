@@ -6,10 +6,9 @@ import (
 )
 
 // DefaultThreads is the search thread count used when none is configured:
-// the number of performance cores. On Apple Silicon a search thread that
-// lands on an efficiency core runs far slower than the rest, and using every
-// core measured more than twice as slow to a given depth as using the
-// performance cores alone.
+// the number of performance cores. On Apple Silicon the efficiency cores add
+// little search speed (measure with "bench threads"), and leaving them free
+// keeps the GUI and an opponent engine from competing with the search.
 func DefaultThreads() int {
 	if n, err := syscall.SysctlUint32("hw.perflevel0.physicalcpu"); err == nil && n > 0 && int(n) <= runtime.NumCPU() {
 		return int(n)

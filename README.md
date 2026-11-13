@@ -175,7 +175,7 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
 - **Airtight Ping Timer Compliance**: Guaranteed immediate `readyok` and `bestmove` responses to satisfy GUI ping timeouts under all race conditions.
 - **UCI Pondering**: Full compliance with GUI `go ponder` instructions, cleanly waiting for `ponderhit` or `stop` without premature exits.
 - **Continuous Background Auto-Pondering**: When not explicitly commanded by a GUI, the engine calculates the predicted opponent continuation silently in the background, pre-warming the transposition table for instant tactical responses.
-- Diagnostic commands: `d` / `display`, `eval`, `perft <depth>`, `bench [depth] [threads]`, `wac [ms]`, `testsuite <wac|file.epd> [ms]`.
+- Diagnostic commands: `d` / `display`, `eval`, `perft <depth>`, `bench [depth]`, `bench time|threads|perft|eval|all` (see Performance & Benchmarks), `wac [ms]`, `testsuite <wac|file.epd> [ms]`.
 
 ### 9. Performance & Benchmarks
 
@@ -198,6 +198,28 @@ Total nodes: 759808
 Total time : 142.2ms
 Nodes/sec  : 5342663
 ===============================================
+```
+
+Further benchmark modes, available both from the command line and as commands inside the UCI loop:
+
+```bash
+./devilfish bench time 2000      # fixed time per position: nodes/sec and depth reached at the current settings
+./devilfish bench threads        # search speed at every thread count, and the fastest setting
+./devilfish bench threads 3000 8 # the same with 3 s per position, up to 8 threads
+./devilfish bench perft 5        # move generator speed
+./devilfish bench eval           # static evaluations per second (NNUE and classical)
+./devilfish bench all            # fixed-depth, fixed-time, perft and eval in turn
+```
+
+`bench threads` searches the bench positions for a fixed time at each thread count and prints nodes/sec, the speedup over one thread, the efficiency per thread and the average depth reached. It recommends the fewest threads within 5% of the fastest count, since extra threads that add no speed only take cores from other programs. `--threads` and `--hash` apply to every mode (`./devilfish bench time 2000 -t 4 --hash 256`).
+
+```text
+Threads     Nodes/sec   Speedup   Per thread   Avg depth
+      1        751274     1.00x         100%         9.8
+      2       1472033     1.96x          98%         9.7
+      4       2952613     3.93x          98%        10.0
+      8       5959333     7.93x          99%        10.5
+     10       6280648     8.36x          84%        10.2
 ```
 
 ---

@@ -191,6 +191,8 @@ func (u *UCI) Loop() {
 			u.cmdDisplay()
 		case "bench":
 			u.cmdBench(parts[1:])
+		case "speedtest":
+			u.cmdBench(append([]string{"threads"}, parts[1:]...))
 		case "testsuite":
 			u.cmdTestSuite(parts[1:])
 		case "wac":
@@ -787,54 +789,6 @@ var benchPositions = []string{
 	"r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
 	"rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
 	"r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
-}
-
-func (u *UCI) Bench(depth int8) {
-	u.cmdBench([]string{strconv.Itoa(int(depth))})
-}
-
-func (u *UCI) cmdBench(args []string) {
-	u.stopSearch(false)
-	u.abortSearch.Store(false)
-	oldBook := u.engine.UseBook
-	u.engine.UseBook = false
-	defer func() {
-		u.engine.UseBook = oldBook
-	}()
-	depth := int8(7)
-	if len(args) > 0 {
-		d, err := strconv.Atoi(args[0])
-		if err == nil && d > 0 {
-			depth = int8(d)
-		}
-	}
-
-	u.sendLine(fmt.Sprintf("Running benchmark at depth %d with %d threads...", depth, u.engine.NumThreads))
-	totalNodes := uint64(0)
-	start := time.Now()
-
-	limits := search.SearchLimits{MaxDepth: depth}
-
-	for i, fen := range benchPositions {
-		b, err := board.ParseFEN(fen)
-		if err != nil {
-			continue
-		}
-		posStart := time.Now()
-		bestMove, _ := u.engine.Search(b, limits, nil)
-		posElapsed := time.Since(posStart)
-		nodes := u.engine.Nodes.Load()
-		totalNodes += nodes
-		u.sendLine(fmt.Sprintf("Position %d/6: bestmove %s | nodes %d | time %v", i+1, bestMove, nodes, posElapsed))
-	}
-
-	elapsed := time.Since(start)
-	nps := float64(totalNodes) / elapsed.Seconds()
-	u.sendLine("===============================================")
-	u.sendLine(fmt.Sprintf("Total nodes: %d", totalNodes))
-	u.sendLine(fmt.Sprintf("Total time : %v", elapsed))
-	u.sendLine(fmt.Sprintf("Nodes/sec  : %.0f", nps))
-	u.sendLine("===============================================")
 }
 
 func isLegal(b *board.Board, m types.Move) bool {
