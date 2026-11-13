@@ -3,6 +3,7 @@ package uci
 import (
 	"bytes"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -293,5 +294,130 @@ func TestSyzygyTablebaseLogAndInfoMessage(t *testing.T) {
 	output := out.String()
 	if !strings.Contains(output, "info string Syzygy tablebase determined best position:") {
 		t.Errorf("expected Syzygy info message in output, got:\n%s", output)
+	}
+}
+
+// countBestmoves returns how many bestmove lines out holds.
+func countBestmoves(out *syncBuffer) int {
+	return strings.Count("\n"+out.String(), "\nbestmove ")
+}
+
+// syncBuffer is a bytes.Buffer safe to read while the engine writes to it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func waitBestmoves(out *syncBuffer, n int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if countBestmoves(out) >= n {
+			return true
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return false
+}
+
+func newPonderTestUCI(out *syncBuffer) *UCI {
+	cfg := config.DefaultConfig()
+	cfg.Threads = 1
+	cfg.Hash = 16
+	cfg.OwnBook = false
+	cfg.Ponder = false
+	return New(bytes.NewBuffer(nil), out, cfg)
+}
+
+// A ponderhit sent straight after "go ponder", before the search has set up
+// its clock, must still turn it into a timed search that moves.
+func TestPonderHitRightAfterGoPonder(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		out := &syncBuffer{}
+		u := newPonderTestUCI(out)
+		u.cmdGo([]string{"ponder", "wtime", "2000", "btime", "2000"})
+		u.cmdPonderHit()
+		if !waitBestmoves(out, 1, 2*time.Second) {
+			u.cmdStop()
+			t.Fatalf("run %d: no bestmove after an immediate ponderhit (the engine kept pondering)", i)
+		}
+		u.stopSearch(false)
+	}
+}
+
+// While pondering the engine stays silent, however long the search runs or
+// even if it finishes; ponderhit or stop then produce exactly one bestmove.
+func TestPonderWaitsForHitOrStop(t *testing.T) {
+	out := &syncBuffer{}
+	u := newPonderTestUCI(out)
+
+	u.cmdGo([]string{"ponder", "depth", "3"})
+	time.Sleep(300 * time.Millisecond)
+	if n := countBestmoves(out); n != 0 {
+		t.Fatalf("%d bestmoves sent while pondering", n)
+	}
+	u.cmdPonderHit()
+	if !waitBestmoves(out, 1, time.Second) {
+		t.Fatal("no bestmove after ponderhit on a finished ponder search")
+	}
+
+	u.cmdGo([]string{"ponder", "wtime", "60000", "btime", "60000"})
+	time.Sleep(200 * time.Millisecond)
+	if n := countBestmoves(out); n != 1 {
+		t.Fatalf("%d bestmoves, want 1 (none from the running ponder search)", n)
+	}
+	u.cmdStop()
+	if n := countBestmoves(out); n != 2 {
+		t.Fatalf("%d bestmoves after stop, want 2", n)
+	}
+}
+
+// Time spent pondering counts towards the move: after a ponder longer than
+// the move's whole budget, ponderhit is answered at once.
+func TestPonderHitAfterLongPonderMovesAtOnce(t *testing.T) {
+	out := &syncBuffer{}
+	u := newPonderTestUCI(out)
+	// 2 s clocks: the budget is a few tens of milliseconds.
+	u.cmdGo([]string{"ponder", "wtime", "2000", "btime", "2000"})
+	time.Sleep(400 * time.Millisecond)
+	start := time.Now()
+	u.cmdPonderHit()
+	if !waitBestmoves(out, 1, time.Second) {
+		t.Fatal("no bestmove after ponderhit")
+	}
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Errorf("took %v after ponderhit; the ponder time should have covered the budget", d)
+	}
+}
+
+// A stop sent straight after "go" is answered promptly with one bestmove,
+// and the search does not carry on behind it.
+func TestStopRightAfterGo(t *testing.T) {
+	out := &syncBuffer{}
+	u := newPonderTestUCI(out)
+	for i := 1; i <= 30; i++ {
+		u.cmdGo([]string{"infinite"})
+		start := time.Now()
+		u.cmdStop()
+		if d := time.Since(start); d > 500*time.Millisecond {
+			t.Fatalf("run %d: stop took %v", i, d)
+		}
+		if n := countBestmoves(out); n != i {
+			t.Fatalf("run %d: %d bestmoves so far", i, n)
+		}
+		if u.searching.Load() {
+			t.Fatalf("run %d: search still running after stop", i)
+		}
 	}
 }

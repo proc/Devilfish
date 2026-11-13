@@ -44,7 +44,10 @@ type Engine struct {
 	Nodes      atomic.Uint64
 	TBHits     atomic.Uint64
 	currentTM  atomic.Pointer[TimeManager]
-	searchMu   sync.Mutex
+	// ponderHit records a ponderhit, so that one arriving before the search
+	// has set up its clock (currentTM still nil) is not lost.
+	ponderHit atomic.Bool
+	searchMu  sync.Mutex
 
 	// workers are kept between searches so their large tables are allocated
 	// once. Only Search uses them, under searchMu, and it waits for every
@@ -132,10 +135,20 @@ func (e *Engine) Stop() {
 	e.Stopped.Store(true)
 }
 
+// PonderHit switches the pondering search to a normal timed search. It may be
+// called at any moment after the search was requested, including before
+// Search has got as far as creating its TimeManager.
 func (e *Engine) PonderHit() {
+	e.ponderHit.Store(true)
 	if tm := e.currentTM.Load(); tm != nil {
 		tm.PonderHit()
 	}
+}
+
+// ClearPonderHit forgets an earlier ponderhit. Call it before requesting a
+// new search, from the goroutine that delivers ponderhits.
+func (e *Engine) ClearPonderHit() {
+	e.ponderHit.Store(false)
 }
 
 func (e *Engine) Search(
@@ -294,6 +307,11 @@ func (e *Engine) Search(
 	tm := NewTimeManager(limits, b.SideToMove, &e.Stopped, &e.Nodes, b)
 	e.currentTM.Store(tm)
 	defer e.currentTM.Store(nil)
+	// A ponderhit that arrived before the line above found no TimeManager
+	// to tell. (One arriving after it reaches tm directly.)
+	if limits.Ponder && e.ponderHit.Load() {
+		tm.PonderHit()
+	}
 
 	logger.Infof("Search started | FEN: %s | Limits: depth=%d, nodes=%d, movetime=%v, wtime=%d, btime=%d, winc=%d, binc=%d",
 		b.ToFEN(), limits.MaxDepth, limits.MaxNodes, limits.MoveTime, limits.WhiteTime, limits.BlackTime, limits.WhiteInc, limits.BlackInc)

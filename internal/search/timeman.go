@@ -305,8 +305,12 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 	return tm
 }
 
+// PonderHit ends pondering: the opponent played the expected move, and the
+// search carries on as a normal timed search of the same position. The clock
+// is not restarted, so the time already spent pondering counts as thinking
+// time for this move. A move pondered for longer than its budget is played
+// at once, and the time saved stays on the clock.
 func (tm *TimeManager) PonderHit() {
-	tm.StartTime = time.Now()
 	tm.Ponder.Store(false)
 }
 

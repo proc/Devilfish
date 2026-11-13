@@ -38,6 +38,7 @@ type UCI struct {
 	isAutoPonder     atomic.Bool
 	autoPonderCancel atomic.Bool
 	autoPonderHash   atomic.Uint64
+	searchGen        atomic.Uint64 // incremented by every stopSearch; dates an auto-ponder request
 	guiStop          atomic.Bool
 	abortSearch      atomic.Bool
 	bestMoveSent     atomic.Bool
@@ -460,11 +461,16 @@ func (u *UCI) stopSearch(requestedByGUI bool) {
 	}
 	u.abortSearch.Store(true)
 	u.autoPonderCancel.Store(true)
+	u.searchGen.Add(1)
 	u.engine.Stop()
 
-	// Wait for official search or auto-ponder to stop cleanly (up to 3 seconds)
+	// Wait for official search or auto-ponder to stop cleanly (up to 3 seconds).
+	// The stop is repeated: a search that was requested but has not started
+	// yet clears the stop flag when it does start, which would otherwise
+	// lose a stop sent straight after "go".
 	for i := 0; i < 3000 && (u.searching.Load() || u.isAutoPonder.Load()); i++ {
 		time.Sleep(1 * time.Millisecond)
+		u.engine.Stop()
 	}
 
 	// If GUI sent "stop" and no search was running to emit bestmove, emit best move from TT or position
@@ -547,7 +553,9 @@ func (u *UCI) cmdPosition(args []string) {
 func (u *UCI) cmdGo(args []string) {
 	// Stop any running search or auto-ponder first
 	u.stopSearch(false)
+	gen := u.searchGen.Load()
 	u.engine.Stopped.Store(false)
+	u.engine.ClearPonderHit()
 	u.guiStop.Store(false)
 	u.abortSearch.Store(false)
 	u.autoPonderCancel.Store(false)
@@ -678,13 +686,18 @@ func (u *UCI) cmdGo(args []string) {
 		// Speculative background calculation (auto-ponder):
 		// Runs in a detached goroutine while waiting for opponent move
 		if u.ponderEnabled && bestMove != types.MoveNone && !u.abortSearch.Load() && !u.guiStop.Load() && !u.autoPonderCancel.Load() {
-			go u.startAutoPonder(currentBoard, bestMove, ponderMove)
+			go u.startAutoPonder(currentBoard, bestMove, ponderMove, gen)
 		}
 	}()
 }
 
-func (u *UCI) startAutoPonder(currentBoard *board.Board, bestMove, ponderMove types.Move) {
-	if !u.ponderEnabled || bestMove == types.MoveNone || u.abortSearch.Load() || u.guiStop.Load() || u.autoPonderCancel.Load() {
+// startAutoPonder searches the position expected after bestMove and the
+// opponent's likely reply, until the next command stops it. gen is
+// searchGen as it was when the search that produced bestMove was requested:
+// once it has moved on, a newer command has taken over and this request is
+// stale.
+func (u *UCI) startAutoPonder(currentBoard *board.Board, bestMove, ponderMove types.Move, gen uint64) {
+	if !u.ponderEnabled || bestMove == types.MoveNone || u.searchGen.Load() != gen || u.abortSearch.Load() || u.guiStop.Load() || u.autoPonderCancel.Load() {
 		return
 	}
 
@@ -723,6 +736,14 @@ func (u *UCI) startAutoPonder(currentBoard *board.Board, bestMove, ponderMove ty
 		u.isAutoPonder.Store(false)
 		u.autoPonderHash.Store(0)
 	}()
+	// Checked again now that isAutoPonder is set: a stopSearch that ran in
+	// between has either seen the flag (and waits for this search, stopping
+	// it) or has already moved searchGen on. Without this, a stale request
+	// could start an endless search just after a new "go", and the real
+	// search would wait behind it.
+	if u.searchGen.Load() != gen {
+		return
+	}
 
 	autoLimits := search.SearchLimits{Infinite: true, Ponder: true}
 	// Silent background search: pre-warms Transposition Table
