@@ -58,8 +58,9 @@ type sfStack struct {
 	// layout a dot-product instruction takes (see sfFirstLayer).
 	fc0Chunk [EightL1Size / 4][sfL2][4]int8
 
-	fc1Bias [sfL3]int32
-	fc1     [2 * sfL2][sfL3]int8 // [input][output]
+	fc1Bias  [sfL3]int32
+	fc1      [2 * sfL2][sfL3]int8        // [input][output]
+	fc1Chunk [2 * sfL2 / 4][sfL3][4]int8 // [group of four inputs][output][input in group]
 
 	fc2Bias int32
 	fc2     [2*sfL2 + 2*sfL3]int8
@@ -279,6 +280,7 @@ func LoadSFBytes(data []byte) (*EightNetwork, error) {
 		for o := 0; o < sfL3; o++ {
 			for i := 0; i < 2*sfL2; i++ {
 				st.fc1[i][o] = int8(w[o*2*sfL2+i])
+				st.fc1Chunk[i/4][o][i%4] = st.fc1[i][o]
 			}
 		}
 		st.fc2Bias = int32(r.u32())
@@ -439,6 +441,13 @@ func refSFActivate(x, bias *[32]int32, out *[64]uint8, bits uint) {
 	}
 }
 
+// refSFSecondLayer is the definition of sfSecondLayer.
+func refSFSecondLayer(act *[128]uint8, st *sfStack, out *[32]int32) {
+	var nz [2*sfL2 + 8]uint16
+	n := nonzero64((*[64]uint8)(act[:64]), &nz)
+	refSparse32(&nz[0], n, &act[0], &st.fc1[0][0], out)
+}
+
 // refDot128 is the definition of sfDot128.
 func refDot128(a *[128]uint8, w *[128]int8) int32 {
 	var sum int32
@@ -515,11 +524,9 @@ func sfForward(net *EightNetwork, scratch *sfScratch, accPst, accThr *[2][EightL
 	// clipped, each 0..127: act[0:32] and act[32:64]. Many are zero.
 	var act [2*sfL2 + 2*sfL3]uint8
 	sfActivate(&fc0, &st.fc0Bias, (*[64]uint8)(act[:64]), 7)
-	var nz [2*sfL2 + 8]uint16
-	n := nonzero64((*[64]uint8)(act[:64]), &nz)
 
 	var fc1 [sfL3]int32
-	sparse32(&nz[0], n, &act[0], &st.fc1[0][0], &fc1)
+	sfSecondLayer(&act, st, &fc1)
 	sfActivate(&fc1, &st.fc1Bias, (*[64]uint8)(act[64:]), 6)
 
 	out := st.fc2Bias + sfDot128(&act, &st.fc2)

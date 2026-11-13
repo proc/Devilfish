@@ -89,3 +89,6 @@ func l1NonzeroChunks(ft *[EightL1Size]uint8, out *[EightL1Size + 8]uint16) int {
 	}
 	return n
 }
+
+// l1Pop4[m] is the number of set bits of the 4-bit mask m.
+var l1Pop4 = [16]uint8{0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4}

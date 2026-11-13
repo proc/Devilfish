@@ -101,3 +101,11 @@ func sfApplyPSQT(dst *[sfPSQTBuckets]int32, table []int32, add, rem *rowList) {
 		psqtApplyNEON(dst, &table[0], &add.rows[0], add.n, &rem.rows[0], rem.n)
 	}
 }
+
+// sfSecondLayer computes the 32 second-layer sums (without bias) from the
+// 64 activations in act[:64], many of which are zero.
+func sfSecondLayer(act *[128]uint8, st *sfStack, out *[32]int32) {
+	var nz [2*sfL2 + 8]uint16
+	n := nonzero64((*[64]uint8)(act[:64]), &nz)
+	sparse32NEON(&nz[0], n, &act[0], &st.fc1[0][0], out)
+}

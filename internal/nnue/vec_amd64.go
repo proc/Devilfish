@@ -427,7 +427,7 @@ func eightL1Layer(ft *[EightL1Size]uint8, wFile *[EightL2Size * EightL1Size]int8
 		case simdAVX2:
 			l1AVXVNNI(ft, wFile, &out)
 		default:
-			eightL1(ft, wByInput, pre)
+			eightL1Idx(ft, wByInput, pre)
 			return
 		}
 		for j := range out {
@@ -435,5 +435,9 @@ func eightL1Layer(ft *[EightL1Size]uint8, wFile *[EightL2Size * EightL1Size]int8
 		}
 		return
 	}
-	eightL1(ft, wByInput, pre)
+	if simd == simdGeneric {
+		eightL1(ft, wByInput, pre)
+		return
+	}
+	eightL1Idx(ft, wByInput, pre)
 }

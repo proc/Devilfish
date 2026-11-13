@@ -4,6 +4,7 @@ package nnue
 
 import (
 	"math/rand"
+	"os"
 	"testing"
 	"unsafe"
 
@@ -13,9 +14,14 @@ import (
 )
 
 // availableSIMD lists the kernel sets this machine can run.
+//
+// DEVILFISH_TEST_FORCE_AVX2=1 adds the AVX2 set even if the CPU does not
+// report AVX2. Apple's Rosetta executes AVX2 instructions without
+// advertising them through CPUID, so this is how the AVX2 kernels are
+// tested on an Apple Silicon Mac (GOARCH=amd64 go test ./internal/nnue).
 func availableSIMD() []simdLevel {
 	levels := []simdLevel{simdSSE2}
-	if hasAVX2() {
+	if hasAVX2() || os.Getenv("DEVILFISH_TEST_FORCE_AVX2") == "1" {
 		levels = append(levels, simdAVX2)
 	}
 	if hasAVX512BW() {
