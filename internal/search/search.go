@@ -442,6 +442,8 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 	threatenedPieces := w.Board.TacticalThreatsOnPieces(us)
 
+	hc := w.History.Context(w.Board, ply, threatenedPieces)
+
 	ourQueens := w.Board.PieceBB[types.MakePiece(us, types.Queen)]
 	ourRooks := w.Board.PieceBB[types.MakePiece(us, types.Rook)]
 	ourMinors := w.Board.PieceBB[types.MakePiece(us, types.Knight)] | w.Board.PieceBB[types.MakePiece(us, types.Bishop)]
@@ -468,7 +470,12 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 		if staticEval-margin >= beta {
 			st.RFPCuts++
-			return beta
+			if P.FailSoft&softPruning == 0 {
+				return beta
+			}
+			// Fail soft: between beta and the evaluation, which is itself
+			// only an estimate.
+			return (staticEval + beta) / 2
 		}
 	} else if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && int32(depth) <= P.RFPDepth && abs(beta) < MateThreshold && hasNonPawns {
 		// Only the threat and king-safety guards stood in the way.
@@ -514,6 +521,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		if w.useAcc && ply+1 < MaxPly {
 			w.Accumulators[ply+1] = w.Accumulators[ply]
 		}
+		w.History.PushNull(ply)
 		w.Board.MakeNullMove()
 		nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, !cutNode, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
 		w.Board.UnmakeNullMove()
@@ -523,7 +531,10 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 		if nullScore >= beta {
 			st.NMPCuts++
-			return beta
+			if nullScore >= MateThreshold || P.FailSoft&softPruning == 0 {
+				return beta // a mate found with an extra move is not proven
+			}
+			return nullScore
 		}
 	} else if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && prevMove != types.MoveNone && depth >= 3 && staticEval >= beta && hasNonPawns && pieceCount > 6 {
 		st.NMPGuarded++
@@ -563,12 +574,15 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			// Multi-cut: another move also beats beta, even searched shallower
 			// and with the TT move excluded, so this node fails high.
 			st.SEMultiCut++
-			return beta
+			if P.FailSoft&softPruning == 0 {
+				return beta
+			}
+			return singularBeta
 		}
 		if sScore < singularBeta {
 			st.SEExtends++
 			extension = 1
-			if !isPVNode && sScore < singularBeta-25 {
+			if !isPVNode && sScore < singularBeta-P.SEDoubleMargin {
 				extension = 2
 			}
 		} else if P.SENegExt != 0 && (ttScore >= beta || cutNode) {
@@ -603,6 +617,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					continue
 				}
 				w.pushAccumulator(ply, m)
+				w.History.PushMove(ply, w.Board.Pieces[m.From()], m.To())
 				if !w.Board.MakeMove(m) {
 					continue
 				}
@@ -626,12 +641,20 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				if probScore >= probBeta {
 					st.ProbCuts++
 					w.TT.StoreEval(w.Board.Hash, m, tt.ScoreToTT(probScore, ply), netEval, depth-3, tt.LowerBound)
-					return beta
+					if P.FailSoft&softPruning == 0 {
+						return beta
+					}
+					return probScore - (probBeta - beta)
 				}
 			}
 		}
 	}
 
+	// Fail soft: bestScore is the best score actually found, which may lie
+	// outside (alpha, beta). It is what the node returns and stores, so that
+	// the hash table and the callers get the tightest bound available.
+	bestScore := -Infinity
+	movesPruned := false // a move was skipped unsearched
 	var bestMove types.Move
 	var bestRootMove types.Move
 	bestRootScore := -Infinity
@@ -652,6 +675,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			extension = 1
 		}
 		w.pushAccumulator(ply, ttMove)
+		w.History.PushMove(ply, w.Board.Pieces[ttMove.From()], ttMove.To())
 		if w.Board.MakeMove(ttMove) {
 			w.TT.Prefetch(w.Board.Hash)
 			legalMoves++
@@ -689,6 +713,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 				if !inCheck && excludedMove == types.MoveNone && score > rawEval && score < MateThreshold {
 					diff := score - rawEval
+					if P.FailSoft&softCorr == 0 {
+						diff = min(score, beta) - rawEval
+					}
 					w.History.UpdateCorrHist(w.Board, diff, depth)
 				}
 
@@ -700,10 +727,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 				if !ttMove.IsCapture() && !ttMove.IsPromotion() {
 					w.History.UpdateKillers(ply, ttMove)
-					w.History.UpdateHistory(us, ttMove, depth)
-					w.History.UpdateContHistory(prevMove, ttMove, depth)
-					w.History.UpdateContHistory2(prevMove2, ttMove, depth)
-					w.History.UpdateContHistory4(prevMove4, ttMove, depth)
+					hc.Update(w.Board.Pieces[ttMove.From()], ttMove, quietStatBonus(depth))
 					w.History.UpdateCounterMove(prevMove, ttMove)
 				} else if ttMove.IsCapture() {
 					attacker := w.Board.Pieces[ttMove.From()].Type()
@@ -713,9 +737,13 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					}
 					w.History.UpdateCaptureHistory(attacker, victim, ttMove.To(), depth)
 				}
-				return beta
+				if P.FailSoft&softMoves == 0 {
+					return beta
+				}
+				return score
 			}
 
+			bestScore = score
 			// Alpha improvement
 			if score > alpha {
 				alpha = score
@@ -733,6 +761,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	mp := NewMovePicker(w.Board, ttMove, excludedMove, ply, prevMove, prevMove2, prevMove4, w.History)
 	mp.stage = StageGenCaptures
 	mp.SetNodeInfo(threatenedPieces, kingInDanger, hasActiveAttack, themKingRing)
+	mp.hc = &hc
 
 	for {
 		m := mp.Next()
@@ -751,7 +780,8 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		killer1 := mp.killer1
 		killer2 := mp.killer2
 		counterMove := mp.counterMove
-		attacker := w.Board.Pieces[fromSq].Type()
+		movedPiece := w.Board.Pieces[fromSq]
+		attacker := movedPiece.Type()
 		victim := w.Board.Pieces[toSq].Type()
 		if m.IsEnPassant() {
 			victim = types.Pawn
@@ -798,6 +828,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				}
 				if legalMoves >= lmpThreshold {
 					st.LMPPruned++
+					movesPruned = true
 					continue
 				}
 			}
@@ -809,6 +840,11 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			if staticEval+futMargin <= alpha {
 				if !givesCheck {
 					st.FutPruned++
+					movesPruned = true
+					// The pruned move is assumed to reach no more than this.
+					if bestScore < staticEval+futMargin {
+						bestScore = staticEval + futMargin
+					}
 					continue
 				}
 			}
@@ -818,19 +854,14 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		// Prune quiet moves with poor history score at shallow depths
 		if !isPVNode && !inCheck && lmrDepth <= P.HistDepth && isQuiet && movesSearched > 0 && !pruneExempt {
 			if !givesCheck {
-				histScore := w.History.HistoryTable[us][m.From()][m.To()]
-				if prevMove != types.MoveNone && prevMove.To() < 64 && m.To() < 64 {
-					histScore += w.History.ContHistory[prevMove.To()][m.To()]
-				}
-				if prevMove2 != types.MoveNone && prevMove2.To() < 64 && m.To() < 64 {
-					histScore += w.History.ContHistory2[prevMove2.To()][m.To()]
-				}
+				histScore := hc.Prune(movedPiece, m)
 				histMargin := -max(lmrDepth, 1) * P.HistPrImpr
 				if !improving {
 					histMargin = -max(lmrDepth, 1) * P.HistPrNonImp
 				}
 				if histScore < histMargin {
 					st.HistPruned++
+					movesPruned = true
 					continue
 				}
 			}
@@ -846,11 +877,13 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				if isQuiet {
 					if moveSEE < -max(lmrDepth, 1)*P.SEEQuietMul {
 						st.SEEPruned++
+						movesPruned = true
 						continue
 					}
 				} else {
 					if moveSEE < -int32(depth)*P.SEENoisyMul {
 						st.SEEPruned++
+						movesPruned = true
 						continue
 					}
 				}
@@ -858,6 +891,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 
 		w.pushAccumulator(ply, m)
+		w.History.PushMove(ply, movedPiece, toSq)
 		if !w.Board.MakeMove(m) {
 			continue
 		}
@@ -938,16 +972,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					}
 
 					// History-based reduction adjustment
-					hist := w.History.HistoryTable[us][fromSq][toSq]
-					if prevMove != types.MoveNone && prevMove.To() < 64 && toSq < 64 {
-						hist += w.History.ContHistory[prevMove.To()][toSq]
-					}
-					if prevMove2 != types.MoveNone && prevMove2.To() < 64 && toSq < 64 {
-						hist += w.History.ContHistory2[prevMove2.To()][toSq]
-					}
-					if prevMove4 != types.MoveNone && prevMove4.To() < 64 && toSq < 64 {
-						hist += w.History.ContHistory4[prevMove4.To()][toSq]
-					}
+					hist := hc.Stat(movedPiece, m)
 					// Continuous history adjustment: one ply per LMRHistDiv
 					// of combined history, capped at three plies each way.
 					hAdj := hist / P.LMRHistDiv
@@ -1052,7 +1077,10 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		if ply == 0 {
 			w.RootMoveNodes[m.From()][m.To()] += w.LocalNodes - startNodes
-			if bestRootMove == types.MoveNone || score > bestRootScore {
+			// Only a score above alpha ranks a move. Below it a fail-soft
+			// score is just an upper bound, and picking the largest bound
+			// would swap the best move for an arbitrary one.
+			if bestRootMove == types.MoveNone || (score > bestRootScore && score > alpha) {
 				bestRootScore = score
 				bestRootMove = m
 			}
@@ -1076,6 +1104,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 			if !inCheck && excludedMove == types.MoveNone && score > rawEval && score < MateThreshold {
 				diff := score - rawEval
+				if P.FailSoft&softCorr == 0 {
+					diff = min(score, beta) - rawEval
+				}
 				w.History.UpdateCorrHist(w.Board, diff, depth)
 			}
 
@@ -1087,20 +1118,15 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 			if isQuiet {
 				w.History.UpdateKillers(ply, m)
-				w.History.UpdateHistory(us, m, depth)
-				w.History.UpdateContHistory(prevMove, m, depth)
-				w.History.UpdateContHistory2(prevMove2, m, depth)
-				w.History.UpdateContHistory4(prevMove4, m, depth)
+				bonus := quietStatBonus(depth)
+				hc.Update(movedPiece, m, bonus)
 				w.History.UpdateCounterMove(prevMove, m)
 
 				// Penalize preceding quiet moves that failed to produce a cutoff
 				for j := 0; j < movesSearched-1; j++ {
 					prevQuiet := searchedMoves[j]
 					if !prevQuiet.IsCapture() && !prevQuiet.IsPromotion() {
-						w.History.PenalizeHistory(us, prevQuiet, depth)
-						w.History.PenalizeContHistory(prevMove, prevQuiet, depth)
-						w.History.PenalizeContHistory2(prevMove2, prevQuiet, depth)
-						w.History.PenalizeContHistory4(prevMove4, prevQuiet, depth)
+						hc.Update(w.Board.Pieces[prevQuiet.From()], prevQuiet, -bonus)
 					}
 				}
 			} else if m.IsCapture() {
@@ -1125,9 +1151,15 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				}
 			}
 
-			return beta
+			if P.FailSoft&softMoves == 0 {
+				return beta
+			}
+			return score
 		}
 
+		if score > bestScore {
+			bestScore = score
+		}
 		// Alpha improvement
 		if score > alpha {
 			alpha = score
@@ -1160,9 +1192,20 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	}
 
 	// An upper bound only says the eval was too high when it sits below rawEval
-	if !inCheck && excludedMove == types.MoveNone && alpha < MateThreshold && alpha > -MateThreshold &&
-		(bestType == tt.Exact || alpha < rawEval) {
-		diff := alpha - rawEval
+	// Below alpha the best score found is only a bound on the moves that were
+	// searched. With moves pruned unsearched it says nothing about those, so
+	// the node then claims no more than alpha (unless softUnguarded).
+	if bestScore < alpha && (bestScore == -Infinity || P.FailSoft&softMoves == 0 ||
+		(movesPruned && P.FailSoft&softUnguarded == 0)) {
+		bestScore = alpha
+	}
+	corrScore := bestScore
+	if P.FailSoft&softCorr == 0 && corrScore < alpha {
+		corrScore = alpha
+	}
+	if !inCheck && excludedMove == types.MoveNone && corrScore < MateThreshold && corrScore > -MateThreshold &&
+		(bestType == tt.Exact || corrScore < rawEval) {
+		diff := corrScore - rawEval
 		w.History.UpdateCorrHist(w.Board, diff, depth)
 	}
 
@@ -1177,9 +1220,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	}
 
 	if excludedMove == types.MoveNone && (ply > 0 || len(w.ExcludedRootMoves) == 0) {
-		w.TT.StoreEval(w.Board.Hash, bestMove, tt.ScoreToTT(alpha, ply), netEval, depth, bestType)
+		w.TT.StoreEval(w.Board.Hash, bestMove, tt.ScoreToTT(bestScore, ply), netEval, depth, bestType)
 	}
-	return alpha
+	return bestScore
 }
 
 func (w *SearchWorker) Quiescence(alpha, beta int32, ply int) int32 {
@@ -1237,6 +1280,7 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 
 	// Stand-pat score
 	futBase := int32(-Infinity) // standPat + QS futility margin
+	bestScore := int32(-Infinity)
 	if !inCheck {
 		if ttFound && ttEval != tt.EvalNone {
 			netEval = ttEval
@@ -1245,9 +1289,13 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 		}
 		standPat := w.adjustEval(netEval)
 		futBase = standPat + P.QSFutMargin
+		bestScore = standPat
 		if standPat >= beta {
 			st.QStandPatCuts++
-			return beta
+			if P.FailSoft&softQS == 0 {
+				return beta
+			}
+			return standPat
 		}
 		// Delta pruning: do not delta-prune if pawns are close to promotion
 		pawnsNearPromo := (w.Board.PieceBB[types.WhitePawn]&bitboard.Rank7BB != 0) || (w.Board.PieceBB[types.BlackPawn]&bitboard.Rank2BB != 0)
@@ -1314,8 +1362,11 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 			if m.IsEnPassant() {
 				victim = types.Pawn
 			}
-			if futBase+eval.SEEPieceValues[victim] <= alpha && !w.Board.GivesCheck(m) {
+			if futValue := futBase + eval.SEEPieceValues[victim]; futValue <= alpha && !w.Board.GivesCheck(m) {
 				st.QFutPruned++
+				if bestScore < futValue {
+					bestScore = futValue
+				}
 				continue
 			}
 		}
@@ -1348,9 +1399,15 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 				st.QBetaFirst++
 			}
 			if !ttFound {
-				w.TT.StoreEval(w.Board.Hash, m, tt.ScoreToTT(beta, ply), netEval, 0, tt.LowerBound)
+				w.TT.StoreEval(w.Board.Hash, m, tt.ScoreToTT(score, ply), netEval, 0, tt.LowerBound)
 			}
-			return beta
+			if P.FailSoft&softQS == 0 {
+				return beta
+			}
+			return score
+		}
+		if score > bestScore {
+			bestScore = score
 		}
 		if score > alpha {
 			alpha = score
@@ -1361,14 +1418,17 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 		return -MateScore + int32(ply)
 	}
 
+	if P.FailSoft&softQS == 0 && bestScore < alpha {
+		bestScore = alpha
+	}
 	if !ttFound {
 		bound := tt.UpperBound
-		if alpha > origAlpha {
+		if bestScore > origAlpha {
 			bound = tt.Exact
 		}
-		w.TT.StoreEval(w.Board.Hash, types.MoveNone, tt.ScoreToTT(alpha, ply), netEval, 0, bound)
+		w.TT.StoreEval(w.Board.Hash, types.MoveNone, tt.ScoreToTT(bestScore, ply), netEval, 0, bound)
 	}
-	return alpha
+	return bestScore
 }
 
 func abs(x int32) int32 {

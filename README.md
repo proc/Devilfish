@@ -134,8 +134,9 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
    }
    ```
    `book_file` selects the opening book:
-   - `"<embedded>"` (default): the built-in Polyglot book of mainline theory.
+   - `"<embedded>"` (default): the built-in Polyglot book of mainline theory (about 76,000 moves, lines averaging 10 moves deep). It is built with `cmd/pgn2book` from the openings of 2.48 million CCRL 40/15 engine games: a move is included if it was played in at least 30 games and at least 2% of the games reaching its position, and scored within 6 points per 100 games of the best such move there; moves are chosen at random, weighted by popularity and result.
    - `"<pohl>"`: the embedded **Pohl.epd** opening suite (223,081 positions after 8 moves). The engine steers each game toward a randomly chosen suite position that is still reachable, reconstructing a legal move order on the fly (preferring mainline move orders), and leaves the book once that position is reached or the opponent deviates from every suite line.
+   - `"<drawkiller>"`: the embedded **Drawkiller V5** openings by Stefan Pohl (the suite's Polyglot books, "classic 4 moves, big"). Each line walks the kings to opposite corners and then adds four pawn moves per side, leaving White an advantage; they are meant for engine-vs-engine testing with a low draw rate, and are only reached when both sides follow the book (the lines start `1. e3 d6` or `1. d3 e6`). Seven sets with a growing advantage for White are included: `"<drawkiller>"` is the recommended [+0.90;+0.99] set, and `"<drawkiller_1.00>"`, `"<drawkiller_1.10>"`, `"<drawkiller_1.20>"`, `"<drawkiller_1.30>"`, `"<drawkiller_1.40>"` and `"<drawkiller_1.50>"` select the others by the lower bound of their evaluation interval.
    - A path to a Polyglot `.bin` file, or to any EPD suite (`.epd` / `.epd.gz`), which is used the same way as `<pohl>`.
 
    The embedded suites are stored packed (`internal/book/*.epdb.gz`) and decoded only when selected. To embed another suite, pack it with `go run ./cmd/epdpack -in suite.epd -out internal/book/suite.epdb.gz` and register it in `internal/book/epdbook.go`.
@@ -156,7 +157,7 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
    - `--eval-file <path>`: Specify external `.nnue` network file.
    - `--no-nnue`: Disable NNUE evaluation and use classical HCE.
    - `--syzygy-path <path>`: Specify directory containing Syzygy `.rtbw` and `.rtbz` files.
-   - `--book <path|<embedded>|<pohl>>`: Select the opening book; `--no-book` disables it.
+   - `--book <path|<embedded>|<pohl>|<drawkiller>>`: Select the opening book; `--no-book` disables it.
 3. **Runtime UCI Options**:
    - `setoption name Threads value <N>`
    - `setoption name Hash value <MB>`
@@ -168,7 +169,7 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
    - `setoption name Syzygy50MoveRule value <true|false>`
    - `setoption name SyzygyProbeLimit value <limit>`
    - `setoption name OwnBook value <true|false>`
-   - `setoption name BookFile value <path|<embedded>|<pohl>>`
+   - `setoption name BookFile value <path|<embedded>|<pohl>|<drawkiller>>`
 
 #### Protocol Support & Robustness:
 - Standard UCI Commands: `uci`, `isready`, `ucinewgame`, `position`, `go`, `stop`, `ponderhit`, `quit`, `ping`.

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"devilfish/internal/bitboard"
 	"devilfish/internal/board"
 	"devilfish/internal/movegen"
 	"devilfish/internal/types"
@@ -72,17 +73,6 @@ func TestHistoryPruning(t *testing.T) {
 
 func TestContinuationAndCaptureHistory(t *testing.T) {
 	h := NewSearchHistory()
-	m1 := types.MakeMove(types.E2, types.E4, types.FlagQuiet)
-	m2 := types.MakeMove(types.E7, types.E5, types.FlagQuiet)
-
-	// Continuation history update and penalize
-	h.UpdateContHistory(m1, m2, 4)
-	if h.ContHistory[m1.To()][m2.To()] <= 0 {
-		t.Errorf("expected positive continuation history, got %d", h.ContHistory[m1.To()][m2.To()])
-	}
-
-	h.PenalizeContHistory(m1, m2, 4)
-
 	// Capture history update
 	h.UpdateCaptureHistory(types.Knight, types.Pawn, types.E5, 4)
 	if h.CaptureHistory[types.Knight][types.E5][types.Pawn] <= 0 {
@@ -292,39 +282,45 @@ func TestAggressiveMoveOrdering(t *testing.T) {
 	}
 }
 
-func TestContinuationHistory2(t *testing.T) {
-	hist := NewSearchHistory()
-	prev2 := types.MakeMove(types.E2, types.E4, types.FlagDoublePawnPush)
+// A history update reaches the main, pawn-structure and continuation tables,
+// and a penalty takes it back out.
+func TestQuietHistoryTables(t *testing.T) {
+	b, _ := board.ParseFEN("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2")
+	h := NewSearchHistory()
+	h.PushMove(0, types.WhitePawn, types.E4)
+	h.PushMove(1, types.BlackPawn, types.E5)
 	m := types.MakeMove(types.G1, types.F3, types.FlagQuiet)
 
-	hist.UpdateContHistory2(prev2, m, 4)
-	if hist.ContHistory2[prev2.To()][m.To()] <= 0 {
-		t.Errorf("expected positive ContHistory2 after update")
+	c := h.Context(b, 2, 0)
+	c.Update(types.WhiteKnight, m, quietStatBonus(4))
+	if h.Main[types.White][0][0][types.G1][types.F3] <= 0 {
+		t.Errorf("main history not updated")
 	}
-
-	scoreBefore := hist.ContHistory2[prev2.To()][m.To()]
-	hist.PenalizeContHistory2(prev2, m, 4)
-	scoreAfter := hist.ContHistory2[prev2.To()][m.To()]
-	if scoreAfter >= scoreBefore {
-		t.Errorf("expected ContHistory2 to decrease after penalty")
+	if h.Cont[types.BlackPawn][types.E5][types.WhiteKnight][types.F3] <= 0 || h.Cont[types.WhitePawn][types.E4][types.WhiteKnight][types.F3] <= 0 {
+		t.Errorf("continuation history not updated for the last two moves")
 	}
-}
-
-func TestContinuationHistory4(t *testing.T) {
-	hist := NewSearchHistory()
-	prev4 := types.MakeMove(types.D2, types.D4, types.FlagDoublePawnPush)
-	m := types.MakeMove(types.C1, types.F4, types.FlagQuiet)
-
-	hist.UpdateContHistory4(prev4, m, 5)
-	if hist.ContHistory4[prev4.To()][m.To()] <= 0 {
-		t.Errorf("expected positive ContHistory4 after update")
+	if h.PawnHist[b.PawnHash%pawnHistSize][types.WhiteKnight][types.F3] <= 0 {
+		t.Errorf("pawn history not updated")
 	}
-
-	scoreBefore := hist.ContHistory4[prev4.To()][m.To()]
-	hist.PenalizeContHistory4(prev4, m, 5)
-	scoreAfter := hist.ContHistory4[prev4.To()][m.To()]
-	if scoreAfter >= scoreBefore {
-		t.Errorf("expected ContHistory4 to decrease after penalty")
+	if got, want := c.Order(types.WhiteKnight, m), 4*quietStatBonus(4); got != want {
+		t.Errorf("order score %d, want %d", got, want)
+	}
+	// The same squares with the knight under threat are a different entry.
+	threat := h.Context(b, 2, bitboard.SquareBB[types.G1])
+	if threat.Prune(types.WhiteKnight, m) >= c.Prune(types.WhiteKnight, m) {
+		t.Errorf("threatened-piece history should not share the unthreatened entry")
+	}
+	before := c.Stat(types.WhiteKnight, m)
+	c.Update(types.WhiteKnight, m, -quietStatBonus(4))
+	if c.Stat(types.WhiteKnight, m) >= before {
+		t.Errorf("penalty did not lower the history")
+	}
+	// Values stay bounded however often they are reinforced.
+	for i := 0; i < 1000; i++ {
+		c.Update(types.WhiteKnight, m, 1600)
+	}
+	if v := h.Main[types.White][0][0][types.G1][types.F3]; v > histLimit || v < histLimit/2 {
+		t.Errorf("saturated history %d not within (%d, %d]", v, histLimit/2, histLimit)
 	}
 }
 

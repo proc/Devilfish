@@ -47,6 +47,8 @@ func Read(data []byte) (*Book, error) {
 // LoadFile loads an opening book. Besides a filesystem path it accepts:
 //   - "" or "<embedded>": the builtin Polyglot book (DefaultBook)
 //   - "<pohl>": the embedded Pohl.epd opening suite (PohlBook)
+//   - "<drawkiller>", "<drawkiller_1.00>" ... "<drawkiller_1.50>": an embedded
+//     Drawkiller V5 Polyglot book (DrawkillerBook)
 //
 // Paths ending in .epd or .epd.gz are read as EPD opening suites; anything else
 // as a Polyglot .bin book.
@@ -56,6 +58,9 @@ func LoadFile(path string) (*Book, error) {
 	}
 	if s := findEmbeddedSuite(path); s != nil {
 		return s.load()
+	}
+	if level := drawkillerLevel(path); level != "" {
+		return DrawkillerBook(level)
 	}
 	if isEPDPath(path) {
 		return loadEPDFile(path)

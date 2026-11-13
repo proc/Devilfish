@@ -42,22 +42,36 @@ type Params struct {
 	LMRChecks int32 // 1: moves that give check take late-move reductions (one ply less)
 
 	// Strength of the reductions and of the pruning before the move loop.
-	LMRMinMove  int32 // late-move reductions start once this many moves have been searched
-	LMRCutNode  int32 // extra plies of reduction at expected cut nodes
-	LMRExempt   int32 // 1: threat moves, threat evasions and advanced pawn pushes are never reduced; 0: they are reduced one ply less
-	PruneExempt int32 // 1: those moves are also exempt from late-move, futility, history and SEE pruning; 0: only killers and the countermove are
-	NMPBase     int32 // null-move reduction = NMPBase + depth/NMPDepthDiv (+ eval and improving terms)
-	NMPDepthDiv int32
-	IIRDepth    int32 // internal iterative reduction from this depth, when there is no hash move
-	IIRPV       int32 // 1: also at PV nodes
-	RazorDepth  int32 // razoring up to this depth
-	RazorStep   int32 // razoring margin grows by this per ply of depth above 1
-	SENegExt    int32 // 1: a hash move that is not singular is searched a ply shallower when the node is expected to fail high anyway
-	PawnPushExt int32 // extension for pawn pushes to the 7th rank: 2 at every node, 1 at PV nodes only, 0 never
+	LMRMinMove     int32 // late-move reductions start once this many moves have been searched
+	LMRCutNode     int32 // extra plies of reduction at expected cut nodes
+	LMRExempt      int32 // 1: threat moves, threat evasions and advanced pawn pushes are never reduced; 0: they are reduced one ply less
+	PruneExempt    int32 // 1: those moves are also exempt from late-move, futility, history and SEE pruning; 0: only killers and the countermove are
+	NMPBase        int32 // null-move reduction = NMPBase + depth/NMPDepthDiv (+ eval and improving terms)
+	NMPDepthDiv    int32
+	IIRDepth       int32 // internal iterative reduction from this depth, when there is no hash move
+	IIRPV          int32 // 1: also at PV nodes
+	RazorDepth     int32 // razoring up to this depth
+	RazorStep      int32 // razoring margin grows by this per ply of depth above 1
+	SEDoubleMargin int32 // a singular move is extended two plies when the alternatives fall this far below the singular bound (fail-soft only: a fail-hard search never reports how far)
+	SENegExt       int32 // 1: a hash move that is not singular is searched a ply shallower when the node is expected to fail high anyway
+	PawnPushExt    int32 // extension for pawn pushes to the 7th rank: 2 at every node, 1 at PV nodes only, 0 never
+
+	// FailSoft selects where the search returns the score it found rather
+	// than the bound it was searching against (a sum of the soft* bits).
+	FailSoft int32
 
 	ProbCut       int32 // 1: ProbCut before the hash move, at every non-PV node of depth >= 5; 0: off (no gain measured in self-play)
 	ProbCutMargin int32 // ProbCut searches against beta plus this
 }
+
+// Bits of Params.FailSoft.
+const (
+	softMoves     = 1 << iota // the move loop returns and stores the best score found
+	softQS                    // so does quiescence
+	softPruning               // reverse futility, null move, multi-cut and ProbCut return their own score, not beta
+	softUnguarded             // a fail-low node reports its best score even when moves were pruned unsearched
+	softCorr                  // correction history learns from scores outside the window
+)
 
 // P is the live parameter set used by Search.
 var P = Params{
@@ -95,18 +109,23 @@ var P = Params{
 	CheckExt:  2,
 	LMRChecks: 0,
 
-	LMRMinMove:  1,
-	LMRCutNode:  1,
-	LMRExempt:   0,
-	PruneExempt: 1,
-	NMPBase:     4,
-	NMPDepthDiv: 3,
-	IIRDepth:    4,
-	IIRPV:       1,
-	RazorDepth:  3,
-	RazorStep:   250,
-	SENegExt:    1,
-	PawnPushExt: 1,
+	LMRMinMove:     1,
+	LMRCutNode:     1,
+	LMRExempt:      0,
+	PruneExempt:    1,
+	NMPBase:        4,
+	NMPDepthDiv:    3,
+	IIRDepth:       4,
+	IIRPV:          1,
+	RazorDepth:     3,
+	RazorStep:      250,
+	SEDoubleMargin: 25,
+	SENegExt:       1,
+	PawnPushExt:    1,
+
+	// Fail hard. Fail-soft lost in self-play in every form tried: everything
+	// on -35 Elo (+-23), move loop and quiescence only -21 (+-18).
+	FailSoft: 0,
 
 	ProbCut:       0,
 	ProbCutMargin: 200,
@@ -158,8 +177,10 @@ func TunableParams() []ParamSpec {
 		{"IIRPV", &P.IIRPV, 0, 1},
 		{"RazorDepth", &P.RazorDepth, 1, 6},
 		{"RazorStep", &P.RazorStep, 0, 600},
+		{"SEDoubleMargin", &P.SEDoubleMargin, 0, 10000},
 		{"SENegExt", &P.SENegExt, 0, 1},
 		{"PawnPushExt", &P.PawnPushExt, 0, 2},
+		{"FailSoft", &P.FailSoft, 0, 31},
 		{"ProbCut", &P.ProbCut, 0, 1},
 		{"ProbCutMargin", &P.ProbCutMargin, 50, 500},
 	}

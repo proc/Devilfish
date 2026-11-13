@@ -37,14 +37,14 @@ type MovePicker struct {
 	ply          int
 	stage        PickerStage
 
-	captures     movegen.MoveList
-	capScores    [256]int32
-	capSEE       [256]int32
-	capIndex     int
+	captures  movegen.MoveList
+	capScores [256]int32
+	capSEE    [256]int32
+	capIndex  int
 
-	quiets       movegen.MoveList
-	quietScores  [256]int32
-	quietIndex   int
+	quiets      movegen.MoveList
+	quietScores [256]int32
+	quietIndex  int
 
 	badCaps      [64]types.Move
 	badCapScores [64]int32
@@ -64,6 +64,10 @@ type MovePicker struct {
 	kingInDanger    bool
 	hasActiveAttack bool
 	enemyKingRing   bitboard.Bitboard
+
+	// History rows for this node. Set by the search; without it the picker
+	// builds a context that has no continuation history.
+	hc *histCtx
 }
 
 // SetNodeInfo hands the picker values the caller has already computed for this
@@ -298,19 +302,15 @@ func (mp *MovePicker) Next() types.Move {
 				hasActiveAttack = enemyAttackers >= 2 || enemyUnits >= 4
 			}
 			enemyKingRing := mp.enemyRing()
+			hc := mp.hc
+			if hc == nil {
+				c := mp.history.Context(mp.board, -1, pawnThreats)
+				hc = &c
+			}
 
 			for i := 0; i < mp.quiets.Count; i++ {
 				m := mp.quiets.Moves[i]
-				histScore := mp.history.HistoryTable[side][m.From()][m.To()]
-				if mp.prevMove != types.MoveNone && mp.prevMove.To() < 64 && m.To() < 64 {
-					histScore += mp.history.ContHistory[mp.prevMove.To()][m.To()]
-				}
-				if mp.prevMove2 != types.MoveNone && mp.prevMove2.To() < 64 && m.To() < 64 {
-					histScore += mp.history.ContHistory2[mp.prevMove2.To()][m.To()]
-				}
-				if mp.prevMove4 != types.MoveNone && mp.prevMove4.To() < 64 && m.To() < 64 {
-					histScore += mp.history.ContHistory4[mp.prevMove4.To()][m.To()]
-				}
+				histScore := hc.Order(mp.board.Pieces[m.From()], m)
 				isPawnPush := mp.board.Pieces[m.From()].Type() == types.Pawn
 				toSq := m.To()
 				isAdvancedPawn := isPawnPush && ((side == types.White && toSq >= types.A6) || (side == types.Black && toSq <= types.H3))

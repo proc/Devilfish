@@ -196,6 +196,10 @@ func ScoreMoves(
 		counterMove = history.CounterMoves[prevMove.From()][prevMove.To()]
 	}
 
+	// No continuation history here: callers that have a search path use the
+	// move picker.
+	hc := history.Context(b, -1, pawnThreats)
+
 	for i := 0; i < ml.Count; i++ {
 		m := ml.Moves[i]
 
@@ -275,16 +279,7 @@ func ScoreMoves(
 		}
 
 		// 7. Quiet Moves: History + 1-ply, 2-ply & 4-ply Continuation History
-		histScore := history.HistoryTable[side][m.From()][m.To()]
-		if prevMove != types.MoveNone && prevMove.To() < 64 && m.To() < 64 {
-			histScore += history.ContHistory[prevMove.To()][m.To()]
-		}
-		if prevMove2 != types.MoveNone && prevMove2.To() < 64 && m.To() < 64 {
-			histScore += history.ContHistory2[prevMove2.To()][m.To()]
-		}
-		if prevMove4 != types.MoveNone && prevMove4.To() < 64 && m.To() < 64 {
-			histScore += history.ContHistory4[prevMove4.To()][m.To()]
-		}
+		histScore := hc.Order(b.Pieces[m.From()], m)
 
 		isPawnPush := b.Pieces[m.From()].Type() == types.Pawn
 		toSq := m.To()

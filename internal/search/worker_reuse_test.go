@@ -46,7 +46,7 @@ func TestReusedWorkerMatchesFresh(t *testing.T) {
 		if reused.History.Killers != fresh.History.Killers {
 			t.Errorf("worker %d: killers survived the reset", id)
 		}
-		if reused.History.HistoryTable == fresh.History.HistoryTable {
+		if reused.History.Main == fresh.History.Main {
 			t.Errorf("worker %d: history was not carried over", id)
 		}
 		if (reused.Eight == nil) != (fresh.Eight == nil) {

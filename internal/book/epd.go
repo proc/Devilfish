@@ -748,3 +748,21 @@ func (st EPDBuildStats) String() string {
 	return fmt.Sprintf("%d positions, %d solved, %d skipped, %d invalid, %d book entries",
 		st.Positions, st.Solved, st.Skipped, st.Invalid, st.Entries)
 }
+
+// EncodeMove converts an engine move, to be played in b, into Polyglot's
+// 16-bit move encoding.
+func EncodeMove(b *board.Board, m types.Move) uint16 { return encodePolyglotMove(b, m) }
+
+// NewPolyglot makes a Polyglot book from entries, sorting them by key.
+func NewPolyglot(entries []Entry) *Book {
+	sort.SliceStable(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })
+	return &Book{entries: entries}
+}
+
+// Entries returns a copy of a Polyglot book's entries (nil for an EPD book).
+func (bk *Book) Entries() []Entry {
+	if bk == nil {
+		return nil
+	}
+	return append([]Entry(nil), bk.entries...)
+}
