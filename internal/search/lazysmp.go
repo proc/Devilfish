@@ -525,6 +525,18 @@ func (e *Engine) Search(
 			}
 
 			if e.Stopped.Load() {
+				// The iteration was cut off, but a root move it finished
+				// searching and found better than everything before it
+				// (including the previous best move, which is searched
+				// first) is a real improvement: play it.
+				if m := master.PVArray[0][0]; depth > 1 && master.PVLength[0] > 0 && m != types.MoveNone && m != rootBestMove && isLegalMove(b, m) {
+					logger.Profilef("Stopped at depth %d: adopting %s over %s from the unfinished iteration", depth, m, rootBestMove)
+					rootBestMove = m
+					rootPonderMove = types.MoveNone
+					if master.PVLength[0] > 1 {
+						rootPonderMove = master.PVArray[0][1]
+					}
+				}
 				break
 			}
 

@@ -520,13 +520,22 @@ func TestBulletAndBlitzTimeManagement(t *testing.T) {
 		t.Errorf("Blitz 3+0 MaxTime too high: got %v, expected <= 10.0s", tmBlitz.MaxTime)
 	}
 
-	// Test 5: CanStartNewIteration early exit when move is stable
-	// If move is stable and projected time exceeds OptTime, must return false!
-	tmStable := NewTimeManager(SearchLimits{WhiteTime: 60000, MoveOverhead: 20}, types.White, &stopped, &nodes)
-	// At 80% elapsed time with stable move, starting new iteration must be denied
-	tmStable.StartTime = time.Now().Add(-time.Duration(float64(tmStable.OptTime)*0.85))
-	if tmStable.CanStartNewIteration(200*time.Millisecond, true) {
-		t.Errorf("expected CanStartNewIteration to reject new iteration when move is stable and elapsed >= 85%% OptTime")
+	// Test 5: CanStartNewIteration with a stable move. Short of time, a new
+	// iteration that would run past OptTime is refused; otherwise the move
+	// keeps going until its budget is spent.
+	tmStable := NewTimeManager(SearchLimits{WhiteTime: 8000, MoveOverhead: 20}, types.White, &stopped, &nodes)
+	tmStable.StartTime = time.Now().Add(-time.Duration(float64(tmStable.OptTime) * 0.85))
+	if tmStable.CanStartNewIteration(tmStable.OptTime/4, true) {
+		t.Errorf("expected time trouble to reject a new iteration at 85%% of OptTime with a stable move")
+	}
+	tmRoomy := NewTimeManager(SearchLimits{WhiteTime: 60000, MoveOverhead: 20}, types.White, &stopped, &nodes)
+	tmRoomy.StartTime = time.Now().Add(-time.Duration(float64(tmRoomy.OptTime) * 0.85))
+	if !tmRoomy.CanStartNewIteration(tmRoomy.OptTime/10, true) {
+		t.Errorf("expected a stable move with budget left to start another iteration")
+	}
+	tmRoomy.StartTime = time.Now().Add(-tmRoomy.OptTime)
+	if tmRoomy.CanStartNewIteration(tmRoomy.OptTime/10, true) {
+		t.Errorf("expected no new iteration once OptTime is spent")
 	}
 }
 

@@ -212,6 +212,13 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 			maxMultiplier = 2.5
 		}
 
+		// With an increment every move is paid for again, so more of the clock
+		// itself can go into each move. (At 3 min + 2 s, games were ending
+		// with 40-100 s unused.) Sudden-death clocks keep the cautious share.
+		if myInc > 0 && !tm.IsTimeTrouble {
+			divisor = divisor * 80 / 100
+		}
+
 		// Dynamic Endgame Time Scaling:
 		// When fewer pieces remain on the board, fewer moves remain in the game,
 		// and tactical precision in king/pawn endgames is critical.
@@ -241,7 +248,10 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 			}
 		}
 
-		optTimeMs = (usableTime / divisor) + (myInc * 3 / 4)
+		// A move now typically runs to about its whole budget (see
+		// CanStartNewIteration), so the increment share is set for the clock
+		// to settle around 15 increments in a long game rather than drain.
+		optTimeMs = (usableTime / divisor) + (myInc * 3 / 5)
 	}
 
 	maxTimeMs = int64(float64(optTimeMs) * maxMultiplier)
@@ -360,23 +370,20 @@ func (tm *TimeManager) CanStartNewIteration(lastIterDuration time.Duration, isSt
 		return elapsed < tm.OptTime-10*time.Millisecond
 	}
 
-	// In fast time controls or time trouble, if we have already spent >= 60-75% of OptTime,
-	// starting another iteration will almost certainly blow past OptTime due to branching factor.
-	threshold := 0.75
-	if tm.IsEmergency {
-		threshold = 0.50
-	} else if tm.IsTimeTrouble {
-		threshold = 0.65
-	} else if tm.IsEndgame {
-		// In endgames, branching factor is lower (~1.4-1.6x), so it is safe to start up to 80% of OptTime
-		threshold = 0.80
-	} else if tm.RemainingTime > 0 && tm.RemainingTime < 60000 {
-		threshold = 0.68
-	} else if tm.RemainingTime > 0 && tm.RemainingTime < 180000 {
-		threshold = 0.72
-	}
-	if elapsed >= time.Duration(float64(tm.OptTime)*threshold) && isStable {
-		return false
+	// A stable best move has already had its budget cut by ScaleOptTime, so
+	// it runs until that budget is spent (the check above). Only when short
+	// of time does it stop earlier, since the next iteration would then
+	// almost certainly run past OptTime.
+	if isStable {
+		threshold := 1.0
+		if tm.IsEmergency {
+			threshold = 0.50
+		} else if tm.IsTimeTrouble {
+			threshold = 0.65
+		}
+		if elapsed >= time.Duration(float64(tm.OptTime)*threshold) {
+			return false
+		}
 	}
 
 	// Project next iteration time:
@@ -390,10 +397,12 @@ func (tm *TimeManager) CanStartNewIteration(lastIterDuration time.Duration, isSt
 
 	if lastIterDuration > 0 {
 		projected := elapsed + time.Duration(float64(lastIterDuration)*branchingFactor)
-		// If the move is already stable, don't overshoot OptTime
-		if isStable && projected > tm.OptTime {
-			return false
-		}
+		// Only time trouble refuses an iteration because it may overrun
+		// OptTime. Otherwise a stable move is stopped by the elapsed-time
+		// threshold above, not by this estimate: with iterations doubling in
+		// length, refusing every one that might not fit ended most moves at
+		// a third to a half of their budget. An iteration that does overrun
+		// is cut off by the soft stop, and what it found is still used.
 		if tm.IsTimeTrouble && projected > tm.OptTime {
 			return false
 		}
