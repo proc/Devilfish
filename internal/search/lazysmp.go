@@ -131,6 +131,20 @@ func (e *Engine) NewGame() {
 	}
 }
 
+// Stats returns the search statistics of the last search, summed over the
+// worker threads.
+func (e *Engine) Stats() SearchStats {
+	e.searchMu.Lock()
+	defer e.searchMu.Unlock()
+	var total SearchStats
+	for _, w := range e.workers {
+		if w != nil {
+			total.Add(&w.Stats)
+		}
+	}
+	return total
+}
+
 func (e *Engine) Stop() {
 	e.Stopped.Store(true)
 }

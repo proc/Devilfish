@@ -2,6 +2,7 @@ package uci
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ var BenchUsage = []string{
 	"bench threads [ms] [max]    Search speed at every thread count up to max (default: all CPUs), and the fastest setting",
 	"bench perft [depth]         Move generator speed (default depth 5)",
 	"bench eval [ms]             Static evaluations per second (default 1000 ms per evaluator)",
+	"bench stats [depth]         Search statistics at a fixed depth (default 12): tree shape, move ordering, what each pruning rule did",
 	"bench all                   The fixed-depth, fixed-time, perft and eval benchmarks in turn",
 }
 
@@ -71,6 +73,8 @@ func (u *UCI) cmdBench(args []string) {
 		u.benchThreads(int64(v[0]), v[1])
 	case "perft", "movegen":
 		u.benchPerft(benchInts(args[1:], 5)[0])
+	case "stats":
+		u.benchStats(int8(min(benchInts(args[1:], 12)[0], 64)))
 	case "eval", "nnue":
 		u.benchEval(int64(benchInts(args[1:], 1000)[0]))
 	case "all":
@@ -317,4 +321,100 @@ func (u *UCI) benchEval(ms int64) {
 		})
 	}
 	run("Classical", eval.EvaluateClassical)
+}
+
+// pct is 100*a/b, or 0 when b is 0.
+func pct(a, b uint64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return 100 * float64(a) / float64(b)
+}
+
+// benchStats searches the bench positions to a fixed depth and reports what
+// the search did: how the tree grows, how good the move ordering is, and how
+// often each pruning rule fired.
+func (u *UCI) benchStats(depth int8) {
+	u.sendLine(fmt.Sprintf("Search statistics at depth %d with %d threads, %d positions...", depth, u.engine.NumThreads, len(benchPositions)))
+	var st search.SearchStats
+	var total benchResult
+	growth, growthN := 0.0, 0
+	for _, fen := range benchPositions {
+		b, err := board.ParseFEN(fen)
+		if err != nil {
+			continue
+		}
+		u.engine.NewGame()
+		var nodesAt [65]uint64
+		start := time.Now()
+		u.engine.Search(b, search.SearchLimits{MaxDepth: depth}, func(si search.SearchInfo) {
+			if si.Depth >= 0 && int(si.Depth) < len(nodesAt) && si.MultiPV <= 1 {
+				nodesAt[si.Depth] = si.Nodes
+			}
+		})
+		total.elapsed += time.Since(start)
+		total.nodes += u.engine.Nodes.Load()
+		ps := u.engine.Stats()
+		st.Add(&ps)
+		// Growth per ply over the last four iterations.
+		if d := int(depth); d >= 6 && nodesAt[d] > 0 && nodesAt[d-4] > 0 {
+			growth += math.Log(float64(nodesAt[d])/float64(nodesAt[d-4])) / 4
+			growthN++
+		}
+	}
+
+	line := func(format string, args ...any) { u.sendLine(fmt.Sprintf(format, args...)) }
+	all := st.Nodes + st.QNodes
+	line("")
+	line("Tree")
+	line("  nodes                %12d  (%.0f nodes/sec)", total.nodes, total.nps())
+	line("  main search          %12d  %5.1f%%", st.Nodes, pct(st.Nodes, all))
+	line("  quiescence           %12d  %5.1f%%", st.QNodes, pct(st.QNodes, all))
+	if growthN > 0 {
+		line("  growth per ply       %12.2f  (nodes ratio between iterations, last four)", math.Exp(growth/float64(growthN)))
+	}
+	line("  moves per node       %12.2f  (main-search nodes that searched a move)", float64(st.MovesSearched)/float64(max(st.NodesWithMoves, 1)))
+	line("")
+	line("Move ordering (main search)")
+	line("  cutoffs on 1st move  %11.1f%%  of %d cutoffs", pct(st.BetaCutsFirst, st.BetaCuts), st.BetaCuts)
+	line("  cutoffs by hash move %11.1f%%", pct(st.BetaCutsTT, st.BetaCuts))
+	if late := st.BetaCuts - st.BetaCutsFirst; late > 0 {
+		line("  late cutoffs come at %12.1f  moves in, on average", 1+float64(st.BetaCutIndex)/float64(late))
+	}
+	line("  quiescence 1st move  %11.1f%%  of %d cutoffs", pct(st.QBetaFirst, st.QBetaCuts), st.QBetaCuts)
+	line("")
+	line("Hash table (main search)")
+	line("  hits                 %11.1f%%  of probes", pct(st.TTHits, st.TTProbes))
+	line("  cutoffs              %11.1f%%  of probes", pct(st.TTCuts, st.TTProbes))
+	line("")
+	line("Node pruning                    count   %% of main nodes")
+	row := func(name string, n uint64, note string) {
+		line("  %-20s %12d  %5.1f%%  %s", name, n, pct(n, st.Nodes), note)
+	}
+	row("reverse futility", st.RFPCuts, "")
+	row("  blocked by guards", st.RFPGuarded, "margin met, but a threat or king-safety guard forbade it")
+	row("null move tried", st.NMPTries, fmt.Sprintf("%.1f%% cut off", pct(st.NMPCuts, st.NMPTries)))
+	row("  blocked by guards", st.NMPGuarded, "eligible, but a threat or king-safety guard forbade it")
+	row("razoring tried", st.RazorTries, fmt.Sprintf("%.1f%% cut off", pct(st.RazorCuts, st.RazorTries)))
+	row("probcut tried", st.ProbTries, fmt.Sprintf("%.1f%% cut off", pct(st.ProbCuts, st.ProbTries)))
+	row("singular tried", st.SETries, fmt.Sprintf("%.1f%% extended, %.1f%% multi-cut", pct(st.SEExtends, st.SETries), pct(st.SEMultiCut, st.SETries)))
+	row("reduced, no hash move", st.IIR, "")
+	row("check extensions", st.CheckExts, "")
+	line("")
+	considered := st.MovesSearched + st.LMPPruned + st.FutPruned + st.HistPruned + st.SEEPruned
+	line("Move pruning                    count   %% of moves reached")
+	mrow := func(name string, n uint64, note string) {
+		line("  %-20s %12d  %5.1f%%  %s", name, n, pct(n, considered), note)
+	}
+	mrow("late move pruning", st.LMPPruned, "")
+	mrow("futility", st.FutPruned, "")
+	mrow("history", st.HistPruned, "")
+	mrow("SEE", st.SEEPruned, "")
+	mrow("searched", st.MovesSearched, "")
+	mrow("  at reduced depth", st.LMRSearches, fmt.Sprintf("%.2f plies on average; %.1f%% had to be searched again", float64(st.LMRPlies)/float64(max(st.LMRSearches, 1)), pct(st.LMRReSearches, st.LMRSearches)))
+	line("")
+	line("Quiescence")
+	line("  stand-pat cutoffs    %11.1f%%  of quiescence nodes", pct(st.QStandPatCuts, st.QNodes))
+	qc := st.QMoves + st.QFutPruned + st.QSEEPruned
+	line("  captures: %.1f%% searched, %.1f%% futile, %.1f%% losing (SEE)", pct(st.QMoves, qc), pct(st.QFutPruned, qc), pct(st.QSEEPruned, qc))
 }

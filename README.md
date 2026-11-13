@@ -139,7 +139,7 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
 
    The embedded suites are stored packed (`internal/book/*.epdb.gz`) and decoded only when selected. To embed another suite, pack it with `go run ./cmd/epdpack -in suite.epd -out internal/book/suite.epdb.gz` and register it in `internal/book/epdbook.go`.
 
-   Every UCI option can be set in `config.json`. The settings above cover the standard ones (`Hash`, `Threads`, `Ponder`, `UseNNUE`, `EvalFile`, the `Syzygy*` options, `LogFile`, `Move Overhead`, `MultiPV`, `OwnBook`, `BookFile`). The search tunables (`LMRBase`, `LMRDivisor`, `LMRHistDiv`, `RFPMargin`, `RFPNonImpr`, `RazorMargin`, `NMPEvalDiv`, `LMPMultImpr`, `LMPMultNonImp`, `FutMargin`, `HistPrImpr`, `HistPrNonImp`, `SEEQuietMul`, `SEENoisyMul`, `QSFutMargin`, `CheckExtSEE`, `QSChecks`, `RFPDepth`, `LMPDepth`, `FutDepth`, `HistDepth`, `SEEDepth`) go in a `search_params` object or directly at the top level, by their UCI name (case, spaces, `_` and `-` are ignored):
+   Every UCI option can be set in `config.json`. The settings above cover the standard ones (`Hash`, `Threads`, `Ponder`, `UseNNUE`, `EvalFile`, the `Syzygy*` options, `LogFile`, `Move Overhead`, `MultiPV`, `OwnBook`, `BookFile`). The search tunables (`LMRBase`, `LMRDivisor`, `LMRHistDiv`, `RFPMargin`, `RFPNonImpr`, `RazorMargin`, `NMPEvalDiv`, `LMPMultImpr`, `LMPMultNonImp`, `FutMargin`, `HistPrImpr`, `HistPrNonImp`, `SEEQuietMul`, `SEENoisyMul`, `QSFutMargin`, `CheckExtSEE`, `QSChecks`, `RFPDepth`, `LMPDepth`, `FutDepth`, `HistDepth`, `SEEDepth`, `RFPGuard`, `NMPGuard`, `CheckExt`, `LMRChecks`) go in a `search_params` object or directly at the top level, by their UCI name (case, spaces, `_` and `-` are ignored):
    ```json
    {
      "hash": 256,
@@ -208,6 +208,7 @@ Further benchmark modes, available both from the command line and as commands in
 ./devilfish bench threads 3000 8 # the same with 3 s per position, up to 8 threads
 ./devilfish bench perft 5        # move generator speed
 ./devilfish bench eval           # static evaluations per second (NNUE and classical)
+./devilfish bench stats 12 -t 1 # search statistics: tree growth, move ordering, what each pruning rule did
 ./devilfish bench all            # fixed-depth, fixed-time, perft and eval in turn
 ```
 

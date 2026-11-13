@@ -34,6 +34,12 @@ type Params struct {
 	FutDepth  int32 // futility pruning (reduced depth)
 	HistDepth int32 // history pruning (reduced depth)
 	SEEDepth  int32 // SEE pruning
+
+	// Switches for rules that hold the pruning back.
+	RFPGuard  int32 // 1: no reverse futility pruning with a piece under threat or the king under pressure
+	NMPGuard  int32 // 1: no null move with the queen under threat or the king under pressure
+	CheckExt  int32 // check extension: 2 at every node, 1 at PV nodes only, 0 never
+	LMRChecks int32 // 1: moves that give check take late-move reductions (one ply less)
 }
 
 // P is the live parameter set used by Search.
@@ -60,6 +66,10 @@ var P = Params{
 	FutDepth:      8,
 	HistDepth:     6,
 	SEEDepth:      8,
+	RFPGuard:      1,
+	NMPGuard:      1,
+	CheckExt:      2,
+	LMRChecks:     0,
 }
 
 // ParamSpec describes one tunable for UCI option listing and the tuner.
@@ -94,6 +104,10 @@ func TunableParams() []ParamSpec {
 		{"FutDepth", &P.FutDepth, 1, 14},
 		{"HistDepth", &P.HistDepth, 1, 14},
 		{"SEEDepth", &P.SEEDepth, 1, 14},
+		{"RFPGuard", &P.RFPGuard, 0, 1},
+		{"NMPGuard", &P.NMPGuard, 0, 1},
+		{"CheckExt", &P.CheckExt, 0, 2},
+		{"LMRChecks", &P.LMRChecks, 0, 1},
 	}
 }
 
