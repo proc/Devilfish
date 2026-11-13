@@ -65,23 +65,31 @@ func TestLongClockThinksMore(t *testing.T) {
 	}
 }
 
-// In-search adjustments stay within bounds of the base allocation, and the
-// ceiling is higher with a clock lead or a long clock.
-func TestAdjustOptTimeIsBounded(t *testing.T) {
+// In-search scaling stays within bounds of the base allocation, the ceiling
+// is higher with a clock lead or a long clock, and repeating a factor does not
+// compound.
+func TestScaleOptTimeIsBounded(t *testing.T) {
 	check := func(name string, tm *TimeManager, ceiling float64) {
 		base := tm.OptTime
-		for i := 0; i < 20; i++ {
-			tm.AdjustOptTime(1.25)
-		}
+		tm.ScaleOptTime(10)
 		limit := min(time.Duration(float64(base)*ceiling), tm.MaxTime)
 		if tm.OptTime > limit+time.Millisecond {
-			t.Errorf("%s: extensions compounded to %v, limit %v", name, tm.OptTime, limit)
+			t.Errorf("%s: extended to %v, limit %v", name, tm.OptTime, limit)
+		}
+		tm.ScaleOptTime(0.01)
+		if floor := time.Duration(float64(base) * minOptScale); tm.OptTime < floor-time.Millisecond {
+			t.Errorf("%s: reduced to %v, floor %v", name, tm.OptTime, floor)
 		}
 		for i := 0; i < 20; i++ {
-			tm.AdjustOptTime(0.75)
+			tm.ScaleOptTime(0.8)
 		}
-		if floor := time.Duration(float64(base) * 0.35); tm.OptTime < floor-time.Millisecond {
-			t.Errorf("%s: reductions compounded to %v, floor %v", name, tm.OptTime, floor)
+		want := time.Duration(float64(base) * 0.8)
+		if d := tm.OptTime - want; d > time.Millisecond || d < -time.Millisecond {
+			t.Errorf("%s: repeated 0.8 scaling compounded to %v, want %v", name, tm.OptTime, want)
+		}
+		tm.ScaleOptTime(1)
+		if tm.OptTime != base {
+			t.Errorf("%s: scale 1 gave %v, base %v", name, tm.OptTime, base)
 		}
 	}
 	even := newTM(SearchLimits{WhiteTime: 300000, BlackTime: 300000}, types.White)
@@ -93,6 +101,36 @@ func TestAdjustOptTimeIsBounded(t *testing.T) {
 	check("even", even, 2.0)
 	check("lead", lead, 2.5)
 	check("long", long, 2.5)
+}
+
+// An iteration running on a budget that stability scaled down is still
+// measured against the base allocation, and a root fail low lets it run to
+// MaxTime.
+func TestSoftStopAfterReductionAndFailLow(t *testing.T) {
+	tm := newTM(SearchLimits{WhiteTime: 300000, BlackTime: 300000}, types.White)
+	base := tm.OptTime
+	tm.ScaleOptTime(minOptScale)
+	tm.StartTime = time.Now().Add(-time.Duration(float64(base) * 1.2))
+	if tm.CheckLimits() {
+		t.Fatal("reduced budget stopped the iteration before the base soft limit")
+	}
+
+	tm.StartTime = time.Now().Add(-time.Duration(float64(base) * (softStopFactor + 0.05)))
+	tm.SetRootFailLow(true)
+	if tm.CheckLimits() {
+		t.Fatal("fail-low iteration stopped at the soft limit")
+	}
+	tm.StartTime = time.Now().Add(-tm.MaxTime - time.Millisecond)
+	if !tm.CheckLimits() {
+		t.Fatal("fail-low iteration ran past MaxTime")
+	}
+
+	// Not in an emergency: there the soft limit always holds.
+	em := newTM(SearchLimits{WhiteTime: 1500, BlackTime: 1500}, types.White)
+	em.SetRootFailLow(true)
+	if !em.IsEmergency || em.rootFailLow.Load() {
+		t.Fatal("fail-low extension applied in an emergency")
+	}
 }
 
 // No single move may take more than 15% of the clock (18% in endgames, +3%

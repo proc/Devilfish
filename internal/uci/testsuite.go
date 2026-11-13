@@ -57,7 +57,7 @@ func (u *UCI) cmdTestSuite(args []string) TestSuiteResult {
 	start := time.Now()
 	for i := range positions {
 		p := &positions[i]
-		u.engine.TT.Clear()
+		u.engine.NewGame()
 
 		solvedAt := int64(-1)
 		info := func(si search.SearchInfo) {

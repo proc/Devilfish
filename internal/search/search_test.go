@@ -96,13 +96,13 @@ func TestDynamicTimeAdjustment(t *testing.T) {
 	tm := NewTimeManager(SearchLimits{WhiteTime: 10000}, types.White, &stopped, &nodes)
 	initialOpt := tm.OptTime
 
-	tm.AdjustOptTime(0.8)
+	tm.ScaleOptTime(0.8)
 	if tm.OptTime >= initialOpt {
 		t.Errorf("expected reduced OptTime, got %v >= %v", tm.OptTime, initialOpt)
 	}
 
-	tm.AdjustOptTime(1.5)
-	if tm.OptTime <= initialOpt*8/10 {
+	tm.ScaleOptTime(1.5)
+	if tm.OptTime <= initialOpt {
 		t.Errorf("expected increased OptTime, got %v", tm.OptTime)
 	}
 }

@@ -43,15 +43,22 @@ type TimeManager struct {
 	PieceCount    int
 	IsEndgame     bool
 
-	// BaseOptTime is OptTime as first allocated; AdjustOptTime keeps OptTime
-	// within [MinExtend, MaxExtend] times it, so repeated in-search
-	// extensions cannot compound up to MaxTime.
+	// BaseOptTime is OptTime as first allocated. ScaleOptTime sets OptTime to
+	// a multiple of it, within [MinExtend, MaxExtend], so in-search
+	// adjustments describe the current position and never compound.
 	BaseOptTime time.Duration
 	MinExtend   float64
 	MaxExtend   float64
 	// ClockLead is our expected thinking time over the next moves divided by
 	// the opponent's (1 when equal or unknown).
 	ClockLead float64
+
+	// softStop is the elapsed time (ns) at which a running iteration is
+	// stopped. Written by the master, read by every worker in CheckLimits.
+	softStop atomic.Int64
+	// rootFailLow: the current iteration failed low at the root, so the move
+	// we were going to play is in doubt and the iteration may run to MaxTime.
+	rootFailLow atomic.Bool
 }
 
 // Tuning for the clock-lead adjustment. Each side's budget is its clock plus
@@ -64,8 +71,13 @@ const (
 	leadMaxScale  = 1.5
 
 	// softStopFactor: an iteration still running at this multiple of OptTime
-	// is stopped, rather than being allowed to run on to MaxTime.
+	// (or of BaseOptTime, if OptTime was scaled below it) is stopped, rather
+	// than being allowed to run on to MaxTime.
 	softStopFactor = 1.6
+
+	// minOptScale: in-search adjustments never cut the budget below this
+	// share of the base allocation.
+	minOptScale = 0.5
 
 	// longClockMs: from this much time left, extensions may go further.
 	longClockMs = 600000
@@ -102,6 +114,7 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 		tm.OptTime = dur
 		tm.MaxTime = dur
 		tm.IsMoveTime = true
+		tm.updateSoftStop()
 		return tm
 	}
 
@@ -273,10 +286,11 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 	tm.BaseOptTime = tm.OptTime
 	// In-search adjustments may grow the budget further when there is time
 	// to spare: a clock lead or a long clock.
-	tm.MinExtend, tm.MaxExtend = 0.35, 2.0
+	tm.MinExtend, tm.MaxExtend = minOptScale, 2.0
 	if (tm.ClockLead >= 1.5 || myTime >= longClockMs) && !tm.IsTimeTrouble {
 		tm.MaxExtend = 2.5
 	}
+	tm.updateSoftStop()
 
 	return tm
 }
@@ -307,8 +321,10 @@ func (tm *TimeManager) CheckLimits() bool {
 	if tm.MaxTime > 0 {
 		elapsed := time.Since(tm.StartTime)
 		limit := tm.MaxTime
-		if !tm.IsMoveTime && tm.OptTime > 0 {
-			limit = min(limit, time.Duration(float64(tm.OptTime)*softStopFactor))
+		if !tm.rootFailLow.Load() {
+			if soft := time.Duration(tm.softStop.Load()); soft > 0 {
+				limit = min(limit, soft)
+			}
 		}
 		if elapsed >= limit {
 			tm.Stopped.Store(true)
@@ -389,23 +405,43 @@ func (tm *TimeManager) CanStartNewIteration(lastIterDuration time.Duration, isSt
 	return true
 }
 
-// AdjustOptTime dynamically scales the optimal search time based on move stability and score drops.
-func (tm *TimeManager) AdjustOptTime(factor float64) {
-	if tm.OptTime <= 0 || tm.Infinite || tm.IsMoveTime {
+// updateSoftStop recomputes the in-iteration stop point from OptTime. An
+// iteration started on a budget that stability had scaled down may be the one
+// that refutes the stable move, so it is measured against at least the base
+// allocation.
+func (tm *TimeManager) updateSoftStop() {
+	if tm.IsMoveTime || tm.OptTime <= 0 {
+		tm.softStop.Store(int64(tm.MaxTime))
 		return
 	}
-	newOptMs := int64(float64(tm.OptTime.Milliseconds()) * factor)
-	// Keep the cumulative effect of all adjustments within bounds of the
-	// original allocation.
-	if base := tm.BaseOptTime.Milliseconds(); base > 0 && tm.MaxExtend > 0 {
-		newOptMs = min(max(newOptMs, int64(float64(base)*tm.MinExtend)), int64(float64(base)*tm.MaxExtend))
+	ref := max(tm.OptTime, tm.BaseOptTime)
+	tm.softStop.Store(int64(min(tm.MaxTime, time.Duration(float64(ref)*softStopFactor))))
+}
+
+// SetRootFailLow records whether the iteration in progress has failed low at
+// the root. While set, the iteration is allowed to run to MaxTime so the
+// search can find a replacement move instead of being cut off and playing the
+// one it has just found a problem with. Ignored in emergencies.
+func (tm *TimeManager) SetRootFailLow(failLow bool) {
+	tm.rootFailLow.Store(failLow && !tm.IsEmergency)
+}
+
+// ScaleOptTime sets the optimal search time to factor times the base
+// allocation, within [MinExtend, MaxExtend] and never above MaxTime. The
+// factor is absolute, not relative to the current OptTime: calling it every
+// iteration with the same factor leaves the budget unchanged.
+func (tm *TimeManager) ScaleOptTime(factor float64) {
+	if tm.BaseOptTime <= 0 || tm.Infinite || tm.IsMoveTime {
+		return
 	}
-	if newOptMs < 10 {
-		newOptMs = 10
+	if tm.MaxExtend > 0 {
+		factor = min(max(factor, tm.MinExtend), tm.MaxExtend)
 	}
-	maxMs := tm.MaxTime.Milliseconds()
-	if maxMs > 0 && newOptMs > maxMs {
-		newOptMs = maxMs
+	opt := time.Duration(float64(tm.BaseOptTime) * factor)
+	opt = max(opt, 5*time.Millisecond)
+	if tm.MaxTime > 0 {
+		opt = min(opt, tm.MaxTime)
 	}
-	tm.OptTime = time.Duration(newOptMs) * time.Millisecond
+	tm.OptTime = opt
+	tm.updateSoftStop()
 }

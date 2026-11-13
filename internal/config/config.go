@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 )
 
@@ -67,7 +66,7 @@ func paramValue(v interface{}) (int, bool) {
 
 func DefaultConfig() Config {
 	return Config{
-		Threads:          runtime.NumCPU(),
+		Threads:          DefaultThreads(),
 		Hash:             128,
 		Ponder:           false,
 		UseNNUE:          true,

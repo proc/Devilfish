@@ -53,6 +53,11 @@ type Engine struct {
 }
 
 // worker returns the worker for thread id, ready for a new search of b.
+// stabilityScale is the time factor by number of consecutive iterations the
+// best move has held: a fresh best move earns extra time, a long-standing one
+// gives some back.
+var stabilityScale = [...]float64{1.30, 1.15, 1.00, 0.92, 0.85, 0.80}
+
 func (e *Engine) worker(id int, b *board.Board, tm *TimeManager) *SearchWorker {
 	if id == 0 && len(e.workers) > e.NumThreads {
 		// The thread count went down: let the surplus workers go.
@@ -108,6 +113,19 @@ func (e *Engine) SetThreads(n int) {
 
 func (e *Engine) SetHash(sizeMB int) {
 	e.TT.Resize(sizeMB)
+}
+
+// NewGame forgets everything learned from earlier positions: the
+// transposition table and every worker's history tables.
+func (e *Engine) NewGame() {
+	e.searchMu.Lock()
+	defer e.searchMu.Unlock()
+	e.TT.Clear()
+	for _, w := range e.workers {
+		if w != nil {
+			w.History.Clear()
+		}
+	}
 }
 
 func (e *Engine) Stop() {
@@ -451,7 +469,9 @@ func (e *Engine) Search(
 			}
 
 			iterStartTime := time.Now()
+			iterStartNodes := master.LocalNodes
 			master.RootMoveNodes = [64][64]uint64{}
+			tm.SetRootFailLow(false)
 
 			var score int32
 			if depth < 4 {
@@ -477,6 +497,9 @@ func (e *Engine) Search(
 					}
 
 					if score <= alpha {
+						// The expected move is worse than thought: let this
+						// iteration run on to find out how bad, or a better one.
+						tm.SetRootFailLow(true)
 						beta = (alpha + beta) / 2
 						alpha = score - delta
 						if alpha < -Infinity {
@@ -589,7 +612,10 @@ func (e *Engine) Search(
 				}
 			}
 
-			// Dynamic Time Management: Best move stability, node dominance & fail-low recovery
+			// Dynamic Time Management: best move stability, node dominance and
+			// score drops each give a factor; their product scales the base
+			// allocation. Recomputed from scratch every iteration, so a run of
+			// agreeing shallow iterations cannot shrink the budget for good.
 			isStable := false
 			hasClockTime := tm.OptTime > 0 && limits.MaxDepth == 0 && limits.MaxNodes == 0 && !tm.Infinite && !tm.Ponder.Load() && !tm.IsMoveTime
 
@@ -602,37 +628,46 @@ func (e *Engine) Search(
 					if hasClockTime && tm.IsEmergency && bestMoveStability >= 2 && depth >= 8 {
 						break
 					}
-
-					// Dynamic time allocation adjustment based on stability
-					if hasClockTime {
-						if bestMoveStability >= 2 {
-							tm.AdjustOptTime(0.85)
-						}
-						if bestMoveStability >= 4 {
-							tm.AdjustOptTime(0.75)
-						}
-					}
 				} else {
 					bestMoveStability = 0
-					isStable = false
 				}
 
-				// Node-based time management: evaluate dominance of root move
-				if hasClockTime && master.LocalNodes > 0 {
-					rootNodes := master.RootMoveNodes[rootBestMove.From()][rootBestMove.To()]
-					nodeRatio := float64(rootNodes) / float64(master.LocalNodes)
-					if nodeRatio >= 0.70 {
-						tm.AdjustOptTime(0.85)
-					} else if nodeRatio < 0.35 && !tm.IsTimeTrouble {
-						// Disputed position: extend allocated time slightly
-						tm.AdjustOptTime(1.20)
+				if hasClockTime {
+					scale := stabilityScale[min(bestMoveStability, len(stabilityScale)-1)]
+
+					// Share of this iteration's nodes spent on the best move.
+					if iterNodes := master.LocalNodes - iterStartNodes; iterNodes > 0 {
+						rootNodes := master.RootMoveNodes[rootBestMove.From()][rootBestMove.To()]
+						switch nodeRatio := float64(rootNodes) / float64(iterNodes); {
+						case nodeRatio >= 0.90:
+							scale *= 0.80
+						case nodeRatio >= 0.75:
+							scale *= 0.90
+						case nodeRatio < 0.40:
+							// Disputed position: alternatives took most of the search
+							scale *= 1.20
+						}
 					}
-				}
 
-				// If the score dropped significantly from the previous iteration, extend time to recover (only if not in time trouble)
-				if hasClockTime && !tm.IsTimeTrouble && prevIterationScore != 0 && score < prevIterationScore-40 {
-					isStable = false
-					tm.AdjustOptTime(1.25)
+					// Score falling from the previous iteration: take time to recover
+					if prevIterationScore != 0 {
+						switch drop := prevIterationScore - score; {
+						case drop >= 80:
+							scale *= 1.50
+							isStable = false
+						case drop >= 40:
+							scale *= 1.30
+							isStable = false
+						case drop >= 20:
+							scale *= 1.15
+						}
+					}
+
+					// In time trouble the budget may shrink but not grow.
+					if tm.IsTimeTrouble {
+						scale = min(scale, 1.0)
+					}
+					tm.ScaleOptTime(scale)
 				}
 			}
 			prevIterationBestMove = rootBestMove

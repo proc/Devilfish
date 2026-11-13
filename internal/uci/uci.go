@@ -443,7 +443,7 @@ func (u *UCI) cmdSetOption(args []string) {
 
 func (u *UCI) cmdUCINewGame() {
 	u.stopSearch(false)
-	u.engine.TT.Clear()
+	u.engine.NewGame()
 	b, _ := board.ParseFEN(board.StartFEN)
 	u.board = b
 

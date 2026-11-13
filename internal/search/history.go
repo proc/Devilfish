@@ -40,6 +40,14 @@ func (h *SearchHistory) Clear() {
 	h.ContCorr = [2][64][64]int16{}
 }
 
+// NewSearch readies the tables for the next search of the same game. Killers
+// belong to plies of the previous search tree and are dropped; the history,
+// counter-move and correction tables describe the game's pawn structures and
+// piece play, which carry over to the next move, so they are kept.
+func (h *SearchHistory) NewSearch() {
+	h.Killers = [MaxPly][2]types.Move{}
+}
+
 func (h *SearchHistory) UpdateKillers(ply int, m types.Move) {
 	if ply >= MaxPly || m.IsCapture() || m.IsCastle() {
 		return

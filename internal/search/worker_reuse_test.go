@@ -10,7 +10,8 @@ import (
 )
 
 // A worker reused for a new search must start in the same state as a new one,
-// apart from the eval cache and accumulator storage it is allowed to keep.
+// apart from its history tables (kept between moves of a game) and
+// the eval cache and accumulator storage it is allowed to keep.
 func TestReusedWorkerMatchesFresh(t *testing.T) {
 	e := NewEngine(16, 2)
 	first, _ := board.ParseFEN("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
@@ -30,7 +31,7 @@ func TestReusedWorkerMatchesFresh(t *testing.T) {
 		for i := 0; i < rv.NumField(); i++ {
 			name := rv.Type().Field(i).Name
 			switch name {
-			case "EvalCache", "Eight":
+			case "EvalCache", "Eight", "History":
 				continue // kept on purpose; checked below
 			}
 			// Read through the field's address so unexported fields compare too.
@@ -41,6 +42,12 @@ func TestReusedWorkerMatchesFresh(t *testing.T) {
 			if !reflect.DeepEqual(field(rv), field(fv)) {
 				t.Errorf("worker %d: field %s differs from a new worker's", id, name)
 			}
+		}
+		if reused.History.Killers != fresh.History.Killers {
+			t.Errorf("worker %d: killers survived the reset", id)
+		}
+		if reused.History.HistoryTable == fresh.History.HistoryTable {
+			t.Errorf("worker %d: history was not carried over", id)
 		}
 		if (reused.Eight == nil) != (fresh.Eight == nil) {
 			t.Errorf("worker %d: 8Chess state present %v, new worker %v", id, reused.Eight != nil, fresh.Eight != nil)

@@ -161,15 +161,16 @@ func (w *SearchWorker) setupEval() {
 
 // resetFor readies a worker used by an earlier search for a new search of b.
 // Afterwards it is in the same state as NewWorker would build, except that
-// it keeps its allocations, and the static evaluations in EvalCache while the
-// network is unchanged (they depend on nothing else).
+// it keeps its allocations, the static evaluations in EvalCache while the
+// network is unchanged (they depend on nothing else), and its history tables
+// (see SearchHistory.NewSearch; Engine.NewGame clears them).
 func (w *SearchWorker) resetFor(b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *atomic.Uint64, tbHits *atomic.Uint64) {
 	w.Board = b.Clone()
 	w.TT = ttTable
 	w.TimeMan = tm
 	w.Nodes = nodes
 	w.TBHits = tbHits
-	w.History.Clear()
+	w.History.NewSearch()
 	w.LocalNodes = 0
 	w.NnueEvals = 0
 	w.NnueUpdates = 0
