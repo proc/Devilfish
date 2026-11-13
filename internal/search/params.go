@@ -123,8 +123,11 @@ var P = Params{
 	SENegExt:       1,
 	PawnPushExt:    1,
 
-	// Fail hard. Fail-soft lost in self-play in every form tried: everything
-	// on -35 Elo (+-23), move loop and quiescence only -21 (+-18).
+	// Fail hard. Fail-soft has not shown a gain in self-play. With razoring
+	// also returning its quiescence score it lost (everything on -35 Elo
+	// +-23; move loop and quiescence only -21 +-18). With razoring returning
+	// alpha, as it now always does, move loop and quiescence scored -8 +-16
+	// over 606 games: no worse than level, no better either.
 	FailSoft: 0,
 
 	ProbCut:       0,

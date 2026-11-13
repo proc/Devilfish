@@ -496,7 +496,11 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			qScore := w.Quiescence(alpha, beta, ply)
 			if qScore <= alpha {
 				st.RazorCuts++
-				return qScore
+				// Always alpha, even when failing soft: the quiescence score
+				// says the node fails low, not how low a real search of it
+				// would come out. Returning it handed the parents bounds far
+				// tighter than anything had been searched to justify.
+				return alpha
 			}
 		}
 	}
