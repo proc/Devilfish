@@ -381,7 +381,7 @@ func (e *Engine) Search(
 				if e.Stopped.Load() {
 					break
 				}
-				w.Search(d, -Infinity, Infinity, 0, true, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+				w.Search(d, -Infinity, Infinity, 0, true, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
 			}
 		}(id, helper)
 	}
@@ -417,7 +417,7 @@ func (e *Engine) Search(
 				}
 				master.ExcludedRootMoves = excludedRootMoves
 
-				score := master.Search(depth, -Infinity, Infinity, 0, true, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+				score := master.Search(depth, -Infinity, Infinity, 0, true, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
 				if e.Stopped.Load() && depth > 1 {
 					break
 				}
@@ -507,7 +507,7 @@ func (e *Engine) Search(
 
 			var score int32
 			if depth < 4 {
-				score = master.Search(depth, -Infinity, Infinity, 0, true, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+				score = master.Search(depth, -Infinity, Infinity, 0, true, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
 			} else {
 				// Aspiration Windows
 				delta := int32(30)
@@ -522,7 +522,7 @@ func (e *Engine) Search(
 
 				failedAttempts := 0
 				for {
-					score = master.Search(depth, alpha, beta, 0, true, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+					score = master.Search(depth, alpha, beta, 0, true, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
 
 					if e.Stopped.Load() {
 						break

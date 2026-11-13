@@ -24,6 +24,10 @@ Each engine runs with one thread, a 16 MB hash and its own book off, and
 never ponders. Clocks are kept by this script: an engine that exceeds its
 time loses.
 
+A progress line is printed every --report seconds (default 30): games played,
+score, Elo estimate with its 95% interval, the LLR and how far it has moved
+toward a decision, the pace, and the time left to the game limit.
+
 --state FILE saves the tally after every pair; rerunning with the same
 --state, engines and time control continues where the last run stopped.
 
@@ -204,6 +208,8 @@ def main():
     ap.add_argument("--new-option", action="append", default=[], help="NAME=VALUE for the new engine")
     ap.add_argument("--base-option", action="append", default=[], help="NAME=VALUE for the base engine")
     ap.add_argument("--state", help="save progress here and resume from it")
+    ap.add_argument("--report", type=float, default=30.0,
+                    help="print a progress line every this many seconds (default 30; 0: only every 20 games)")
     args = ap.parse_args()
 
     base_s, inc_s = (float(x) for x in args.tc.split("+"))
@@ -258,6 +264,37 @@ def main():
         os.replace(tmp, args.state)
     verdict = [None]
     started = time.monotonic()
+    games_at_start = sum(wdl)
+
+    def clock(seconds):
+        seconds = int(seconds)
+        h, m, sec = seconds // 3600, seconds // 60 % 60, seconds % 60
+        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+    def status():
+        """One progress line. Call with the lock held."""
+        games = sum(wdl)
+        elapsed = time.monotonic() - started
+        line = f"[{clock(elapsed)}] games {games:5d}/{args.max_games}  W {wdl[0]} D {wdl[1]} L {wdl[2]}"
+        if games:
+            elo, err = elo_estimate(penta)
+            l = llr(penta, args.elo0, args.elo1)
+            # How far the LLR has travelled toward the bound it is heading for.
+            toward = f"{100 * l / upper:.0f}% to accept" if l >= 0 else f"{100 * l / lower:.0f}% to reject"
+            line += (f"  score {100 * (wdl[0] + 0.5 * wdl[1]) / games:.1f}%  elo {elo:+.1f} +/- {err:.1f}"
+                     f"  LLR {l:+.2f} [{lower:.2f}, {upper:.2f}] ({toward})  penta {penta}")
+        played = games - games_at_start
+        if played and elapsed > 0:
+            rate = played / elapsed
+            line += f"  {60 * rate:.1f} games/min, game limit in {clock((args.max_games - games) / rate)}"
+        return line
+
+    finished = threading.Event()
+
+    def reporter():
+        while not finished.wait(args.report):
+            with lock:
+                print(status(), flush=True)
 
     print(f"new {args.new}\nbase {args.base}\ntc {args.tc}, {len(openings)} openings, "
           f"SPRT elo0={args.elo0} elo1={args.elo1} alpha={args.alpha} beta={args.beta} "
@@ -292,11 +329,8 @@ def main():
                     save_state()
                     l = llr(penta, args.elo0, args.elo1)
                     games = sum(wdl)
-                    if games % 20 == 0 or l <= lower or l >= upper:
-                        elo, err = elo_estimate(penta)
-                        print(f"games {games:5d}  W {wdl[0]} D {wdl[1]} L {wdl[2]}  "
-                              f"penta {penta}  elo {elo:+.1f} +/- {err:.1f}  LLR {l:+.2f}  "
-                              f"({time.monotonic() - started:.0f}s)", flush=True)
+                    if (args.report <= 0 and games % 20 == 0) or l <= lower or l >= upper:
+                        print(status(), flush=True)
                     if l >= upper:
                         verdict[0] = "H1 accepted: the new build is stronger"
                         stop.set()
@@ -307,9 +341,12 @@ def main():
             new.quit()
             base.quit()
 
+    if args.report > 0:
+        threading.Thread(target=reporter, daemon=True).start()
     with ThreadPoolExecutor(args.concurrency) as ex:
         for _ in range(args.concurrency):
             ex.submit(worker)
+    finished.set()
 
     elo, err = elo_estimate(penta)
     games = sum(wdl)

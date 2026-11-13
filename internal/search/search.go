@@ -241,7 +241,7 @@ func (w *SearchWorker) pushAccumulator(ply int, m types.Move) {
 	}
 }
 
-func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode bool, excludedMove types.Move, prevMove types.Move, prevMove2 types.Move, prevMove4 types.Move) int32 {
+func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode bool, cutNode bool, excludedMove types.Move, prevMove types.Move, prevMove2 types.Move, prevMove4 types.Move) int32 {
 	if w.TimeMan.Stopped.Load() {
 		return 0
 	}
@@ -482,8 +482,8 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	}
 
 	// 5. Razoring
-	if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && !kingInDanger && !prevIsKingThreat && depth <= 1 {
-		razorMargin := P.RazorMargin
+	if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && !kingInDanger && !prevIsKingThreat && int32(depth) <= P.RazorDepth {
+		razorMargin := P.RazorMargin + P.RazorStep*int32(depth-1)
 		if staticEval+razorMargin <= alpha {
 			st.RazorTries++
 			qScore := w.Quiescence(alpha, beta, ply)
@@ -500,7 +500,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	pieceCount := bitboard.Count(w.Board.Occupied())
 	if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && prevMove != types.MoveNone && nmpAllowed && depth >= 3 && staticEval >= beta && hasNonPawns && pieceCount > 6 {
 		st.NMPTries++
-		r := int8(3 + depth/4)
+		r := int8(P.NMPBase) + depth/int8(P.NMPDepthDiv)
 		if !improving {
 			r++
 		}
@@ -515,7 +515,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			w.Accumulators[ply+1] = w.Accumulators[ply]
 		}
 		w.Board.MakeNullMove()
-		nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+		nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, !cutNode, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
 		w.Board.UnmakeNullMove()
 
 		if w.TimeMan.Stopped.Load() {
@@ -531,7 +531,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 	// Internal Iterative Reduction (IIR)
 	// If at non-PV node at depth >= 6 with no TT move, reduce search depth by 1 ply
-	if !isPVNode && !inCheck && excludedMove == types.MoveNone && depth >= 6 && ttMove == types.MoveNone {
+	if (!isPVNode || (P.IIRPV != 0 && ply > 0)) && !inCheck && excludedMove == types.MoveNone && int32(depth) >= P.IIRDepth && ttMove == types.MoveNone {
 		st.IIR++
 		depth--
 	}
@@ -553,7 +553,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 
 		st.SETries++
-		sScore := w.Search(sDepth, singularBeta-1, singularBeta, ply, false, ttMove, prevMove, prevMove2, prevMove4)
+		sScore := w.Search(sDepth, singularBeta-1, singularBeta, ply, false, cutNode, ttMove, prevMove, prevMove2, prevMove4)
 
 		if w.TimeMan.Stopped.Load() {
 			return 0
@@ -571,6 +571,11 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			if !isPVNode && sScore < singularBeta-25 {
 				extension = 2
 			}
+		} else if P.SENegExt != 0 && (ttScore >= beta || cutNode) {
+			// Not singular, and the node is expected to fail high whichever
+			// move is played: the hash move does not need its full depth.
+			st.SENegExts++
+			extension = -1
 		}
 	}
 
@@ -610,7 +615,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				// A quiescence search first: most candidates fail here, cheaply.
 				probScore := -w.Quiescence(-probBeta, -probBeta+1, ply+1)
 				if probScore >= probBeta && probDepth > 0 {
-					probScore = -w.Search(probDepth, -probBeta, -probBeta+1, ply+1, false, types.MoveNone, m, prevMove, prevMove2)
+					probScore = -w.Search(probDepth, -probBeta, -probBeta+1, ply+1, false, !cutNode, types.MoveNone, m, prevMove, prevMove2)
 				}
 				w.Board.UnmakeMove(m)
 
@@ -658,7 +663,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				startNodes = w.LocalNodes
 			}
 
-			score := -w.Search(depth-1+extension, -beta, -alpha, ply+1, isPVNode, types.MoveNone, ttMove, prevMove, prevMove2)
+			score := -w.Search(depth-1+extension, -beta, -alpha, ply+1, isPVNode, !isPVNode && !cutNode, types.MoveNone, ttMove, prevMove, prevMove2)
 			w.Board.UnmakeMove(ttMove)
 			movesSearched++
 
@@ -777,16 +782,19 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			isThreatEvasion = moveSEE >= 0
 		}
 		isThreatMove := isQuiet && threatenedPieces == 0 && IsTacticalThreat(w.Board, m)
+		// Moves the pruning rules leave alone: killers and the countermove,
+		// and (PruneExempt) threats, threat evasions and advanced pawn pushes.
+		pruneExempt := m == killer1 || m == killer2 || m == counterMove ||
+			(P.PruneExempt != 0 && (isThreatMove || isThreatEvasion || isAdvancedPawnPush))
 		isKingThreat := threatenedPieces == 0 && IsKingAttack(w.Board, m)
 		isKingZoneMove := (bitboard.SquareBB[toSq] & themKingRing) != 0
 
 		// Late Move Pruning (LMP)
-		if !isPVNode && !inCheck && int32(depth) <= P.LMPDepth && isQuiet && movesSearched > 0 &&
-			m != killer1 && m != killer2 && m != counterMove && !isThreatMove && !isThreatEvasion && !isAdvancedPawnPush {
+		if !isPVNode && !inCheck && int32(depth) <= P.LMPDepth && isQuiet && movesSearched > 0 && !pruneExempt {
 			if !givesCheck {
-				lmpThreshold := 5 + int(P.LMPMultImpr)*int(depth)*int(depth)
+				lmpThreshold := 3 + int(P.LMPMultImpr)*int(depth)*int(depth)
 				if !improving {
-					lmpThreshold = 3 + int(P.LMPMultNonImp)*int(depth)*int(depth)
+					lmpThreshold = (3 + int(P.LMPMultNonImp)*int(depth)*int(depth)) / 2
 				}
 				if legalMoves >= lmpThreshold {
 					st.LMPPruned++
@@ -796,8 +804,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 
 		// Futility Pruning
-		if !isPVNode && !inCheck && lmrDepth <= P.FutDepth && isQuiet && movesSearched > 0 &&
-			m != killer1 && m != killer2 && m != counterMove && !isThreatMove && !isThreatEvasion && !isAdvancedPawnPush {
+		if !isPVNode && !inCheck && lmrDepth <= P.FutDepth && isQuiet && movesSearched > 0 && !pruneExempt {
 			futMargin := P.FutMargin * max(lmrDepth, 1)
 			if staticEval+futMargin <= alpha {
 				if !givesCheck {
@@ -809,8 +816,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		// History Pruning
 		// Prune quiet moves with poor history score at shallow depths
-		if !isPVNode && !inCheck && lmrDepth <= P.HistDepth && isQuiet && movesSearched > 0 &&
-			m != killer1 && m != killer2 && m != counterMove && !isThreatMove && !isThreatEvasion && !isAdvancedPawnPush {
+		if !isPVNode && !inCheck && lmrDepth <= P.HistDepth && isQuiet && movesSearched > 0 && !pruneExempt {
 			if !givesCheck {
 				histScore := w.History.HistoryTable[us][m.From()][m.To()]
 				if prevMove != types.MoveNone && prevMove.To() < 64 && m.To() < 64 {
@@ -832,7 +838,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		// SEE Pruning
 		// Do not prune tactical/killer moves, countermoves, advanced pawn pushes, or moves that give check
-		if !isPVNode && !inCheck && int32(depth) <= P.SEEDepth && movesSearched > 0 && m != killer1 && m != killer2 && m != counterMove && !isAdvancedPawnPush && !isThreatMove && !isThreatEvasion {
+		if !isPVNode && !inCheck && int32(depth) <= P.SEEDepth && movesSearched > 0 && !pruneExempt {
 			if !givesCheck {
 				if !seeKnown {
 					moveSEE, seeKnown = eval.SEE(w.Board, m), true
@@ -870,7 +876,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		// The singular extension belongs to the TT move only; here 7th-rank
 		// pushes and checks that don't lose material extend (at most one ply).
 		var moveExtension int8
-		if is7thRankPawnPush && depth >= 3 {
+		if is7thRankPawnPush && depth >= 3 && (P.PawnPushExt == 2 || (P.PawnPushExt == 1 && isPVNode)) {
 			moveExtension = 1
 		} else if givesCheck && (P.CheckExt == 2 || (P.CheckExt == 1 && isPVNode)) {
 			if !seeKnown {
@@ -886,10 +892,10 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		// Principal Variation Search & LMR
 		if movesSearched == 0 {
 			// First move: full window (extended if 7th rank pawn push)
-			score = -w.Search(depth-1+moveExtension, -beta, -alpha, ply+1, isPVNode, types.MoveNone, m, prevMove, prevMove2)
+			score = -w.Search(depth-1+moveExtension, -beta, -alpha, ply+1, isPVNode, !isPVNode && !cutNode, types.MoveNone, m, prevMove, prevMove2)
 		} else {
 			// Late Move Reductions (LMR)
-			if depth >= 3 && movesSearched >= 2 && !inCheck {
+			if depth >= 3 && movesSearched >= int(P.LMRMinMove) && !inCheck {
 				dIdx := depth
 				if dIdx > 127 {
 					dIdx = 127
@@ -903,7 +909,10 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				if isQuiet {
 					// Base reduction for quiet moves
 					if !isPVNode {
-						reduction++ // Non-PV nodes (cut nodes) reduce more
+						reduction++ // Non-PV nodes reduce more
+					}
+					if cutNode {
+						reduction += int8(P.LMRCutNode) // and expected cut nodes more still
 					}
 					if !improving {
 						reduction++ // Position getting worse: reduce more
@@ -919,15 +928,12 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 						reduction--
 					}
 
-					// Advanced passed pawn push: don't reduce
-					if isAdvancedPawnPush || is7thRankPawnPush {
-						reduction = 0
-					}
-
-					// Threat evasion or tactical threat: don't reduce
-					if isThreatEvasion || isThreatMove {
-						reduction = 0
-					} else if isKingThreat || (hasActiveAttack && isKingZoneMove) {
+					// Advanced pawn pushes, threat evasions and tactical threats:
+					// not reduced (LMRExempt), or one ply less.
+					lmrExempt := isAdvancedPawnPush || is7thRankPawnPush || isThreatEvasion || isThreatMove
+					if lmrExempt && P.LMRExempt == 0 {
+						reduction--
+					} else if !lmrExempt && (isKingThreat || (hasActiveAttack && isKingZoneMove)) {
 						reduction--
 					}
 
@@ -954,6 +960,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 					if ttMoveNoisy {
 						reduction++
+					}
+					if lmrExempt && P.LMRExempt != 0 {
+						reduction = 0
 					}
 				} else {
 					// Tactical moves / Captures (Noisy LMR)
@@ -1023,18 +1032,18 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				st.LMRSearches++
 				st.LMRPlies += uint64(reduction)
 			}
-			score = -w.Search(depth-1+moveExtension-reduction, -alpha-1, -alpha, ply+1, false, types.MoveNone, m, prevMove, prevMove2)
+			score = -w.Search(depth-1+moveExtension-reduction, -alpha-1, -alpha, ply+1, false, reduction > 0 || !cutNode, types.MoveNone, m, prevMove, prevMove2)
 
 			// If reduced search fails high, re-search at full depth with null window
 			if reduction > 0 && score > alpha && !w.TimeMan.Stopped.Load() {
 				st.LMRReSearches++
-				score = -w.Search(depth-1+moveExtension, -alpha-1, -alpha, ply+1, false, types.MoveNone, m, prevMove, prevMove2)
+				score = -w.Search(depth-1+moveExtension, -alpha-1, -alpha, ply+1, false, !cutNode, types.MoveNone, m, prevMove, prevMove2)
 			}
 
 			// If null-window fails high and in PV node, re-search with full PV window
 			if isPVNode && score > alpha && !w.TimeMan.Stopped.Load() {
 				st.PVSReSearches++
-				score = -w.Search(depth-1+moveExtension, -beta, -alpha, ply+1, true, types.MoveNone, m, prevMove, prevMove2)
+				score = -w.Search(depth-1+moveExtension, -beta, -alpha, ply+1, true, false, types.MoveNone, m, prevMove, prevMove2)
 			}
 		}
 

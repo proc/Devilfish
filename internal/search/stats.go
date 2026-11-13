@@ -24,6 +24,7 @@ type SearchStats struct {
 	SETries    uint64 // singular searches
 	SEExtends  uint64
 	SEMultiCut uint64
+	SENegExts  uint64 // hash moves searched a ply shallower
 	CheckExts  uint64
 
 	LMPPruned  uint64 // moves skipped by each move-loop rule
@@ -79,6 +80,7 @@ func (s *SearchStats) Add(o *SearchStats) {
 	s.SETries += o.SETries
 	s.SEExtends += o.SEExtends
 	s.SEMultiCut += o.SEMultiCut
+	s.SENegExts += o.SENegExts
 	s.CheckExts += o.CheckExts
 	s.LMPPruned += o.LMPPruned
 	s.FutPruned += o.FutPruned

@@ -41,21 +41,35 @@ type Params struct {
 	CheckExt  int32 // check extension: 2 at every node, 1 at PV nodes only, 0 never
 	LMRChecks int32 // 1: moves that give check take late-move reductions (one ply less)
 
+	// Strength of the reductions and of the pruning before the move loop.
+	LMRMinMove  int32 // late-move reductions start once this many moves have been searched
+	LMRCutNode  int32 // extra plies of reduction at expected cut nodes
+	LMRExempt   int32 // 1: threat moves, threat evasions and advanced pawn pushes are never reduced; 0: they are reduced one ply less
+	PruneExempt int32 // 1: those moves are also exempt from late-move, futility, history and SEE pruning; 0: only killers and the countermove are
+	NMPBase     int32 // null-move reduction = NMPBase + depth/NMPDepthDiv (+ eval and improving terms)
+	NMPDepthDiv int32
+	IIRDepth    int32 // internal iterative reduction from this depth, when there is no hash move
+	IIRPV       int32 // 1: also at PV nodes
+	RazorDepth  int32 // razoring up to this depth
+	RazorStep   int32 // razoring margin grows by this per ply of depth above 1
+	SENegExt    int32 // 1: a hash move that is not singular is searched a ply shallower when the node is expected to fail high anyway
+	PawnPushExt int32 // extension for pawn pushes to the 7th rank: 2 at every node, 1 at PV nodes only, 0 never
+
 	ProbCut       int32 // 1: ProbCut before the hash move, at every non-PV node of depth >= 5; 0: off (no gain measured in self-play)
 	ProbCutMargin int32 // ProbCut searches against beta plus this
 }
 
 // P is the live parameter set used by Search.
 var P = Params{
-	LMRBase:       40,
-	LMRDivisor:    230,
+	LMRBase:       100,
+	LMRDivisor:    200,
 	LMRHistDiv:    5000,
 	RFPMargin:     75,
 	RFPNonImpr:    35,
 	RazorMargin:   350,
 	NMPEvalDiv:    200,
-	LMPMultImpr:   3,
-	LMPMultNonImp: 2,
+	LMPMultImpr:   1,
+	LMPMultNonImp: 1,
 	FutMargin:     90,
 	HistPrImpr:    1024,
 	HistPrNonImp:  512,
@@ -80,6 +94,19 @@ var P = Params{
 	// reducing checks also won in self-play, but misses more tactics.
 	CheckExt:  2,
 	LMRChecks: 0,
+
+	LMRMinMove:  1,
+	LMRCutNode:  1,
+	LMRExempt:   0,
+	PruneExempt: 1,
+	NMPBase:     4,
+	NMPDepthDiv: 3,
+	IIRDepth:    4,
+	IIRPV:       1,
+	RazorDepth:  3,
+	RazorStep:   250,
+	SENegExt:    1,
+	PawnPushExt: 1,
 
 	ProbCut:       0,
 	ProbCutMargin: 200,
@@ -121,6 +148,18 @@ func TunableParams() []ParamSpec {
 		{"NMPGuard", &P.NMPGuard, 0, 2},
 		{"CheckExt", &P.CheckExt, 0, 2},
 		{"LMRChecks", &P.LMRChecks, 0, 1},
+		{"LMRMinMove", &P.LMRMinMove, 1, 6},
+		{"LMRCutNode", &P.LMRCutNode, 0, 3},
+		{"LMRExempt", &P.LMRExempt, 0, 1},
+		{"PruneExempt", &P.PruneExempt, 0, 1},
+		{"NMPBase", &P.NMPBase, 2, 6},
+		{"NMPDepthDiv", &P.NMPDepthDiv, 2, 8},
+		{"IIRDepth", &P.IIRDepth, 2, 12},
+		{"IIRPV", &P.IIRPV, 0, 1},
+		{"RazorDepth", &P.RazorDepth, 1, 6},
+		{"RazorStep", &P.RazorStep, 0, 600},
+		{"SENegExt", &P.SENegExt, 0, 1},
+		{"PawnPushExt", &P.PawnPushExt, 0, 2},
 		{"ProbCut", &P.ProbCut, 0, 1},
 		{"ProbCutMargin", &P.ProbCutMargin, 50, 500},
 	}

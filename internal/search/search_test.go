@@ -141,8 +141,9 @@ func TestPonderHit(t *testing.T) {
 
 func TestLMRTable(t *testing.T) {
 	// Verify LMRTable values
-	if LMRTable[1][1] != 0 {
-		t.Errorf("expected LMRTable[1][1] == 0, got %d", LMRTable[1][1])
+	// ln(1) = 0, so the first entry is the base alone.
+	if want := int8(P.LMRBase / 100); LMRTable[1][1] != want {
+		t.Errorf("expected LMRTable[1][1] == %d, got %d", want, LMRTable[1][1])
 	}
 	if LMRTable[6][6] <= LMRTable[3][3] {
 		t.Errorf("expected LMRTable[6][6] > LMRTable[3][3], got %d vs %d", LMRTable[6][6], LMRTable[3][3])
@@ -428,8 +429,11 @@ func TestWAC055(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A quiet mating threat behind a queen sacrifice. Found at depth 9 (about
+	// 35k nodes); internal iterative reductions make a nominal ply shallower
+	// than it was when depth 7 was enough.
 	engine := NewEngine(64, 1)
-	bm, _ := engine.Search(b, SearchLimits{MaxDepth: 7}, func(si SearchInfo) {
+	bm, _ := engine.Search(b, SearchLimits{MaxDepth: 10}, func(si SearchInfo) {
 		var pvStrs []string
 		for _, m := range si.PV {
 			pvStrs = append(pvStrs, m.String())
