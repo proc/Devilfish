@@ -53,3 +53,39 @@ func l1NonzeroIdx(ft *[EightL1Size]uint8, out *[EightL1Size + 8]uint16) int {
 	}
 	return n
 }
+
+// l1ChunkIdx[m] lists the positions of the set bits of the 4-bit mask m.
+var l1ChunkIdx = func() (t [16][4]uint16) {
+	for m := range t {
+		k := 0
+		for bit := 0; bit < 4; bit++ {
+			if m>>bit&1 != 0 {
+				t[m][k] = uint16(bit)
+				k++
+			}
+		}
+	}
+	return
+}()
+
+// l1NonzeroChunks is l1NonzeroIdx for groups of four inputs: it writes the
+// indices (0..255) of the groups with any non-zero byte, in order, and
+// returns how many there are. Also free of data-dependent branches.
+func l1NonzeroChunks(ft *[EightL1Size]uint8, out *[EightL1Size + 8]uint16) int {
+	const lanes = 0x0001000100010001
+	// nz is 1 for a non-zero 32-bit value: x | -x has the top bit set.
+	nz := func(x uint32) uint64 { return uint64((x | -x) >> 31) }
+	src := unsafe.Pointer(ft)
+	dst := unsafe.Pointer(out)
+	n := 0
+	for c := uintptr(0); c < EightL1Size; c += 16 {
+		a := *(*uint64)(unsafe.Add(src, c))
+		b := *(*uint64)(unsafe.Add(src, c+8))
+		m := nz(uint32(a)) | nz(uint32(a>>32))<<1 | nz(uint32(b))<<2 | nz(uint32(b>>32))<<3
+		row := *(*uint64)(unsafe.Pointer(&l1ChunkIdx[m]))
+		*(*uint64)(unsafe.Add(dst, n*2)) = row + uint64(c/4)*lanes
+		// Set bits of m, from a table packed four bits per entry.
+		n += int(0x4332322132212110 >> (m * 4) & 15)
+	}
+	return n
+}

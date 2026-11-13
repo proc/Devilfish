@@ -51,6 +51,20 @@ func GetNetworkInfo() NetworkInfo {
 	if path == "" {
 		path = "<embedded>"
 	}
+	if ActiveEightNetwork.IsSF() {
+		features := sfPieceFeatures + sfThreatRows
+		return NetworkInfo{
+			Enabled:       Enabled,
+			Architecture:  "Stockfish (Piece 22528 + Threat 59808 + Pawn pair 4560 -> 1024 -> 32x8 -> 32x8 -> 1x8, PSQT x8)",
+			FilePath:      path,
+			SIMD:          SIMDInstructionSet,
+			FeatureCount:  features,
+			HiddenSize:    EightL1Size,
+			Layer1Size:    sfL2,
+			NumParameters: features*(EightL1Size+sfPSQTBuckets) + EightL1Size + sfLayerStacks*(sfL2*(EightL1Size+1)+sfL3*(2*sfL2+1)+2*sfL2+2*sfL3+1),
+			SizeBytes:     sfThreatRows*EightL1Size + sfPieceFeatures*EightL1Size*2,
+		}
+	}
 	if ActiveEightNetwork != nil {
 		numParams := EightThreatFeatures*EightL1Size + EightPieceFeatures*EightL1Size + EightL1Size +
 			EightOutputBuckets*(EightL2Size*EightL1Size+EightL2Size+EightL2Size*EightL3Size+EightL3Size+EightL3Size+1)

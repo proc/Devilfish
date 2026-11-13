@@ -56,40 +56,35 @@ var EightOutputBucketsLayout = [33]int{
 	7, 7, 7, 7,
 }
 
-var (
-	eightPiecePairLookup   [12][12]uint32
-	eightPieceOffsetLookup [12][64]int32
-	eightAttackIndexLookup [12][64][64]uint8
-	eightInitialized       bool
-)
+// threatTables number the threat features of one network family: an attacker
+// (piece, square) and the piece it attacks (piece, square). The index is the
+// sum of three lookups, as in Stockfish's FullThreats, from which both
+// supported families derive; they differ in which attacker/target pairs
+// exist and how many targets each piece type has.
+type threatTables struct {
+	pair     [12][12]uint32    // base index; bit 31 excluded, bit 30 excluded when from < to
+	offset   [12][64]int32     // attacks of this piece from the squares before `from`
+	attack   [12][64][64]uint8 // attacked squares of this piece on `from` below `to`
+	features int
+}
 
-func initEightTables() {
-	if eightInitialized {
-		return
-	}
-
-	pieceInteractionMap := [6][6]int32{
-		{0, 1, -1, 2, -1, -1},
-		{0, 1, 2, 3, 4, -1},
-		{0, 1, 2, 3, -1, -1},
-		{0, 1, 2, 3, -1, -1},
-		{0, 1, 2, 3, 4, -1},
-		{0, 1, 2, 3, -1, -1},
-	}
-
-	pieceTargetCount := [6]int32{6, 10, 8, 8, 10, 8}
-
-	var offset int32 = 0
+// buildThreatTables builds the lookups. Pieces are numbered type*2+colour
+// (pawn 0 .. king 5; white 0, black 1). interaction[attacker][target] is the
+// target's slot for that attacker type, or -1 if the pair is not a feature;
+// targetCount[attacker] is the number of slots over both target colours.
+func buildThreatTables(interaction [6][6]int32, targetCount [6]int32) *threatTables {
+	t := &threatTables{}
+	var offset int32
 	var pieceOffset [12]int32
 	var offsetTable [12]int32
 
 	for color := 0; color < 2; color++ {
 		for ptype := 0; ptype < 6; ptype++ {
 			piece := ptype*2 + color
-			var count int32 = 0
+			var count int32
 
 			for sq := 0; sq < 64; sq++ {
-				eightPieceOffsetLookup[piece][sq] = count
+				t.offset[piece][sq] = count
 				if ptype != 0 || (sq >= 8 && sq < 56) {
 					atk := attacksEmpty(piece, sq)
 					count += int32(bits.OnesCount64(atk))
@@ -98,9 +93,10 @@ func initEightTables() {
 
 			pieceOffset[piece] = count
 			offsetTable[piece] = offset
-			offset += pieceTargetCount[ptype] * count
+			offset += targetCount[ptype] * count
 		}
 	}
+	t.features = int(offset)
 
 	for attacking := 0; attacking < 12; attacking++ {
 		for attacked := 0; attacked < 12; attacked++ {
@@ -110,9 +106,9 @@ func initEightTables() {
 			defType := attacked >> 1
 			defColor := attacked & 1
 
-			m := pieceInteractionMap[atkType][defType]
+			m := interaction[atkType][defType]
 			base := offsetTable[attacking] +
-				(int32(defColor)*(pieceTargetCount[atkType]/2)+m)*pieceOffset[attacking]
+				(int32(defColor)*(targetCount[atkType]/2)+m)*pieceOffset[attacking]
 
 			enemy := atkColor != defColor
 			semi := atkType == defType && (enemy || atkType != 0)
@@ -126,7 +122,7 @@ func initEightTables() {
 				inner |= 1 << 31
 			}
 			inner |= uint32(base & 0x3FFFFFFF)
-			eightPiecePairLookup[attacking][attacked] = inner
+			t.pair[attacking][attacked] = inner
 		}
 	}
 
@@ -134,11 +130,41 @@ func initEightTables() {
 		for from := 0; from < 64; from++ {
 			atk := attacksEmpty(piece, from)
 			for to := 0; to < 64; to++ {
-				eightAttackIndexLookup[piece][from][to] = uint8(bits.OnesCount64(atk & ((1 << to) - 1)))
+				t.attack[piece][from][to] = uint8(bits.OnesCount64(atk & ((1 << to) - 1)))
 			}
 		}
 	}
+	return t
+}
 
+var (
+	eightThreats     *threatTables // 8Chess networks
+	sfThreats        *threatTables // Stockfish networks
+	eightInitialized bool
+)
+
+func initEightTables() {
+	if eightInitialized {
+		return
+	}
+	eightThreats = buildThreatTables([6][6]int32{
+		{0, 1, -1, 2, -1, -1},
+		{0, 1, 2, 3, 4, -1},
+		{0, 1, 2, 3, -1, -1},
+		{0, 1, 2, 3, -1, -1},
+		{0, 1, 2, 3, 4, -1},
+		{0, 1, 2, 3, -1, -1},
+	}, [6]int32{6, 10, 8, 8, 10, 8})
+	// Stockfish: pawns threaten only knights and rooks (pawn-pawn relations
+	// are the pawn-pair features), and kings threaten nothing.
+	sfThreats = buildThreatTables([6][6]int32{
+		{-1, 0, -1, 1, -1, -1},
+		{0, 1, 2, 3, 4, -1},
+		{0, 1, 2, 3, -1, -1},
+		{0, 1, 2, 3, -1, -1},
+		{0, 1, 2, 3, 4, -1},
+		{-1, -1, -1, -1, -1, -1},
+	}, [6]int32{4, 10, 8, 8, 10, 0})
 	eightInitialized = true
 }
 
@@ -187,7 +213,10 @@ func attacksWithOcc(piece int, square int, occ uint64) uint64 {
 	return 0
 }
 
-func getThreatIndex(piece int, from int, attacked int, to int, mirrored bool, pov int) int {
+// getThreatIndex returns the feature index, in perspective pov, of the piece
+// with code `piece` on `from` attacking the piece with code `attacked` on
+// `to`, or -1 if that pair is not a feature.
+func getThreatIndex(t *threatTables, piece int, from int, attacked int, to int, mirrored bool, pov int) int {
 	if pov == 1 {
 		from ^= 56
 		to ^= 56
@@ -200,7 +229,7 @@ func getThreatIndex(piece int, from int, attacked int, to int, mirrored bool, po
 	attacking := piece ^ pov
 	attackedP := attacked ^ pov
 
-	inner := eightPiecePairLookup[attacking][attackedP]
+	inner := t.pair[attacking][attackedP]
 	var below uint32 = 0
 	if from < to {
 		below = 1
@@ -211,8 +240,8 @@ func getThreatIndex(piece int, from int, attacked int, to int, mirrored bool, po
 		return -1
 	}
 
-	idx := int(pairBase) + int(eightPieceOffsetLookup[attacking][from]) + int(eightAttackIndexLookup[attacking][from][to])
-	if idx >= EightThreatFeatures {
+	idx := int(pairBase) + int(t.offset[attacking][from]) + int(t.attack[attacking][from][to])
+	if idx >= t.features {
 		return -1
 	}
 	return idx
@@ -232,6 +261,20 @@ type EightNetwork struct {
 	L2Biases         [EightOutputBuckets][EightL3Size]float32
 	L3Weights        [EightOutputBuckets][EightL3Size]float32
 	L3Biases         [EightOutputBuckets]float32
+
+	// sf is set for a Stockfish network. Such a network keeps its feature
+	// transformer in the fields above (FTPieceWeights: the HalfKAv2_hm rows;
+	// FTThreatWeights: the threat rows followed by the pawn-pair rows) and
+	// everything else in sf. See stockfish.go.
+	sf *sfNet
+}
+
+// threatTables returns the threat feature numbering of the network.
+func (net *EightNetwork) threatTables() *threatTables {
+	if net.sf != nil {
+		return sfThreats
+	}
+	return eightThreats
 }
 
 var ActiveEightNetwork *EightNetwork
@@ -371,6 +414,9 @@ func EvaluateEight(net *EightNetwork, b *board.Board) int32 {
 	if net == nil {
 		return 0
 	}
+	if net.sf != nil {
+		return sfEvaluate(net, b)
+	}
 
 	initEightTables()
 
@@ -447,14 +493,14 @@ func EvaluateEight(net *EightNetwork, b *board.Board) int32 {
 			attackedCode := tType*2 + tColor
 
 			// Threat for POV 0 (White)
-			thrIdx0 := getThreatIndex(pieceCode, sq, attackedCode, to, kingside0, 0)
+			thrIdx0 := getThreatIndex(eightThreats, pieceCode, sq, attackedCode, to, kingside0, 0)
 			if thrIdx0 >= 0 {
 				wOff := thrIdx0 * EightL1Size
 				addThreatVector1024NEON(&accThr[0], &net.FTThreatWeights[wOff])
 			}
 
 			// Threat for POV 1 (Black)
-			thrIdx1 := getThreatIndex(pieceCode, sq, attackedCode, to, kingside1, 1)
+			thrIdx1 := getThreatIndex(eightThreats, pieceCode, sq, attackedCode, to, kingside1, 1)
 			if thrIdx1 >= 0 {
 				wOff := thrIdx1 * EightL1Size
 				addThreatVector1024NEON(&accThr[1], &net.FTThreatWeights[wOff])

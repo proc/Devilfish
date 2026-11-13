@@ -179,3 +179,15 @@ func refL2(w *[EightL2Size][EightL3Size]float32, bias *[EightL3Size]float32, x *
 		out[j] = sum
 	}
 }
+
+// refSparse32 is the definition of sparse32.
+func refSparse32(idx *uint16, n int, in *uint8, wt *int8, out *[32]int32) {
+	*out = [32]int32{}
+	for _, i := range unsafe.Slice(idx, n) {
+		v := int32(*(*uint8)(unsafe.Add(unsafe.Pointer(in), int(i))))
+		row := (*[32]int8)(unsafe.Add(unsafe.Pointer(wt), int(i)*32))
+		for o := range out {
+			out[o] += v * int32(row[o])
+		}
+	}
+}

@@ -71,12 +71,16 @@ type eightView struct {
 	bucket int  // king input bucket (piece features)
 	flip   int  // square transform for piece features
 	mirror bool // king on the e-h files (threat features)
+	sf     bool // Stockfish feature numbering (see stockfish.go)
 }
 
-func eightViews(b *board.Board) (v [2]eightView, ok bool) {
+func eightViews(net *EightNetwork, b *board.Board) (v [2]eightView, ok bool) {
 	k0, k1 := b.KingSquare(types.White), b.KingSquare(types.Black)
 	if k0 >= 64 || k1 >= 64 {
 		return v, false
+	}
+	if net.sf != nil {
+		return [2]eightView{sfView(0, int(k0)), sfView(1, int(k1))}, true
 	}
 	v[0].mirror = int(k0)&7 >= 4
 	v[1].mirror = int(k1)&7 >= 4
@@ -94,6 +98,9 @@ func eightViews(b *board.Board) (v [2]eightView, ok bool) {
 
 // pieceFeature numbers piece p on sq from perspective pov.
 func pieceFeature(v *eightView, pov int, p types.Piece, sq int) int32 {
+	if v.sf {
+		return sfPieceFeature(v, pov, p, sq)
+	}
 	color := int(p.Color()) ^ pov
 	ptype := int(p.Type()) - 1
 	return int32(v.bucket*768 + 384*color + 64*ptype + (sq ^ v.flip))
@@ -112,12 +119,17 @@ type eightPly struct {
 	thr   [2][EightL1Size]int16
 	snap  eightSnap
 	view  [2]eightView
+
+	// Stockfish networks: PSQT sums of the piece-square features and of the
+	// threat and pawn-pair features, kept in step with pst and thr.
+	psqP, psqT [2][sfPSQTBuckets]int32
 }
 
 type finnyEntry struct {
 	ready bool
 	acc   [EightL1Size]int16
-	snap  eightSnap // pieces acc was built from
+	psq   [sfPSQTBuckets]int32 // PSQT sum for the same pieces (Stockfish networks)
+	snap  eightSnap            // pieces acc was built from
 }
 
 // rowList collects weight-row indices for one fused update.
@@ -142,10 +154,11 @@ type EightState struct {
 	plies []eightPly
 	net   *EightNetwork // network the finny entries were built for
 
-	finny [2][EightInputBuckets][2]finnyEntry // [pov][bucket][mirror]
+	finny [2][sfKingBuckets][2]finnyEntry // [pov][bucket][mirror]; 8Chess networks use the first EightInputBuckets
 
 	pieceAdd, pieceRem [2]rowList
 	thrAdd, thrRem     [2]rowList
+	sfScratch          sfScratch
 
 	// Statistics.
 	Evals          uint64 // accumulator sets produced
@@ -189,7 +202,11 @@ func (s *EightState) Evaluate(net *EightNetwork, b *board.Board, ply int, parent
 		return EvaluateEight(net, b)
 	}
 	cur := &s.plies[ply]
-	return eightForward(net, &cur.pst, &cur.thr, b, bits.OnesCount64(uint64(b.Occupied())))
+	occCount := bits.OnesCount64(uint64(b.Occupied()))
+	if net.sf != nil {
+		return sfToCP(sfForward(net, &s.sfScratch, &cur.pst, &cur.thr, &cur.psqP, &cur.psqT, b, occCount), b)
+	}
+	return eightForward(net, &cur.pst, &cur.thr, b, occCount)
 }
 
 // Prepare makes sure the accumulator stored at ply is the one for b, without
@@ -208,7 +225,7 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 		s.resetFinny(net)
 	}
 
-	views, ok := eightViews(b)
+	views, ok := eightViews(net, b)
 	if !ok {
 		cur.valid = false
 		return false
@@ -223,6 +240,7 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 
 	var cs eightSnap
 	cs.load(b)
+	tables := net.threatTables()
 
 	// Work out every row change before writing anything: base may be cur.
 	var pieceInc, thrInc [2]bool
@@ -244,12 +262,19 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 			}
 		}
 		if thrInc[0] || thrInc[1] {
-			threatDelta(&base.snap, &cs, d, &views, thrInc, &s.thrAdd, &s.thrRem)
+			threatDelta(tables, &base.snap, &cs, d, &views, thrInc, &s.thrAdd, &s.thrRem)
+			if net.sf != nil {
+				pawnPairs(&base.snap, d, &views, thrInc, &s.thrRem)
+				pawnPairs(&cs, d, &views, thrInc, &s.thrAdd)
+			}
 		}
+	}
+	if full := [2]bool{!thrInc[0], !thrInc[1]}; net.sf != nil && (full[0] || full[1]) {
+		pawnPairs(&cs, ^bitboard.Bitboard(0), &views, full, &s.thrAdd)
 	}
 	for pov := 0; pov < 2; pov++ {
 		if !thrInc[pov] {
-			fullThreats(&cs, &views[pov], pov, &s.thrAdd[pov])
+			fullThreats(tables, &cs, &views[pov], pov, &s.thrAdd[pov])
 		}
 		if s.thrAdd[pov].over || s.thrRem[pov].over || s.pieceAdd[pov].over || s.pieceRem[pov].over {
 			cur.valid = false
@@ -275,25 +300,35 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 	}
 
 	s.Evals++
+	var psqP, psqT [2][sfPSQTBuckets]int32 // base may be cur: assigned at the end
 	for pov := 0; pov < 2; pov++ {
 		if pieceInc[pov] {
 			a, r := &s.pieceAdd[pov], &s.pieceRem[pov]
 			fusedPiece(&cur.pst[pov], &base.pst[pov], &net.FTPieceWeights[0], &a.rows[0], a.n, &r.rows[0], r.n)
 			s.RowOps += uint64(a.n + r.n)
+			if net.sf != nil {
+				psqP[pov] = base.psqP[pov]
+				sfApplyPSQT(&psqP[pov], net.sf.piecePSQT, a, r)
+			}
 		} else {
-			s.finnyRefresh(net, &cs, &views[pov], pov, &cur.pst[pov])
+			s.finnyRefresh(net, &cs, &views[pov], pov, &cur.pst[pov], &psqP[pov])
 		}
 
 		a, r := &s.thrAdd[pov], &s.thrRem[pov]
 		src := &eightZeroAcc
 		if thrInc[pov] {
 			src = &base.thr[pov]
+			psqT[pov] = base.psqT[pov]
 		} else {
 			s.ThreatRebuilds++
 		}
 		fusedThreat(&cur.thr[pov], src, &net.FTThreatWeights[0], &a.rows[0], a.n, &r.rows[0], r.n)
 		s.RowOps += uint64(a.n + r.n)
+		if net.sf != nil {
+			sfApplyPSQT(&psqT[pov], net.sf.threatPSQT, a, r)
+		}
 	}
+	cur.psqP, cur.psqT = psqP, psqT
 
 	cur.snap = cs
 	cur.view = views
@@ -328,7 +363,7 @@ func pieceDelta(old, cur *eightSnap, d bitboard.Bitboard, v *eightView, pov int,
 // finnyRefresh builds a piece accumulator for a perspective whose king bucket
 // or side differs from the stored accumulator's, starting from the cached
 // accumulator for that bucket and side.
-func (s *EightState) finnyRefresh(net *EightNetwork, cs *eightSnap, v *eightView, pov int, dst *[EightL1Size]int16) {
+func (s *EightState) finnyRefresh(net *EightNetwork, cs *eightSnap, v *eightView, pov int, dst *[EightL1Size]int16, psq *[sfPSQTBuckets]int32) {
 	m := 0
 	if v.mirror {
 		m = 1
@@ -336,6 +371,7 @@ func (s *EightState) finnyRefresh(net *EightNetwork, cs *eightSnap, v *eightView
 	e := &s.finny[pov][v.bucket][m]
 	if !e.ready {
 		e.acc = net.FTBiases
+		e.psq = [sfPSQTBuckets]int32{}
 		e.snap = eightSnap{}
 		e.ready = true
 	}
@@ -344,8 +380,12 @@ func (s *EightState) finnyRefresh(net *EightNetwork, cs *eightSnap, v *eightView
 	a.n, r.n = 0, 0
 	pieceDelta(&e.snap, cs, d, v, pov, a, r)
 	fusedPiece(&e.acc, &e.acc, &net.FTPieceWeights[0], &a.rows[0], a.n, &r.rows[0], r.n)
+	if net.sf != nil {
+		sfApplyPSQT(&e.psq, net.sf.piecePSQT, a, r)
+	}
 	e.snap = *cs
 	*dst = e.acc
+	*psq = e.psq
 	s.RowOps += uint64(a.n + r.n)
 	s.FinnyRefreshes++
 }
@@ -363,10 +403,10 @@ func (s *EightState) resetFinny(net *EightNetwork) {
 
 // emitThreat adds the features for attacker a (code ac) attacking target t
 // (code tc) to the lists of the perspectives in want.
-func emitThreat(ac, a, tc, t int, views *[2]eightView, want [2]bool, out *[2]rowList) {
+func emitThreat(tt *threatTables, ac, a, tc, t int, views *[2]eightView, want [2]bool, out *[2]rowList) {
 	for pov := 0; pov < 2; pov++ {
 		if want[pov] {
-			if idx := getThreatIndex(ac, a, tc, t, views[pov].mirror, pov); idx >= 0 {
+			if idx := getThreatIndex(tt, ac, a, tc, t, views[pov].mirror, pov); idx >= 0 {
 				out[pov].push(int32(idx))
 			}
 		}
@@ -376,7 +416,7 @@ func emitThreat(ac, a, tc, t int, views *[2]eightView, want [2]bool, out *[2]row
 // threatsOf lists the threat pairs of position x that can differ from the
 // other position: attackers on d, targets on d, and the targets gained or
 // lost by the sliders in sl. otherOcc is the other position's occupancy.
-func threatsOf(x *eightSnap, otherOcc, d, sl bitboard.Bitboard, views *[2]eightView, want [2]bool, out *[2]rowList) {
+func threatsOf(tt *threatTables, x *eightSnap, otherOcc, d, sl bitboard.Bitboard, views *[2]eightView, want [2]bool, out *[2]rowList) {
 	occ := uint64(x.occ)
 
 	// Attackers on d: every target.
@@ -385,7 +425,7 @@ func threatsOf(x *eightSnap, otherOcc, d, sl bitboard.Bitboard, views *[2]eightV
 		ac := pieceCode(x.pieces[sq])
 		for t := attacksWithOcc(ac, sq, occ) & occ; t != 0; t &= t - 1 {
 			to := bits.TrailingZeros64(t)
-			emitThreat(ac, sq, pieceCode(x.pieces[to]), to, views, want, out)
+			emitThreat(tt, ac, sq, pieceCode(x.pieces[to]), to, views, want, out)
 		}
 	}
 
@@ -398,7 +438,7 @@ func threatsOf(x *eightSnap, otherOcc, d, sl bitboard.Bitboard, views *[2]eightV
 		changed := atk ^ attacksWithOcc(ac, sq, uint64(otherOcc))
 		for t := atk & (changed | uint64(d)) & occ; t != 0; t &= t - 1 {
 			to := bits.TrailingZeros64(t)
-			emitThreat(ac, sq, pieceCode(x.pieces[to]), to, views, want, out)
+			emitThreat(tt, ac, sq, pieceCode(x.pieces[to]), to, views, want, out)
 		}
 	}
 
@@ -409,7 +449,7 @@ func threatsOf(x *eightSnap, otherOcc, d, sl bitboard.Bitboard, views *[2]eightV
 		tc := pieceCode(x.pieces[to])
 		for a := attackersTo(x, to) &^ skip; a != 0; {
 			sq := int(bitboard.PopLSB(&a))
-			emitThreat(pieceCode(x.pieces[sq]), sq, tc, int(to), views, want, out)
+			emitThreat(tt, pieceCode(x.pieces[sq]), sq, tc, int(to), views, want, out)
 		}
 	}
 }
@@ -430,7 +470,7 @@ func attackersTo(x *eightSnap, sq types.Square) bitboard.Bitboard {
 
 // threatDelta lists, for the perspectives in want, the threat rows to remove
 // (pairs that hold in old but not in cur) and to add (the reverse).
-func threatDelta(old, cur *eightSnap, d bitboard.Bitboard, views *[2]eightView, want [2]bool, add, rem *[2]rowList) {
+func threatDelta(tt *threatTables, old, cur *eightSnap, d bitboard.Bitboard, views *[2]eightView, want [2]bool, add, rem *[2]rowList) {
 	if d == 0 {
 		return
 	}
@@ -446,19 +486,19 @@ func threatDelta(old, cur *eightSnap, d bitboard.Bitboard, views *[2]eightView, 
 	}
 	sl &^= d
 
-	threatsOf(old, cur.occ, d, sl, views, want, rem)
-	threatsOf(cur, old.occ, d, sl, views, want, add)
+	threatsOf(tt, old, cur.occ, d, sl, views, want, rem)
+	threatsOf(tt, cur, old.occ, d, sl, views, want, add)
 }
 
 // fullThreats lists every threat feature of x for one perspective.
-func fullThreats(x *eightSnap, v *eightView, pov int, out *rowList) {
+func fullThreats(tt *threatTables, x *eightSnap, v *eightView, pov int, out *rowList) {
 	occ := uint64(x.occ)
 	for a := x.occ; a != 0; {
 		sq := int(bitboard.PopLSB(&a))
 		ac := pieceCode(x.pieces[sq])
 		for t := attacksWithOcc(ac, sq, occ) & occ; t != 0; t &= t - 1 {
 			to := bits.TrailingZeros64(t)
-			if idx := getThreatIndex(ac, sq, pieceCode(x.pieces[to]), to, v.mirror, pov); idx >= 0 {
+			if idx := getThreatIndex(tt, ac, sq, pieceCode(x.pieces[to]), to, v.mirror, pov); idx >= 0 {
 				out.push(int32(idx))
 			}
 		}

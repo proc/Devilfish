@@ -30,6 +30,7 @@
       - Perspective architecture $768 \to 256 \times 2 \to 32 \to 1$ with embedded default weights.
       - Incremental accumulator updates during search with 128-bit ARM64 NEON vectorization.
   - **Runtime Model Switching**: Switch dynamically between networks via `--eval-file <path>` or UCI `setoption name EvalFile value <path>`.
+  - **Stockfish networks**: Stockfish network files of version `0x6A448AFA` (threat, pawn-pair and king-relative piece-square inputs, 1024-wide, e.g. `nn-134a887f4c8f.nnue`) load the same way: `./devilfish --eval-file nn-134a887f4c8f.nnue`, `"eval_file"` in `config.json`, or `setoption name EvalFile value <path>`. They are evaluated incrementally with the same kernels as the built-in network, give the same outputs as Stockfish for the same file, and are converted to centipawns with Stockfish's own scaling. Older Stockfish formats are refused with a message. The file is not embedded (about 100 MB).
   - **Classical Fallback**: Toggle NNUE on/off via `--no-nnue` or UCI `setoption name UseNNUE value false`.
 - **Classical Tapered Evaluation (HCE)**:
   - Smoothly blends Midgame (MG) and Endgame (EG) scores based on non-pawn material phase.

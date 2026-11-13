@@ -35,11 +35,22 @@ func LoadFile(path string) error {
 
 	expectedSize := int64((HiddenSize * 2) + (NumFeatures * HiddenSize * 2) + (Layer1Size * 4) + (Layer1Size * 2 * HiddenSize * 1) + 4 + (Layer1Size * 2))
 
-	// Detect Stockfish / YaneuraOu HalfKAv2 format
+	// Stockfish networks start with a version word.
 	var magic uint32
 	if err := binary.Read(file, binary.LittleEndian, &magic); err == nil {
-		if magic == 0x6a448afa || magic == 0x7f0b0fc6 {
-			return fmt.Errorf("incompatible NNUE network architecture: %s is a Stockfish SFNNv16/HalfKAv2 model (%.1f MB), but Devilfish implements 768->256 direct feature and 8Chess (1024-wide) networks", path, float64(fi.Size())/(1024*1024))
+		switch magic {
+		case SFVersion:
+			sfNet, err := LoadSFFile(path)
+			if err != nil {
+				return fmt.Errorf("Stockfish network %s: %w", path, err)
+			}
+			ActiveEightNetwork = sfNet
+			ActiveNetwork = nil
+			Enabled = true
+			CurrentFilePath = path
+			return nil
+		case 0x7AF32F20, 0x7f0b0fc6:
+			return fmt.Errorf("unsupported NNUE network: %s is an older Stockfish-format network (version %#08x, %.1f MB); the Stockfish format supported is version %#08x (threat inputs, 1024-wide)", path, magic, float64(fi.Size())/(1024*1024), uint32(SFVersion))
 		}
 		_, _ = file.Seek(0, io.SeekStart)
 	}

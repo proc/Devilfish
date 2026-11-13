@@ -371,6 +371,231 @@ done:
 	VST1 [V0.S4, V1.S4, V2.S4, V3.S4], (R3)
 	RET
 
+// func sparse32NEON(idx *uint16, n int, in *uint8, wt *int8, out *[32]int32)
+// l1SparseIdxNEON for a layer of 32 outputs: wt holds one 32-byte weight row
+// per input. out receives the sums (no bias).
+TEXT ·sparse32NEON(SB), NOSPLIT|NOFRAME, $0-40
+	MOVD idx+0(FP), R0
+	MOVD n+8(FP), R1
+	MOVD in+16(FP), R8
+	MOVD wt+24(FP), R2
+	MOVD out+32(FP), R3
+	VEOR V0.B16, V0.B16, V0.B16
+	VEOR V1.B16, V1.B16, V1.B16
+	VEOR V2.B16, V2.B16, V2.B16
+	VEOR V3.B16, V3.B16, V3.B16
+	VEOR V4.B16, V4.B16, V4.B16
+	VEOR V5.B16, V5.B16, V5.B16
+	VEOR V6.B16, V6.B16, V6.B16
+	VEOR V7.B16, V7.B16, V7.B16
+	CBZ  R1, done
+loop:
+	MOVHU.P 2(R0), R5     // input index
+	MOVBU (R8)(R5), R6    // value
+	ADD  R5<<5, R2, R7    // its weight row
+	VLD1 (R7), [V8.B16, V9.B16]
+	WORD $0x0f08a50a // SXTL V10.8H, V8.8B
+	WORD $0x4f08a50b // SXTL2 V11.8H, V8.16B
+	WORD $0x0f08a52c // SXTL V12.8H, V9.8B
+	WORD $0x4f08a52d // SXTL2 V13.8H, V9.16B
+	WORD $0x4e020cce // DUP V14.8H, W6 (value)
+	WORD $0x0e6e8140 // SMLAL V0.4S, V10.4H, V14.4H
+	WORD $0x4e6e8141 // SMLAL2 V1.4S, V10.8H, V14.8H
+	WORD $0x0e6e8162 // SMLAL V2.4S, V11.4H, V14.4H
+	WORD $0x4e6e8163 // SMLAL2 V3.4S, V11.8H, V14.8H
+	WORD $0x0e6e8184 // SMLAL V4.4S, V12.4H, V14.4H
+	WORD $0x4e6e8185 // SMLAL2 V5.4S, V12.8H, V14.8H
+	WORD $0x0e6e81a6 // SMLAL V6.4S, V13.4H, V14.4H
+	WORD $0x4e6e81a7 // SMLAL2 V7.4S, V13.8H, V14.8H
+	SUB  $1, R1, R1
+	CBNZ R1, loop
+done:
+	VST1.P [V0.S4, V1.S4, V2.S4, V3.S4], 64(R3)
+	VST1   [V4.S4, V5.S4, V6.S4, V7.S4], (R3)
+	RET
+
+// func chunkDot32NEON(idx *uint16, n int, in *uint8, wt *int8, out *[32]int32)
+// The 32-output layer by groups of four inputs. For each listed group g, the
+// four input bytes at in[4g] are repeated across a vector and multiplied into
+// the group's 128 weight bytes ([output][input in group]) with SDOT, which
+// adds the four products of each output to that output's sum. The inputs are
+// at most 127, so reading them as signed bytes is exact. Requires the
+// dot-product extension (FEAT_DotProd).
+TEXT ·chunkDot32NEON(SB), NOSPLIT|NOFRAME, $0-40
+	MOVD idx+0(FP), R0
+	MOVD n+8(FP), R1
+	MOVD in+16(FP), R8
+	MOVD wt+24(FP), R2
+	MOVD out+32(FP), R3
+	VEOR V0.B16, V0.B16, V0.B16
+	VEOR V1.B16, V1.B16, V1.B16
+	VEOR V2.B16, V2.B16, V2.B16
+	VEOR V3.B16, V3.B16, V3.B16
+	VEOR V4.B16, V4.B16, V4.B16
+	VEOR V5.B16, V5.B16, V5.B16
+	VEOR V6.B16, V6.B16, V6.B16
+	VEOR V7.B16, V7.B16, V7.B16
+	CBZ  R1, done
+loop:
+	MOVHU.P 2(R0), R5     // group index
+	ADD  R5<<2, R8, R6    // its four inputs
+	WORD $0x4d40c8d0 // LD1R {V16.4S}, [R6]
+	ADD  R5<<7, R2, R7    // its weights
+	VLD1.P 64(R7), [V8.B16, V9.B16, V10.B16, V11.B16]
+	VLD1   (R7), [V12.B16, V13.B16, V14.B16, V15.B16]
+	WORD $0x4e909500 // SDOT V0.4S, V8.16B, V16.16B
+	WORD $0x4e909521 // SDOT V1.4S, V9.16B, V16.16B
+	WORD $0x4e909542 // SDOT V2.4S, V10.16B, V16.16B
+	WORD $0x4e909563 // SDOT V3.4S, V11.16B, V16.16B
+	WORD $0x4e909584 // SDOT V4.4S, V12.16B, V16.16B
+	WORD $0x4e9095a5 // SDOT V5.4S, V13.16B, V16.16B
+	WORD $0x4e9095c6 // SDOT V6.4S, V14.16B, V16.16B
+	WORD $0x4e9095e7 // SDOT V7.4S, V15.16B, V16.16B
+	SUB  $1, R1, R1
+	CBNZ R1, loop
+done:
+	VST1.P [V0.S4, V1.S4, V2.S4, V3.S4], 64(R3)
+	VST1   [V4.S4, V5.S4, V6.S4, V7.S4], (R3)
+	RET
+
+// func sfAct7NEON(x *[32]int32, bias *[32]int32, out *uint8)
+// For v = x[i] + bias[i]: out[i] = min(127, v*v >> 21) and
+// out[32+i] = clamp(v >> 7, 0, 127). v is first saturated to 16 bits, which
+// changes neither result; SQDMULH then gives v*v >> 15.
+TEXT ·sfAct7NEON(SB), NOSPLIT|NOFRAME, $0-24
+	MOVD x+0(FP), R0
+	MOVD bias+8(FP), R1
+	MOVD out+16(FP), R2
+	ADD  $32, R2, R3
+	VEOR V31.B16, V31.B16, V31.B16
+	MOVD $2, R4
+loop:
+	VLD1.P 64(R0), [V0.S4, V1.S4, V2.S4, V3.S4]
+	VLD1.P 64(R1), [V4.S4, V5.S4, V6.S4, V7.S4]
+	VADD V4.S4, V0.S4, V0.S4
+	VADD V5.S4, V1.S4, V1.S4
+	VADD V6.S4, V2.S4, V2.S4
+	VADD V7.S4, V3.S4, V3.S4
+	WORD $0x0e614808 // SQXTN V8.4H, V0.4S
+	WORD $0x4e614828 // SQXTN2 V8.8H, V1.4S
+	WORD $0x0e614849 // SQXTN V9.4H, V2.4S
+	WORD $0x4e614869 // SQXTN2 V9.8H, V3.4S
+	WORD $0x4e68b508 // SQDMULH V8.8H, V8.8H, V8.8H
+	WORD $0x4e69b529 // SQDMULH V9.8H, V9.8H, V9.8H
+	WORD $0x4f1a0508 // SSHR V8.8H, V8.8H, #6
+	WORD $0x4f1a0529 // SSHR V9.8H, V9.8H, #6
+	WORD $0x0e21490a // SQXTN V10.8B, V8.8H
+	WORD $0x4e21492a // SQXTN2 V10.16B, V9.8H
+	VST1.P [V10.B16], 16(R2)
+	WORD $0x0f19940b // SQSHRN V11.4H, V0.4S, #7
+	WORD $0x4f19942b // SQSHRN2 V11.8H, V1.4S, #7
+	WORD $0x0f19944c // SQSHRN V12.4H, V2.4S, #7
+	WORD $0x4f19946c // SQSHRN2 V12.8H, V3.4S, #7
+	WORD $0x0e21496d // SQXTN V13.8B, V11.8H
+	WORD $0x4e21498d // SQXTN2 V13.16B, V12.8H
+	WORD $0x4e3f65ad // SMAX V13.16B, V13.16B, V31.16B
+	VST1.P [V13.B16], 16(R3)
+	SUB  $1, R4, R4
+	CBNZ R4, loop
+	RET
+
+// func sfAct6NEON(x *[32]int32, bias *[32]int32, out *uint8)
+// For v = x[i] + bias[i]: out[i] = min(127, v*v >> 19) and
+// out[32+i] = clamp(v >> 6, 0, 127). v is first saturated to 16 bits, which
+// changes neither result; SQDMULH then gives v*v >> 15.
+TEXT ·sfAct6NEON(SB), NOSPLIT|NOFRAME, $0-24
+	MOVD x+0(FP), R0
+	MOVD bias+8(FP), R1
+	MOVD out+16(FP), R2
+	ADD  $32, R2, R3
+	VEOR V31.B16, V31.B16, V31.B16
+	MOVD $2, R4
+loop:
+	VLD1.P 64(R0), [V0.S4, V1.S4, V2.S4, V3.S4]
+	VLD1.P 64(R1), [V4.S4, V5.S4, V6.S4, V7.S4]
+	VADD V4.S4, V0.S4, V0.S4
+	VADD V5.S4, V1.S4, V1.S4
+	VADD V6.S4, V2.S4, V2.S4
+	VADD V7.S4, V3.S4, V3.S4
+	WORD $0x0e614808 // SQXTN V8.4H, V0.4S
+	WORD $0x4e614828 // SQXTN2 V8.8H, V1.4S
+	WORD $0x0e614849 // SQXTN V9.4H, V2.4S
+	WORD $0x4e614869 // SQXTN2 V9.8H, V3.4S
+	WORD $0x4e68b508 // SQDMULH V8.8H, V8.8H, V8.8H
+	WORD $0x4e69b529 // SQDMULH V9.8H, V9.8H, V9.8H
+	WORD $0x4f1c0508 // SSHR V8.8H, V8.8H, #4
+	WORD $0x4f1c0529 // SSHR V9.8H, V9.8H, #4
+	WORD $0x0e21490a // SQXTN V10.8B, V8.8H
+	WORD $0x4e21492a // SQXTN2 V10.16B, V9.8H
+	VST1.P [V10.B16], 16(R2)
+	WORD $0x0f1a940b // SQSHRN V11.4H, V0.4S, #6
+	WORD $0x4f1a942b // SQSHRN2 V11.8H, V1.4S, #6
+	WORD $0x0f1a944c // SQSHRN V12.4H, V2.4S, #6
+	WORD $0x4f1a946c // SQSHRN2 V12.8H, V3.4S, #6
+	WORD $0x0e21496d // SQXTN V13.8B, V11.8H
+	WORD $0x4e21498d // SQXTN2 V13.16B, V12.8H
+	WORD $0x4e3f65ad // SMAX V13.16B, V13.16B, V31.16B
+	VST1.P [V13.B16], 16(R3)
+	SUB  $1, R4, R4
+	CBNZ R4, loop
+	RET
+
+// func dot128NEON(a *[128]uint8, w *[128]int8, out *[4]int32)
+// out[0]+out[1]+out[2]+out[3] is the dot product of a (each at most 127) and
+// w. Requires FEAT_DotProd.
+TEXT ·dot128NEON(SB), NOSPLIT|NOFRAME, $0-24
+	MOVD a+0(FP), R0
+	MOVD w+8(FP), R1
+	MOVD out+16(FP), R2
+	VEOR V0.B16, V0.B16, V0.B16
+	VEOR V1.B16, V1.B16, V1.B16
+	MOVD $2, R3
+loop:
+	VLD1.P 64(R0), [V4.B16, V5.B16, V6.B16, V7.B16]
+	VLD1.P 64(R1), [V8.B16, V9.B16, V10.B16, V11.B16]
+	WORD $0x4e849500 // SDOT V0.4S, V8.16B, V4.16B
+	WORD $0x4e859521 // SDOT V1.4S, V9.16B, V5.16B
+	WORD $0x4e869540 // SDOT V0.4S, V10.16B, V6.16B
+	WORD $0x4e879561 // SDOT V1.4S, V11.16B, V7.16B
+	SUB  $1, R3, R3
+	CBNZ R3, loop
+	VADD V1.S4, V0.S4, V0.S4
+	VST1 [V0.S4], (R2)
+	RET
+
+// func psqtApplyNEON(dst *[8]int32, table *int32, add *int32, nAdd int, rem *int32, nRem int)
+// dst += the eight-value rows of table listed in add, -= those in rem.
+TEXT ·psqtApplyNEON(SB), NOSPLIT|NOFRAME, $0-48
+	MOVD dst+0(FP), R0
+	MOVD table+8(FP), R1
+	MOVD add+16(FP), R2
+	MOVD nAdd+24(FP), R3
+	MOVD rem+32(FP), R4
+	MOVD nRem+40(FP), R5
+	VLD1 (R0), [V0.S4, V1.S4]
+	CBZ  R3, addsdone
+adds:
+	MOVWU.P 4(R2), R6
+	ADD  R6<<5, R1, R7
+	VLD1 (R7), [V2.S4, V3.S4]
+	VADD V2.S4, V0.S4, V0.S4
+	VADD V3.S4, V1.S4, V1.S4
+	SUB  $1, R3, R3
+	CBNZ R3, adds
+addsdone:
+	CBZ  R5, remsdone
+rems:
+	MOVWU.P 4(R4), R6
+	ADD  R6<<5, R1, R7
+	VLD1 (R7), [V2.S4, V3.S4]
+	VSUB V2.S4, V0.S4, V0.S4
+	VSUB V3.S4, V1.S4, V1.S4
+	SUB  $1, R5, R5
+	CBNZ R5, rems
+remsdone:
+	VST1 [V0.S4, V1.S4], (R0)
+	RET
+
 // ---------------------------------------------------------------------------
 // Fused accumulator update: dst = src + sum of the added weight rows - sum of
 // the removed ones, one block of sixteen vector registers (128 int16) at a
