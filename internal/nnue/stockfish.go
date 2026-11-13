@@ -174,6 +174,28 @@ func sfStackHash() uint32 {
 	return affine(h, 1)
 }
 
+// StockfishName is the EvalFile value that selects the Stockfish network
+// built into the binary.
+const StockfishName = "<stockfish>"
+
+// EmbeddedSFName is the file name of that network.
+const EmbeddedSFName = "nn-134a887f4c8f.nnue"
+
+var (
+	embeddedSFOnce sync.Once
+	embeddedSFNet  *EightNetwork
+	embeddedSFErr  error
+)
+
+// EmbeddedSF returns the Stockfish network built into the binary. It is
+// parsed on first use (about a second) and kept.
+func EmbeddedSF() (*EightNetwork, error) {
+	embeddedSFOnce.Do(func() {
+		embeddedSFNet, embeddedSFErr = LoadSFBytes(embeddedSFNNUE)
+	})
+	return embeddedSFNet, embeddedSFErr
+}
+
 // LoadSFFile loads a Stockfish network file.
 func LoadSFFile(path string) (*EightNetwork, error) {
 	data, err := os.ReadFile(path)

@@ -34,7 +34,7 @@ func printHelp() {
 	fmt.Println("  -c, --config <path>         Path to JSON config file (default: ./config.json or ~/.devilfish/config.json)")
 	fmt.Println("  -l, --log <path>            Path to log file for engine internal details, profiling, and Syzygy status")
 	fmt.Println("  --multipv <N>               Number of principal variations to calculate (default: 1)")
-	fmt.Println("  --eval-file <path>          Path to custom NNUE network file (default: embedded)")
+	fmt.Println("  --eval-file <path>          NNUE network: a file, <embedded> (default) or <stockfish> (the built-in Stockfish network)")
 	fmt.Println("  --no-nnue                   Disable NNUE evaluation (use classical HCE)")
 	fmt.Println("  --book <path>               Opening book: Polyglot .bin, EPD suite (.epd/.epd.gz), <embedded> (default) or <pohl>")
 	fmt.Println("  --no-book                   Disable opening book")

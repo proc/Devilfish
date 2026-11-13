@@ -14,6 +14,11 @@ var embeddedDefaultNNUE []byte
 //go:embed eightchess_1024_tuned768.nnue
 var embeddedEightNNUE []byte
 
+// The Stockfish network selected by EvalFile "<stockfish>" (see LoadFile).
+//
+//go:embed nn-134a887f4c8f.nnue
+var embeddedSFNNUE []byte
+
 var defaultPST = [7][64]int32{
 	0: {}, // None
 	// Pawn

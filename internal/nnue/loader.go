@@ -6,10 +6,25 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // LoadFile loads an NNUE network file from disk and sets it as the ActiveNetwork.
+//
+// The name "<stockfish>" (StockfishName) selects the Stockfish network built
+// into the binary instead of a file.
 func LoadFile(path string) error {
+	if strings.EqualFold(strings.TrimSpace(path), StockfishName) {
+		net, err := EmbeddedSF()
+		if err != nil {
+			return fmt.Errorf("embedded Stockfish network: %w", err)
+		}
+		ActiveEightNetwork = net
+		ActiveNetwork = nil
+		Enabled = true
+		CurrentFilePath = StockfishName + " (" + EmbeddedSFName + ")"
+		return nil
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("failed to open nnue file: %w", err)

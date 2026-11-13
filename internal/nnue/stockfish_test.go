@@ -6,42 +6,19 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 
 	"devilfish/internal/board"
 	"devilfish/internal/movegen"
 )
 
-// The Stockfish network is not part of the repository (99 MB). These tests
-// run when it is present at the repository root, or where DEVILFISH_SF_NET
-// points, and are skipped otherwise.
-const sfTestNetName = "nn-134a887f4c8f.nnue"
-
-var (
-	sfTestNetOnce sync.Once
-	sfTestNet     *EightNetwork
-	sfTestNetErr  error
-)
-
+// loadSFTestNet returns the Stockfish network built into the binary.
 func loadSFTestNet(t testing.TB) *EightNetwork {
-	sfTestNetOnce.Do(func() {
-		path := os.Getenv("DEVILFISH_SF_NET")
-		if path == "" {
-			path = "../../" + sfTestNetName
-		}
-		if _, err := os.Stat(path); err != nil {
-			return
-		}
-		sfTestNet, sfTestNetErr = LoadSFFile(path)
-	})
-	if sfTestNetErr != nil {
-		t.Fatalf("loading the Stockfish network: %v", sfTestNetErr)
+	net, err := EmbeddedSF()
+	if err != nil {
+		t.Fatalf("loading the embedded Stockfish network: %v", err)
 	}
-	if sfTestNet == nil {
-		t.Skip("Stockfish network " + sfTestNetName + " not present")
-	}
-	return sfTestNet
+	return net
 }
 
 // The network's outputs equal those Stockfish itself reports for the same
@@ -186,12 +163,7 @@ func TestSFLoadRejectsBadFiles(t *testing.T) {
 	if _, err := LoadSFBytes(old); err == nil || !strings.Contains(err.Error(), "version") {
 		t.Errorf("older format: %v", err)
 	}
-	net := loadSFTestNet(t)
-	_ = net
-	data, err := os.ReadFile("../../" + sfTestNetName)
-	if err != nil {
-		t.Skip("network file not at the repository root")
-	}
+	data := embeddedSFNNUE
 	if _, err := LoadSFBytes(data[:len(data)-5]); err == nil {
 		t.Error("file cut short accepted")
 	}
@@ -283,5 +255,34 @@ func TestSFDenseKernelsMatchReference(t *testing.T) {
 		if k != n {
 			t.Fatalf("trial %d: nonzero64 count %d, want %d", trial, n, k)
 		}
+	}
+}
+
+// EvalFile "<stockfish>" selects the embedded network, and "<embedded>"
+// (ResetToDefault) goes back to the built-in one.
+func TestLoadFileStockfishName(t *testing.T) {
+	savedEight, savedNet, savedPath, savedEnabled := ActiveEightNetwork, ActiveNetwork, CurrentFilePath, Enabled
+	defer func() {
+		ActiveEightNetwork, ActiveNetwork, CurrentFilePath, Enabled = savedEight, savedNet, savedPath, savedEnabled
+	}()
+	for _, name := range []string{"<stockfish>", " <Stockfish> "} {
+		if err := LoadFile(name); err != nil {
+			t.Fatalf("LoadFile(%q): %v", name, err)
+		}
+		if !ActiveEightNetwork.IsSF() || !strings.Contains(CurrentFilePath, EmbeddedSFName) {
+			t.Fatalf("LoadFile(%q): active network %q is not the Stockfish one", name, CurrentFilePath)
+		}
+	}
+	first := ActiveEightNetwork
+	if err := LoadFile(StockfishName); err != nil || ActiveEightNetwork != first {
+		t.Error("selecting the embedded network again should reuse it")
+	}
+	b, _ := board.ParseFEN(board.StartFEN)
+	if v := EvaluateEight(ActiveEightNetwork, b); v < 1 || v > 60 {
+		t.Errorf("start position evaluates to %d cp", v)
+	}
+	ResetToDefault()
+	if ActiveEightNetwork.IsSF() {
+		t.Error("ResetToDefault left the Stockfish network active")
 	}
 }
