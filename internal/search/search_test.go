@@ -836,8 +836,8 @@ func TestOptimism(t *testing.T) {
 	P.Optimism = 1
 	setOptimism(tm, 150, types.White)
 	white := optimismCP(b, tm.Optimism.Load())
-	if white <= 0 || white > 20 {
-		t.Errorf("White ahead by 150 at the root: optimism for White to move = %d, want 1..20", white)
+	if white <= 0 || white > 5 {
+		t.Errorf("White ahead by 150 at the root: optimism for White to move = %d, want 1..5", white)
 	}
 	b.SideToMove = types.Black
 	if black := optimismCP(b, tm.Optimism.Load()); black != -white {
@@ -849,7 +849,7 @@ func TestOptimism(t *testing.T) {
 	}
 	setOptimism(tm, MateScore, types.White)
 	b.SideToMove = types.White
-	if v := optimismCP(b, tm.Optimism.Load()); v > 20 {
-		t.Errorf("optimism at a mate score = %d, want at most 20", v)
+	if v := optimismCP(b, tm.Optimism.Load()); v > 5 {
+		t.Errorf("optimism at a mate score = %d, want at most 5", v)
 	}
 }

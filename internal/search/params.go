@@ -72,8 +72,8 @@ type Params struct {
 	CheckSEEPrune  int32 // 1: SEE pruning also applies to evasions
 
 	// Optimism 1: the evaluation leans toward the side the last iteration
-	// found ahead at the root, by up to about 16 centipawns with all the
-	// material on the board (after Stockfish's optimism term).
+	// found ahead at the root, by up to 4 centipawns (after Stockfish's
+	// optimism term; see optimismCP).
 	Optimism int32
 
 	// Aspiration windows at the root.

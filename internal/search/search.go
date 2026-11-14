@@ -122,36 +122,36 @@ func (w *SearchWorker) adjustEval(raw int32) int32 {
 }
 
 // setOptimism records how far ahead the side to move at the root was found
-// to be (rootScore, centipawns), as Stockfish does: 142*s/(|s|+91) in its
-// internal units, where a pawn is roughly 3.6 times a centipawn.
+// to be (rootScore, centipawns). It is Stockfish's 114*s/(|s|+85), with s in
+// the network's internal units: about three to the centipawn.
 func setOptimism(tm *TimeManager, rootScore int32, rootSide types.Color) {
 	if P.Optimism == 0 {
 		tm.Optimism.Store(0)
 		return
 	}
-	x := max(min(rootScore, 2000), -2000) * 36 / 10
-	o := 142 * x / (abs(x) + 91)
+	x := max(min(rootScore, 2000), -2000) * 3
+	o := 114 * x / (abs(x) + 85)
 	if rootSide == types.Black {
 		o = -o
 	}
 	tm.Optimism.Store(o)
 }
 
-// optimismCP is the optimism term for the side to move, in centipawns. It
-// follows Stockfish 18's blend, optimism*(7191+material)/77871, without the
-// scaling by the network's complexity (the two network outputs are not kept
-// with a cached evaluation).
+// optimismCP is the optimism term for the side to move, in centipawns: at
+// most 4. It follows the Stockfish version this network shipped with
+// (September 2026), which adds
+//
+//	optimism * (1 + complexity/476) * 7675/91000
+//
+// internal units to the evaluation, complexity being the gap between the
+// network's two outputs. Cached evaluations do not keep those outputs, so
+// complexity is fixed at 167, its mean over 3000 opening positions; with
+// three internal units to the centipawn the factor comes to 38/1000.
 func optimismCP(b *board.Board, whiteOptimism int32) int32 {
-	count := func(t types.PieceType) int32 {
-		return int32(bitboard.Count(b.PieceBB[types.MakePiece(types.White, t)] | b.PieceBB[types.MakePiece(types.Black, t)]))
-	}
-	material := 534*count(types.Pawn) + 781*count(types.Knight) + 825*count(types.Bishop) + 1276*count(types.Rook) + 2538*count(types.Queen)
-	o := whiteOptimism
 	if b.SideToMove == types.Black {
-		o = -o
+		whiteOptimism = -whiteOptimism
 	}
-	// 360 internal units to the pawn, near enough at every material level.
-	return o * (7191 + material) * 100 / (77871 * 360)
+	return whiteOptimism * 38 / 1000
 }
 
 func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *atomic.Uint64, tbHits *atomic.Uint64) *SearchWorker {
