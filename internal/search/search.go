@@ -803,6 +803,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	mp.stage = StageGenCaptures
 	mp.SetNodeInfo(threatenedPieces, kingInDanger, hasActiveAttack, themKingRing)
 	mp.hc = &hc
+	mp.depth = int(depth)
 
 	for {
 		m := mp.Next()

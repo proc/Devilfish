@@ -52,6 +52,13 @@ type MovePicker struct {
 	badCapCount  int
 	badCapIndex  int
 
+	// Stockfish-style ordering (P.MoveOrder 1; see picker_sf.go).
+	sf            bool
+	sfStage       sfStage
+	depth         int // remaining depth of the node, for the sort limit
+	badQuietCount int // quiets held back, kept at the front of the quiet list
+	badQuietIndex int
+
 	// SEE of the move most recently returned by Next, when it came from the
 	// capture list (where SEE is computed for scoring anyway).
 	lastSEE      int32
@@ -147,6 +154,7 @@ func NewMovePicker(
 		prevMove2:    prevMove2,
 		prevMove4:    prevMove4,
 		stage:        StageTTMove,
+		sf:           P.MoveOrder != 0,
 	}
 
 	if ply < MaxPly {
@@ -162,6 +170,16 @@ func NewMovePicker(
 
 func (mp *MovePicker) Next() types.Move {
 	mp.lastSEEKnown = false
+	if mp.sf {
+		if mp.stage == StageTTMove {
+			mp.stage = StageGenCaptures
+			if mp.ttMove != types.MoveNone && mp.ttMove != mp.excludedMove &&
+				movegen.IsPseudoLegal(mp.board, mp.ttMove) {
+				return mp.ttMove
+			}
+		}
+		return mp.nextSF()
+	}
 	for {
 		switch mp.stage {
 		case StageTTMove:

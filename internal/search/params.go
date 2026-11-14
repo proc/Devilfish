@@ -71,6 +71,13 @@ type Params struct {
 	CheckLMR       int32 // 1: late evasions are reduced like other late moves (one ply less)
 	CheckSEEPrune  int32 // 1: SEE pruning also applies to evasions
 
+	// MoveOrder 1: Stockfish-style move ordering in the main search (see
+	// picker_sf.go). 0: the staged picker with killers, counter-move and
+	// hand-written quiet-move classes. Against 0, to depth 18 on 60
+	// positions: the same tree size (101%), 9% more nodes per second,
+	// first-move cutoffs 84.0% against 83.0%. Not match-tested.
+	MoveOrder int32
+
 	// Optimism 1: the evaluation leans toward the side the last iteration
 	// found ahead at the root, by a few centipawns where material is
 	// unbalanced (Stockfish's optimism term; see optimismCP).
@@ -171,6 +178,7 @@ var P = Params{
 	QSEvasionPrune: 1,
 	CheckLMR:       1,
 	CheckSEEPrune:  1,
+	MoveOrder:      1,
 
 	Optimism: 0, // not match-tested
 
@@ -248,6 +256,7 @@ func TunableParams() []ParamSpec {
 		{"QSEvasionPrune", &P.QSEvasionPrune, 0, 1},
 		{"CheckLMR", &P.CheckLMR, 0, 1},
 		{"CheckSEEPrune", &P.CheckSEEPrune, 0, 1},
+		{"MoveOrder", &P.MoveOrder, 0, 1},
 		{"Optimism", &P.Optimism, 0, 1},
 		{"AspDelta", &P.AspDelta, 5, 100},
 		{"AspTries", &P.AspTries, 0, 10},

@@ -32,6 +32,7 @@ type SearchHistory struct {
 	Main           [2][2][2][64][64]int16
 	Cont           [15][64]contRow
 	PawnHist       [pawnHistSize]contRow
+	LowPly         [lowPlySize][64][64]int16 // by ply near the root, origin and destination (P.MoveOrder 1)
 	CounterMoves   [64][64]types.Move
 	CaptureHistory [7][64][7]int32
 	CorrHist       [2][corrSize]int16 // pawn structure
@@ -46,8 +47,9 @@ type SearchHistory struct {
 }
 
 const (
-	histLimit = 16384
-	contPad   = 4 // plies of look-back, so that the root can index below itself
+	histLimit  = 16384
+	contPad    = 6 // plies of look-back, so that the root can index below itself
+	lowPlySize = 5 // plies from the root that have a low-ply history
 )
 
 func NewSearchHistory() *SearchHistory {
@@ -64,6 +66,7 @@ func (h *SearchHistory) Clear() {
 // piece play, which carry over to the next move, so they are kept.
 func (h *SearchHistory) NewSearch() {
 	h.Killers = [MaxPly][2]types.Move{}
+	h.LowPly = [lowPlySize][64][64]int16{}
 	h.contStack = [MaxPly + contPad]*contRow{}
 }
 
@@ -89,6 +92,11 @@ type histCtx struct {
 	pawnAttacked bitboard.Bitboard // squares attacked by enemy pawns
 	cont         [3]*contRow       // the moves 1, 2 and 4 plies back; nil where there is none
 	pawn         *contRow
+
+	// P.MoveOrder 1 only: the moves 3 and 6 plies back, and this ply's
+	// low-ply history (nil away from the root).
+	contFar [2]*contRow
+	low     *[64][64]int16
 }
 
 // Context returns the history rows for the node at ply, where b is the
@@ -110,6 +118,12 @@ func (h *SearchHistory) Context(b *board.Board, ply int, threatened bitboard.Bit
 	if ply >= 0 && ply < MaxPly {
 		i := ply + contPad
 		c.cont = [3]*contRow{h.contStack[i-1], h.contStack[i-2], h.contStack[i-4]}
+		if P.MoveOrder != 0 {
+			c.contFar = [2]*contRow{h.contStack[i-3], h.contStack[i-6]}
+			if ply < lowPlySize {
+				c.low = &h.LowPly[ply]
+			}
+		}
 	}
 	return c
 }
@@ -134,6 +148,39 @@ func (c *histCtx) Order(piece types.Piece, m types.Move) int32 {
 		if row != nil {
 			s += int32(row[piece][to])
 		}
+	}
+	return s
+}
+
+// OrderSF is the history part of the score quiet moves are sorted by under
+// P.MoveOrder 1, weighted as Stockfish weights its tables: main and pawn
+// history twice, the continuation histories 1, 2, 3, 4 and 6 plies back
+// once, and the low-ply history near the root.
+func (c *histCtx) OrderSF(piece types.Piece, m types.Move, ply int) int32 {
+	to := m.To()
+	s := 2*int32(*c.mainEntry(m)) + 2*int32(c.pawn[piece][to])
+	for _, row := range c.cont {
+		if row != nil {
+			s += int32(row[piece][to])
+		}
+	}
+	for _, row := range c.contFar {
+		if row != nil {
+			s += int32(row[piece][to])
+		}
+	}
+	if c.low != nil {
+		s += 8 * int32(c.low[m.From()][to]) / int32(1+ply)
+	}
+	return s
+}
+
+// Evasion is the score non-captures are sorted by when in check under
+// P.MoveOrder 1: main history and the continuation history one ply back.
+func (c *histCtx) Evasion(piece types.Piece, m types.Move) int32 {
+	s := int32(*c.mainEntry(m))
+	if c.cont[0] != nil {
+		s += int32(c.cont[0][piece][m.To()])
 	}
 	return s
 }
@@ -174,6 +221,16 @@ func (c *histCtx) Update(piece types.Piece, m types.Move, bonus int32) {
 		if row != nil {
 			histGravity(&row[piece][to], bonus)
 		}
+	}
+	// The far continuation histories and the low-ply history learn more
+	// slowly, about as Stockfish's do relative to its nearer ones.
+	for _, row := range c.contFar {
+		if row != nil {
+			histGravity(&row[piece][to], bonus/2)
+		}
+	}
+	if c.low != nil {
+		histGravity(&c.low[m.From()][to], bonus*712/1024)
 	}
 }
 

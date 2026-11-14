@@ -859,3 +859,55 @@ func TestOptimism(t *testing.T) {
 		t.Errorf("optimism with material level = %d, want 0", v)
 	}
 }
+
+// Under either ordering the picker hands out every pseudo-legal move exactly
+// once, in check or not, with or without a hash move.
+func TestMovePickerYieldsEveryMoveOnce(t *testing.T) {
+	old := P.MoveOrder
+	defer func() { P.MoveOrder = old }()
+	fens := []string{
+		board.StartFEN,
+		"r1bq1rk1/pp2bppp/2n1pn2/3p4/2PP4/2N1PN2/PP2BPPP/R1BQ1RK1 w - - 0 9",
+		"r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+		"rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2",
+		"4k3/8/8/8/1b6/8/3P4/4K3 w - - 0 1",      // in check
+		"r3k2r/8/8/8/8/8/4q3/R3K2R w KQkq - 0 1", // in check, one capture
+		"8/P6k/8/8/8/8/p6K/8 w - - 0 1",          // promotions
+	}
+	for _, order := range []int32{0, 1} {
+		P.MoveOrder = order
+		for _, fen := range fens {
+			b, err := board.ParseFEN(fen)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var all movegen.MoveList
+			movegen.GenerateMovesByType(b, movegen.GenAll, &all)
+			want := map[types.Move]int{}
+			for i := 0; i < all.Count; i++ {
+				want[all.Moves[i]]++
+			}
+			for _, tt := range []types.Move{types.MoveNone, all.Moves[all.Count/2]} {
+				h := NewSearchHistory()
+				mp := NewMovePicker(b, tt, types.MoveNone, 3, types.MoveNone, types.MoveNone, types.MoveNone, h)
+				mp.depth = 6
+				got := map[types.Move]int{}
+				for n := 0; n < 400; n++ {
+					m := mp.Next()
+					if m == types.MoveNone {
+						break
+					}
+					got[m]++
+				}
+				for m, n := range want {
+					if got[m] != n {
+						t.Errorf("order %d, %s, hash move %v: move %v returned %d times, want %d", order, fen, tt, m, got[m], n)
+					}
+				}
+				if len(got) != len(want) {
+					t.Errorf("order %d, %s, hash move %v: %d distinct moves, want %d", order, fen, tt, len(got), len(want))
+				}
+			}
+		}
+	}
+}
