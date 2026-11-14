@@ -313,47 +313,6 @@ TEXT ·sfAct6SSE2(SB), NOSPLIT, $0-24
 	MOVQ out+16(FP), DI
 	SF_ACT(6, 3)
 
-// func psqtApplySSE2(dst *[8]int32, table *int32, add *int32, nAdd int, rem *int32, nRem int)
-// dst += the eight-value rows of table listed in add, -= those in rem.
-TEXT ·psqtApplySSE2(SB), NOSPLIT, $0-48
-	MOVQ dst+0(FP), DI
-	MOVQ table+8(FP), DX
-	MOVQ add+16(FP), R8
-	MOVQ nAdd+24(FP), R9
-	MOVQ rem+32(FP), R10
-	MOVQ nRem+40(FP), R11
-	MOVOU 0(DI), X0
-	MOVOU 16(DI), X1
-	TESTQ R9, R9
-	JZ    addsdone
-adds:
-	MOVL  (R8), AX
-	SHLQ  $5, AX
-	MOVOU 0(DX)(AX*1), X2
-	MOVOU 16(DX)(AX*1), X3
-	PADDL X2, X0
-	PADDL X3, X1
-	ADDQ  $4, R8
-	DECQ  R9
-	JNZ   adds
-addsdone:
-	TESTQ R11, R11
-	JZ    remsdone
-rems:
-	MOVL  (R10), AX
-	SHLQ  $5, AX
-	MOVOU 0(DX)(AX*1), X2
-	MOVOU 16(DX)(AX*1), X3
-	PSUBL X2, X0
-	PSUBL X3, X1
-	ADDQ  $4, R10
-	DECQ  R11
-	JNZ   rems
-remsdone:
-	MOVOU X0, 0(DI)
-	MOVOU X1, 16(DI)
-	RET
-
 // ---------------------------------------------------------------------------
 // l1SparseSSE2 / l1SparseAVX2 (vec_amd64.s) with the inputs given as a list
 // of indices, the values read from ft. Entries are taken two at a time; an

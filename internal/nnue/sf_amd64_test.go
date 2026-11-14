@@ -196,8 +196,8 @@ func TestAMD64SFMatchesStockfishAcrossKernels(t *testing.T) {
 				t.Fatal(err)
 			}
 			out, ok := SFEvaluateRaw(net, b)
-			if !ok || int(out.PSQT+out.Positional) != r.want {
-				t.Fatalf("%s: got %d, Stockfish %d", r.fen, out.PSQT+out.Positional, r.want)
+			if !ok || int(out) != r.want {
+				t.Fatalf("%s: got %d, Stockfish %d", r.fen, out, r.want)
 			}
 		}
 		TestSFDenseKernelsMatchReference(t)

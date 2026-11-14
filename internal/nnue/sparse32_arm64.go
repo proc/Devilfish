@@ -21,9 +21,6 @@ func sfAct6NEON(x *[32]int32, bias *[32]int32, out *uint8)
 func dot128NEON(a *[128]uint8, w *[128]int8, out *[4]int32)
 
 //go:noescape
-func psqtApplyNEON(dst *[8]int32, table *int32, add *int32, nAdd int, rem *int32, nRem int)
-
-//go:noescape
 func chunkDot32NEON(idx *uint16, n int, in *uint8, wt *int8, out *[32]int32)
 
 // hasDotProd reports whether the CPU has the dot-product instructions
@@ -93,13 +90,6 @@ func sfDot128(a *[128]uint8, w *[128]int8) int32 {
 	var s [4]int32
 	dot128NEON(a, w, &s)
 	return s[0] + s[1] + s[2] + s[3]
-}
-
-// sfApplyPSQT adds the PSQT rows of add and subtracts those of rem.
-func sfApplyPSQT(dst *[sfPSQTBuckets]int32, table []int32, add, rem *rowList) {
-	if add.n+rem.n != 0 {
-		psqtApplyNEON(dst, &table[0], &add.rows[0], add.n, &rem.rows[0], rem.n)
-	}
 }
 
 // sfSecondLayer computes the 32 second-layer sums (without bias) from the

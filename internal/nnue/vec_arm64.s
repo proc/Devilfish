@@ -563,39 +563,6 @@ loop:
 	VST1 [V0.S4], (R2)
 	RET
 
-// func psqtApplyNEON(dst *[8]int32, table *int32, add *int32, nAdd int, rem *int32, nRem int)
-// dst += the eight-value rows of table listed in add, -= those in rem.
-TEXT ·psqtApplyNEON(SB), NOSPLIT|NOFRAME, $0-48
-	MOVD dst+0(FP), R0
-	MOVD table+8(FP), R1
-	MOVD add+16(FP), R2
-	MOVD nAdd+24(FP), R3
-	MOVD rem+32(FP), R4
-	MOVD nRem+40(FP), R5
-	VLD1 (R0), [V0.S4, V1.S4]
-	CBZ  R3, addsdone
-adds:
-	MOVWU.P 4(R2), R6
-	ADD  R6<<5, R1, R7
-	VLD1 (R7), [V2.S4, V3.S4]
-	VADD V2.S4, V0.S4, V0.S4
-	VADD V3.S4, V1.S4, V1.S4
-	SUB  $1, R3, R3
-	CBNZ R3, adds
-addsdone:
-	CBZ  R5, remsdone
-rems:
-	MOVWU.P 4(R4), R6
-	ADD  R6<<5, R1, R7
-	VLD1 (R7), [V2.S4, V3.S4]
-	VSUB V2.S4, V0.S4, V0.S4
-	VSUB V3.S4, V1.S4, V1.S4
-	SUB  $1, R5, R5
-	CBNZ R5, rems
-remsdone:
-	VST1 [V0.S4, V1.S4], (R0)
-	RET
-
 // ---------------------------------------------------------------------------
 // Fused accumulator update: dst = src + sum of the added weight rows - sum of
 // the removed ones, one block of sixteen vector registers (128 int16) at a

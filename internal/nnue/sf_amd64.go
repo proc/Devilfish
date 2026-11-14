@@ -29,9 +29,6 @@ func sfAct7SSE2(x *[32]int32, bias *[32]int32, out *uint8)
 func sfAct6SSE2(x *[32]int32, bias *[32]int32, out *uint8)
 
 //go:noescape
-func psqtApplySSE2(dst *[8]int32, table *int32, add *int32, nAdd int, rem *int32, nRem int)
-
-//go:noescape
 func l1SparseIdxSSE2(idx *uint16, n int, ft *uint8, wt *[EightL1Size][EightL2Size]int8, out *[EightL2Size]int32)
 
 //go:noescape
@@ -128,17 +125,6 @@ func sfDot128(a *[128]uint8, w *[128]int8) int32 {
 		return refDot128(a, w)
 	}
 	return s[0] + s[1] + s[2] + s[3] + s[4] + s[5] + s[6] + s[7]
-}
-
-// sfApplyPSQT adds the PSQT rows of add and subtracts those of rem.
-func sfApplyPSQT(dst *[sfPSQTBuckets]int32, table []int32, add, rem *rowList) {
-	if simd == simdGeneric {
-		refApplyPSQT(dst, table, add, rem)
-		return
-	}
-	if add.n+rem.n != 0 {
-		psqtApplySSE2(dst, &table[0], &add.rows[0], add.n, &rem.rows[0], rem.n)
-	}
 }
 
 // eightL1Idx is the first dense layer of an 8Chess network: a branch-free

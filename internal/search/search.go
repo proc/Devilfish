@@ -114,11 +114,12 @@ func (w *SearchWorker) adjustEval(raw int32) int32 {
 	v := raw + w.History.GetCorrection(w.Board)
 	if P.Optimism != 0 {
 		if o := w.TimeMan.Optimism.Load(); o != 0 {
-			v += optimismCP(w.Board, o)
+			v += optimismCP(w.Board, raw, o)
 		}
 	}
-	// Fade the eval toward a draw as the fifty-move counter runs up
-	return v * (200 - int32(w.Board.HalfmoveClock)) / 200
+	// Fade the eval toward a draw as the fifty-move counter runs up (over 189
+	// half-moves, as Stockfish does)
+	return v * (189 - int32(w.Board.HalfmoveClock)) / 189
 }
 
 // setOptimism records how far ahead the side to move at the root was found
@@ -137,21 +138,16 @@ func setOptimism(tm *TimeManager, rootScore int32, rootSide types.Color) {
 	tm.Optimism.Store(o)
 }
 
-// optimismCP is the optimism term for the side to move, in centipawns: at
-// most 4. It follows the Stockfish version this network shipped with
-// (September 2026), which adds
-//
-//	optimism * (1 + complexity/476) * 7675/91000
-//
-// internal units to the evaluation, complexity being the gap between the
-// network's two outputs. Cached evaluations do not keep those outputs, so
-// complexity is fixed at 167, its mean over 3000 opening positions; with
-// three internal units to the centipawn the factor comes to 38/1000.
-func optimismCP(b *board.Board, whiteOptimism int32) int32 {
+// optimismCP is the optimism term for the side to move, in centipawns, for
+// a position whose network evaluation is raw. It is Stockfish's: optimism
+// scaled by how far the evaluation and the material balance agree, so the
+// side ahead at the root prefers straightforward positions and the other
+// side complicated ones. Zero with material level; a few centipawns at most.
+func optimismCP(b *board.Board, raw int32, whiteOptimism int32) int32 {
 	if b.SideToMove == types.Black {
 		whiteOptimism = -whiteOptimism
 	}
-	return whiteOptimism * 38 / 1000
+	return nnue.SFOptimismCP(b, raw, whiteOptimism)
 }
 
 func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *atomic.Uint64, tbHits *atomic.Uint64) *SearchWorker {

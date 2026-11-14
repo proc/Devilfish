@@ -30,8 +30,9 @@ import (
 //     in both positions, and the pairs listed for the old position and for
 //     the new one never coincide, so the lists need no comparing.
 //
-// A perspective whose king has changed input bucket (or side of the board)
-// has every piece feature renumbered. That accumulator is then built from a
+// A perspective whose king has changed input bucket (or side of the board,
+// or, for a Stockfish network, whose piece-square block has changed) has
+// every piece feature renumbered. That accumulator is then built from a
 // cache holding, per perspective and king bucket, the last accumulator made
 // with that bucket and the pieces it was made from (the "Finny table" idea),
 // which is again a difference of a few squares. A king changing side also
@@ -70,7 +71,7 @@ func (s *eightSnap) load(b *board.Board) {
 type eightView struct {
 	bucket int  // king input bucket (piece features)
 	flip   int  // square transform for piece features
-	mirror bool // king on the e-h files (threat features)
+	mirror bool // threat features see the board mirrored
 	sf     bool // Stockfish feature numbering (see stockfish.go)
 }
 
@@ -80,7 +81,7 @@ func eightViews(net *EightNetwork, b *board.Board) (v [2]eightView, ok bool) {
 		return v, false
 	}
 	if net.sf != nil {
-		return [2]eightView{sfView(0, int(k0)), sfView(1, int(k1))}, true
+		return [2]eightView{sfView(0, int(k0), sfBlock(b, 0)), sfView(1, int(k1), sfBlock(b, 1))}, true
 	}
 	v[0].mirror = int(k0)&7 >= 4
 	v[1].mirror = int(k1)&7 >= 4
@@ -119,17 +120,12 @@ type eightPly struct {
 	thr   [2][EightL1Size]int16
 	snap  eightSnap
 	view  [2]eightView
-
-	// Stockfish networks: PSQT sums of the piece-square features and of the
-	// threat and pawn-pair features, kept in step with pst and thr.
-	psqP, psqT [2][sfPSQTBuckets]int32
 }
 
 type finnyEntry struct {
 	ready bool
 	acc   [EightL1Size]int16
-	psq   [sfPSQTBuckets]int32 // PSQT sum for the same pieces (Stockfish networks)
-	snap  eightSnap            // pieces acc was built from
+	snap  eightSnap // pieces acc was built from
 }
 
 // rowList collects weight-row indices for one fused update.
@@ -204,7 +200,7 @@ func (s *EightState) Evaluate(net *EightNetwork, b *board.Board, ply int, parent
 	cur := &s.plies[ply]
 	occCount := bits.OnesCount64(uint64(b.Occupied()))
 	if net.sf != nil {
-		return sfToCP(sfForward(net, &s.sfScratch, &cur.pst, &cur.thr, &cur.psqP, &cur.psqT, b, occCount), b)
+		return sfToCP(sfForward(net, &s.sfScratch, &cur.pst, &cur.thr, b, occCount), b)
 	}
 	return eightForward(net, &cur.pst, &cur.thr, b, occCount)
 }
@@ -283,7 +279,7 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 	}
 
 	// Start fetching every weight row this update will read, before reading
-	// any: the rows are scattered over ~83 MB, so most come from L3 or
+	// any: the rows are scattered over 80 to 200 MB, so most come from L3 or
 	// memory, and issuing the requests together lets them overlap. The first
 	// two cache lines of each row are enough; the hardware prefetcher
 	// follows the rest of a row once it is being read. (Measured: fetching
@@ -291,8 +287,13 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 	for pov := 0; pov < 2 && rowPrefetch; pov++ {
 		if pieceInc[pov] {
 			a, r := &s.pieceAdd[pov], &s.pieceRem[pov]
-			prefetchRows(unsafe.Pointer(&net.FTPieceWeights[0]), &a.rows[0], a.n, 11, 2)
-			prefetchRows(unsafe.Pointer(&net.FTPieceWeights[0]), &r.rows[0], r.n, 11, 2)
+			if net.sf != nil {
+				prefetchRows(unsafe.Pointer(&net.FTPieceWeights8[0]), &a.rows[0], a.n, 10, 2)
+				prefetchRows(unsafe.Pointer(&net.FTPieceWeights8[0]), &r.rows[0], r.n, 10, 2)
+			} else {
+				prefetchRows(unsafe.Pointer(&net.FTPieceWeights[0]), &a.rows[0], a.n, 11, 2)
+				prefetchRows(unsafe.Pointer(&net.FTPieceWeights[0]), &r.rows[0], r.n, 11, 2)
+			}
 		}
 		a, r := &s.thrAdd[pov], &s.thrRem[pov]
 		prefetchRows(unsafe.Pointer(&net.FTThreatWeights[0]), &a.rows[0], a.n, 10, 2)
@@ -300,41 +301,42 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 	}
 
 	s.Evals++
-	var psqP, psqT [2][sfPSQTBuckets]int32 // base may be cur: assigned at the end
 	for pov := 0; pov < 2; pov++ {
 		if pieceInc[pov] {
 			a, r := &s.pieceAdd[pov], &s.pieceRem[pov]
-			fusedPiece(&cur.pst[pov], &base.pst[pov], &net.FTPieceWeights[0], &a.rows[0], a.n, &r.rows[0], r.n)
+			net.applyPieceRows(&cur.pst[pov], &base.pst[pov], a, r)
 			s.RowOps += uint64(a.n + r.n)
-			if net.sf != nil {
-				psqP[pov] = base.psqP[pov]
-				sfApplyPSQT(&psqP[pov], net.sf.piecePSQT, a, r)
-			}
 		} else {
-			s.finnyRefresh(net, &cs, &views[pov], pov, &cur.pst[pov], &psqP[pov])
+			s.finnyRefresh(net, &cs, &views[pov], pov, &cur.pst[pov])
 		}
 
 		a, r := &s.thrAdd[pov], &s.thrRem[pov]
 		src := &eightZeroAcc
 		if thrInc[pov] {
 			src = &base.thr[pov]
-			psqT[pov] = base.psqT[pov]
 		} else {
 			s.ThreatRebuilds++
 		}
 		fusedThreat(&cur.thr[pov], src, &net.FTThreatWeights[0], &a.rows[0], a.n, &r.rows[0], r.n)
 		s.RowOps += uint64(a.n + r.n)
-		if net.sf != nil {
-			sfApplyPSQT(&psqT[pov], net.sf.threatPSQT, a, r)
-		}
 	}
-	cur.psqP, cur.psqT = psqP, psqT
 
 	cur.snap = cs
 	cur.view = views
 	cur.hash = b.Hash
 	cur.valid = true
 	return true
+}
+
+// applyPieceRows sets dst to src plus the piece-square rows in add minus
+// those in rem. dst may be src.
+func (net *EightNetwork) applyPieceRows(dst, src *[EightL1Size]int16, add, rem *rowList) {
+	if net.sf != nil {
+		// int8 rows: the threat kernel.
+		fusedThreat(dst, src, &net.FTPieceWeights8[0], &add.rows[0], add.n, &rem.rows[0], rem.n)
+		return
+	}
+	fusedPiece(dst, src, &net.FTPieceWeights[0], &add.rows[0], add.n, &rem.rows[0], rem.n)
 }
 
 // changedSquares returns the squares whose contents differ between a and b.
@@ -363,7 +365,7 @@ func pieceDelta(old, cur *eightSnap, d bitboard.Bitboard, v *eightView, pov int,
 // finnyRefresh builds a piece accumulator for a perspective whose king bucket
 // or side differs from the stored accumulator's, starting from the cached
 // accumulator for that bucket and side.
-func (s *EightState) finnyRefresh(net *EightNetwork, cs *eightSnap, v *eightView, pov int, dst *[EightL1Size]int16, psq *[sfPSQTBuckets]int32) {
+func (s *EightState) finnyRefresh(net *EightNetwork, cs *eightSnap, v *eightView, pov int, dst *[EightL1Size]int16) {
 	m := 0
 	if v.mirror {
 		m = 1
@@ -371,7 +373,6 @@ func (s *EightState) finnyRefresh(net *EightNetwork, cs *eightSnap, v *eightView
 	e := &s.finny[pov][v.bucket][m]
 	if !e.ready {
 		e.acc = net.FTBiases
-		e.psq = [sfPSQTBuckets]int32{}
 		e.snap = eightSnap{}
 		e.ready = true
 	}
@@ -379,13 +380,9 @@ func (s *EightState) finnyRefresh(net *EightNetwork, cs *eightSnap, v *eightView
 	a, r := &s.pieceAdd[pov], &s.pieceRem[pov]
 	a.n, r.n = 0, 0
 	pieceDelta(&e.snap, cs, d, v, pov, a, r)
-	fusedPiece(&e.acc, &e.acc, &net.FTPieceWeights[0], &a.rows[0], a.n, &r.rows[0], r.n)
-	if net.sf != nil {
-		sfApplyPSQT(&e.psq, net.sf.piecePSQT, a, r)
-	}
+	net.applyPieceRows(&e.acc, &e.acc, a, r)
 	e.snap = *cs
 	*dst = e.acc
-	*psq = e.psq
 	s.RowOps += uint64(a.n + r.n)
 	s.FinnyRefreshes++
 }

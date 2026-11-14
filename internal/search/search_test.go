@@ -821,7 +821,8 @@ func TestQueenThreatEvasion(t *testing.T) {
 func TestOptimism(t *testing.T) {
 	old := P.Optimism
 	defer func() { P.Optimism = old }()
-	b, err := board.ParseFEN(board.StartFEN)
+	// White is a knight up.
+	b, err := board.ParseFEN("rnbqkb1r/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -835,21 +836,26 @@ func TestOptimism(t *testing.T) {
 
 	P.Optimism = 1
 	setOptimism(tm, 150, types.White)
-	white := optimismCP(b, tm.Optimism.Load())
-	if white <= 0 || white > 5 {
-		t.Errorf("White ahead by 150 at the root: optimism for White to move = %d, want 1..5", white)
+	stored := tm.Optimism.Load()
+	white := optimismCP(b, 300, stored)
+	if white <= 0 || white > 10 {
+		t.Errorf("White ahead at the root and a knight up: optimism for White to move = %d, want 1..10", white)
 	}
 	b.SideToMove = types.Black
-	if black := optimismCP(b, tm.Optimism.Load()); black != -white {
+	if black := optimismCP(b, -300, stored); black != -white {
 		t.Errorf("optimism for Black to move = %d, want %d", black, -white)
 	}
 	setOptimism(tm, 150, types.Black) // Black to move at the root, and ahead
-	if black := optimismCP(b, tm.Optimism.Load()); black != white {
-		t.Errorf("Black ahead at the root: optimism for Black to move = %d, want %d", black, white)
+	if got := tm.Optimism.Load(); got != -stored {
+		t.Errorf("Black ahead at the root: stored optimism %d, want %d", got, -stored)
 	}
 	setOptimism(tm, MateScore, types.White)
 	b.SideToMove = types.White
-	if v := optimismCP(b, tm.Optimism.Load()); v > 5 {
-		t.Errorf("optimism at a mate score = %d, want at most 5", v)
+	if v := optimismCP(b, 3000, tm.Optimism.Load()); v > 10 {
+		t.Errorf("optimism at a mate score = %d, want at most 10", v)
+	}
+	start, _ := board.ParseFEN(board.StartFEN)
+	if v := optimismCP(start, 30, tm.Optimism.Load()); v != 0 {
+		t.Errorf("optimism with material level = %d, want 0", v)
 	}
 }

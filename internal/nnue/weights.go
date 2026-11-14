@@ -16,7 +16,7 @@ var embeddedEightNNUE []byte
 
 // The Stockfish network selected by EvalFile "<stockfish>" (see LoadFile).
 //
-//go:embed nn-134a887f4c8f.nnue
+//go:embed nn-68752b755c93.nnue
 var embeddedSFNNUE []byte
 
 var defaultPST = [7][64]int32{

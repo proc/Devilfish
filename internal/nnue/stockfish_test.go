@@ -52,8 +52,8 @@ func TestSFMatchesStockfish(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s: not evaluated", fen)
 		}
-		if got := int(out.PSQT + out.Positional); got != wantV {
-			t.Errorf("%s: got %d (psqt %d, positional %d), Stockfish %d", fen, got, out.PSQT, out.Positional, wantV)
+		if got := int(out); got != wantV {
+			t.Errorf("%s: got %d, Stockfish %d", fen, got, wantV)
 		}
 		checked++
 	}
@@ -215,25 +215,6 @@ func TestSFDenseKernelsMatchReference(t *testing.T) {
 		}
 		if got, want := sfDot128(&a, &w), refDot128(&a, &w); got != want {
 			t.Fatalf("trial %d: dot %d, want %d", trial, got, want)
-		}
-
-		table := make([]int32, 50*sfPSQTBuckets)
-		for i := range table {
-			table[i] = int32(rng.Uint32())
-		}
-		var add, rem rowList
-		for i, k := 0, rng.Intn(6); i < k; i++ {
-			add.push(int32(rng.Intn(50)))
-		}
-		for i, k := 0, rng.Intn(6); i < k; i++ {
-			rem.push(int32(rng.Intn(50)))
-		}
-		got := [sfPSQTBuckets]int32{1, -2, 3, -4, 5, -6, 7, -8}
-		want := got
-		sfApplyPSQT(&got, table, &add, &rem)
-		refApplyPSQT(&want, table, &add, &rem)
-		if got != want {
-			t.Fatalf("trial %d: PSQT %v, want %v", trial, got, want)
 		}
 
 		var in [64]uint8

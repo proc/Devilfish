@@ -29,11 +29,6 @@ func sfActivate(x, bias *[32]int32, out *[64]uint8, bits uint) {
 // sfDot128 is the dot product of a (each at most 127) and w.
 func sfDot128(a *[128]uint8, w *[128]int8) int32 { return refDot128(a, w) }
 
-// sfApplyPSQT adds the PSQT rows of add and subtracts those of rem.
-func sfApplyPSQT(dst *[sfPSQTBuckets]int32, table []int32, add, rem *rowList) {
-	refApplyPSQT(dst, table, add, rem)
-}
-
 // sfSecondLayer computes the 32 second-layer sums (without bias) from the
 // 64 activations in act[:64].
 func sfSecondLayer(act *[128]uint8, st *sfStack, out *[32]int32) {

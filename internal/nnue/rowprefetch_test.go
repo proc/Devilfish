@@ -9,8 +9,8 @@ import (
 // weight tables, and change nothing.
 func TestPrefetchRows(t *testing.T) {
 	net := ActiveEightNetwork
-	if net == nil {
-		t.Skip("8Chess network not embedded")
+	if net == nil || net.IsSF() {
+		t.Skip("8Chess network not active")
 	}
 	lastPiece := int32(len(net.FTPieceWeights)/EightL1Size - 1)
 	lastThreat := int32(len(net.FTThreatWeights)/EightL1Size - 1)

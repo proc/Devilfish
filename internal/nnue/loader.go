@@ -65,7 +65,7 @@ func LoadFile(path string) error {
 			CurrentFilePath = path
 			return nil
 		case 0x7AF32F20, 0x7f0b0fc6:
-			return fmt.Errorf("unsupported NNUE network: %s is an older Stockfish-format network (version %#08x, %.1f MB); the Stockfish format supported is version %#08x (threat inputs, 1024-wide)", path, magic, float64(fi.Size())/(1024*1024), uint32(SFVersion))
+			return fmt.Errorf("unsupported NNUE network: %s is an older Stockfish-format network (version %#08x, %.1f MB); the Stockfish format supported is version %#08x, architecture SFNNv20 (threat inputs, 1024-wide)", path, magic, float64(fi.Size())/(1024*1024), uint32(SFVersion))
 		}
 		_, _ = file.Seek(0, io.SeekStart)
 	}

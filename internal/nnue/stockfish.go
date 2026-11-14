@@ -15,17 +15,16 @@ import (
 	"devilfish/internal/types"
 )
 
-// Stockfish networks (file version 0x6A448AFA: threat, pawn-pair and
-// king-relative piece-square inputs -> 1024 -> 32 -> 32 -> 1, eight layer
-// stacks and eight PSQT buckets chosen by piece count).
+// Stockfish networks (file version 0x6A448AFA, architecture SFNNv20: threat,
+// pawn-pair and king-relative piece-square inputs -> 1024 -> 32 -> 32 -> 1,
+// with up to 192 layer stacks chosen by material).
 //
-// The feature transformer has the same shape as the 8Chess one: int16
-// piece-square rows and int8 threat rows summed into a 1024-wide int16
-// accumulator per perspective, then a clipped pairwise product. So such a
-// network is held in an EightNetwork and evaluated incrementally by
-// EightState; this file adds what differs: the file format, the feature
-// numbering, the pawn-pair features, the PSQT sums, the dense layers and the
-// conversion of the result to centipawns.
+// The feature transformer has the same shape as the 8Chess one: piece-square
+// rows (int8 here, int16 there) and int8 threat rows summed into a 1024-wide int16 accumulator per
+// perspective, then a clipped pairwise product. So such a network is held in
+// an EightNetwork and evaluated incrementally by EightState; this file adds
+// what differs: the file format, the feature numbering, the pawn-pair
+// features, the dense layers and the conversion of the result to centipawns.
 
 const (
 	SFVersion = 0x6A448AFA
@@ -34,15 +33,16 @@ const (
 	sfPawnIDs        = 96 // 48 squares x 2 colours
 	sfPairFeatures   = sfPawnIDs * (sfPawnIDs - 1) / 2
 	sfThreatRows     = sfThreatFeatures + sfPairFeatures // rows of the int8 table
-	sfKingBuckets    = 32
-	sfPieceSquares   = 11 * 64 // per king bucket
+	sfKingSquares    = 32                                // king buckets: the squares of half a board
+	sfPieceSquares   = 11 * 64                           // per king bucket
+	sfBlocks         = 3                                 // piece-square blocks, by heavy material (see sfBlock)
+	sfKingBuckets    = sfBlocks * sfKingSquares          // block and king bucket together
 	sfPieceFeatures  = sfKingBuckets * sfPieceSquares
-	sfPSQTBuckets    = 8
-	sfLayerStacks    = 8
+	sfRawStacks      = 192 // layer stacks before those sharing weights are merged
 	sfL2             = 32
 	sfL3             = 32
 
-	sfLebMagic = "COMPRESSED_LEB128"
+	sfStackTableHash = 0x5A7AB1E5
 )
 
 // sfStack is one layer stack. Weights are stored by input (the file stores
@@ -67,13 +67,12 @@ type sfStack struct {
 }
 
 type sfNet struct {
-	piecePSQT  []int32 // [sfPieceFeatures * sfPSQTBuckets]
-	threatPSQT []int32 // [sfThreatRows * sfPSQTBuckets]
-	stacks     [sfLayerStacks]sfStack
+	stacks     []sfStack           // the layer stacks stored in the file
+	stackIndex [sfRawStacks]uint16 // raw layer stack (see sfLayerStack) -> stacks
 	desc       string
 }
 
-// sfReader reads the little-endian and LEB128 sections of a network file.
+// sfReader reads the little-endian sections of a network file.
 type sfReader struct {
 	data []byte
 	pos  int
@@ -107,6 +106,14 @@ func (r *sfReader) u32() uint32 {
 	return binary.LittleEndian.Uint32(b)
 }
 
+func (r *sfReader) u16() uint16 {
+	b := r.take(2)
+	if b == nil {
+		return 0
+	}
+	return binary.LittleEndian.Uint16(b)
+}
+
 // expect reads a section hash.
 func (r *sfReader) expect(want uint32, what string) {
 	if got := r.u32(); r.err == nil && got != want {
@@ -114,48 +121,10 @@ func (r *sfReader) expect(want uint32, what string) {
 	}
 }
 
-// leb reads count signed LEB128 integers of the given bit width into put.
-func (r *sfReader) leb(count int, put func(i int, v int32)) {
-	magic := r.take(len(sfLebMagic))
-	if r.err == nil && string(magic) != sfLebMagic {
-		r.fail("missing %s marker at byte %d", sfLebMagic, r.pos-len(sfLebMagic))
-	}
-	size := int(r.u32())
-	buf := r.take(size)
-	if r.err != nil {
-		return
-	}
-	p := 0
-	for i := 0; i < count; i++ {
-		var result uint32
-		shift := uint(0)
-		for {
-			if p >= len(buf) {
-				r.fail("compressed section ends after %d of %d values", i, count)
-				return
-			}
-			c := buf[p]
-			p++
-			result |= uint32(c&0x7f) << (shift % 32)
-			shift += 7
-			if c&0x80 == 0 {
-				if shift < 32 && c&0x40 != 0 {
-					result |= ^uint32(0) << shift
-				}
-				break
-			}
-		}
-		put(i, int32(result))
-	}
-	if p != len(buf) {
-		r.fail("compressed section has %d unread bytes", len(buf)-p)
-	}
-}
-
 // Section hashes, computed as Stockfish computes them.
 func sfFeatureHash() uint32 {
 	var h uint32
-	for _, c := range []uint32{0x2e6b9d04, 0x86f2b1dd, 0x7f234cb8} { // threats, pawn pairs, piece-squares
+	for _, c := range []uint32{0x2c41eaea, 0x5c80fa69, 0xab005cef} { // threats, pawn pairs, piece-squares
 		h = h<<1 | h>>31
 		h ^= c
 	}
@@ -180,7 +149,7 @@ func sfStackHash() uint32 {
 const StockfishName = "<stockfish>"
 
 // EmbeddedSFName is the file name of that network.
-const EmbeddedSFName = "nn-134a887f4c8f.nnue"
+const EmbeddedSFName = "nn-68752b755c93.nnue"
 
 var (
 	embeddedSFOnce sync.Once
@@ -216,40 +185,75 @@ func LoadSFBytes(data []byte) (*EightNetwork, error) {
 	if v := r.u32(); r.err == nil && v != SFVersion {
 		return nil, fmt.Errorf("unsupported Stockfish network version %#08x (supported: %#08x)", v, uint32(SFVersion))
 	}
-	r.expect(sfFeatureHash()^sfStackHash(), "network")
+	r.expect(sfFeatureHash()^sfStackHash()^sfStackTableHash, "network")
 	net := &EightNetwork{sf: &sfNet{}}
 	sf := net.sf
 	sf.desc = string(r.take(int(r.u32())))
 
-	// Feature transformer.
-	r.expect(sfFeatureHash(), "feature transformer")
-	r.leb(EightL1Size, func(i int, v int32) { net.FTBiases[i] = int16(v) })
+	// Layer stack table: for each raw stack, the one whose weights it uses.
+	// Only stacks that use their own are stored, in order.
+	r.expect(sfStackTableHash, "layer stack table")
+	if n := r.u32(); r.err == nil && n != sfRawStacks {
+		return nil, fmt.Errorf("layer stack table has %d entries, expected %d", n, sfRawStacks)
+	}
+	stored := int(r.u32())
+	var fallback [sfRawStacks]uint16
+	for i := range fallback {
+		fallback[i] = r.u16()
+	}
 	if r.err != nil {
 		return nil, r.err
+	}
+	if stored < 1 || stored > sfRawStacks {
+		return nil, fmt.Errorf("%d layer stacks stored, expected 1 to %d", stored, sfRawStacks)
+	}
+	own := 0
+	for i, f := range fallback {
+		if int(f) >= sfRawStacks || fallback[f] != f {
+			return nil, fmt.Errorf("layer stack table: entry %d refers to stack %d, which is not stored", i, f)
+		}
+		if int(f) == i {
+			sf.stackIndex[i] = uint16(own)
+			own++
+		}
+	}
+	if own != stored {
+		return nil, fmt.Errorf("layer stack table lists %d stored stacks, header says %d", own, stored)
+	}
+	for i, f := range fallback {
+		sf.stackIndex[i] = sf.stackIndex[f]
+	}
+
+	// Feature transformer: biases, threat rows, pawn-pair rows, piece-square
+	// rows, all uncompressed.
+	r.expect(sfFeatureHash(), "feature transformer")
+	raw := r.take(EightL1Size * 2)
+	if r.err != nil {
+		return nil, r.err
+	}
+	for i := range net.FTBiases {
+		net.FTBiases[i] = int16(binary.LittleEndian.Uint16(raw[2*i:]))
 	}
 	// The two tables are read row by row at random during search, so they go
 	// on huge pages where the OS allows, as the 8Chess tables do.
+	raw = r.take(sfThreatRows * EightL1Size)
+	if r.err != nil {
+		return nil, r.err
+	}
 	net.FTThreatWeights, _ = hugemem.Make[int8](sfThreatRows * EightL1Size)
-	sf.threatPSQT = make([]int32, sfThreatRows*sfPSQTBuckets)
-	raw := r.take(sfThreatFeatures * EightL1Size)
-	if r.err != nil {
-		return nil, r.err
-	}
 	copy(net.FTThreatWeights, unsafe.Slice((*int8)(unsafe.Pointer(&raw[0])), len(raw)))
-	r.leb(sfThreatFeatures*sfPSQTBuckets, func(i int, v int32) { sf.threatPSQT[i] = v })
-	raw = r.take(sfPairFeatures * EightL1Size)
+
+	// Piece-square rows are int8 too, and are kept so: the accumulator
+	// kernel for threat rows applies them.
+	raw = r.take(sfPieceFeatures * EightL1Size)
 	if r.err != nil {
 		return nil, r.err
 	}
-	copy(net.FTThreatWeights[sfThreatFeatures*EightL1Size:], unsafe.Slice((*int8)(unsafe.Pointer(&raw[0])), len(raw)))
-	r.leb(sfPairFeatures*sfPSQTBuckets, func(i int, v int32) { sf.threatPSQT[sfThreatFeatures*sfPSQTBuckets+i] = v })
-
-	net.FTPieceWeights, _ = hugemem.Make[int16](sfPieceFeatures * EightL1Size)
-	r.leb(sfPieceFeatures*EightL1Size, func(i int, v int32) { net.FTPieceWeights[i] = int16(v) })
-	sf.piecePSQT = make([]int32, sfPieceFeatures*sfPSQTBuckets)
-	r.leb(sfPieceFeatures*sfPSQTBuckets, func(i int, v int32) { sf.piecePSQT[i] = v })
+	net.FTPieceWeights8, _ = hugemem.Make[int8](sfPieceFeatures * EightL1Size)
+	copy(net.FTPieceWeights8, unsafe.Slice((*int8)(unsafe.Pointer(&raw[0])), len(raw)))
 
 	// Layer stacks: biases (int32), then weights (int8) by output.
+	sf.stacks = make([]sfStack, stored)
 	for k := range sf.stacks {
 		st := &sf.stacks[k]
 		r.expect(sfStackHash(), "layer stack")
@@ -338,15 +342,28 @@ var sfKingBucket = func() (t [64]int) {
 	return
 }()
 
+// sfBlock is the piece-square block perspective pov uses in b, in order of
+// increasing heavy material: 0 with no rook or queen on the board, 1 with
+// some but no enemy queen, 2 when the opponent has a queen.
+func sfBlock(b *board.Board, pov int) int {
+	if b.PieceBB[types.MakePiece(types.Color(pov^1), types.Queen)] != 0 {
+		return 2
+	}
+	if b.PieceBB[types.WhiteRook]|b.PieceBB[types.BlackRook]|b.PieceBB[types.WhiteQueen]|b.PieceBB[types.BlackQueen] != 0 {
+		return 1
+	}
+	return 0
+}
+
 // sfView numbers perspective pov's features for a position with that side's
-// king on ksq. Piece-square features mirror the board when the king is on
-// files a-d; threat and pawn-pair features when it is on files e-h.
-func sfView(pov int, ksq int) eightView {
-	v := eightView{sf: true, flip: 56 * pov, mirror: ksq&7 >= 4}
-	if !v.mirror {
+// king on ksq and piece-square block `block`. Every feature mirrors the board
+// when the king is on files a-d, so that it is always seen on files e-h.
+func sfView(pov int, ksq int, block int) eightView {
+	v := eightView{sf: true, flip: 56 * pov, mirror: ksq&7 < 4}
+	if v.mirror {
 		v.flip ^= 7
 	}
-	v.bucket = sfKingBucket[ksq^(56*pov)]
+	v.bucket = block*sfKingSquares + sfKingBucket[ksq^(56*pov)]
 	return v
 }
 
@@ -397,39 +414,6 @@ func pawnPairs(x *eightSnap, d bitboard.Bitboard, views *[2]eightView, want [2]b
 			}
 		}
 	}
-}
-
-// refApplyPSQT is the definition of sfApplyPSQT.
-func refApplyPSQT(dst *[sfPSQTBuckets]int32, table []int32, add, rem *rowList) {
-	if add.n+rem.n == 0 {
-		return
-	}
-	// The rows come from feature numbering that is always within the table.
-	base := unsafe.Pointer(&table[0])
-	d := *dst
-	for i := 0; i < add.n; i++ {
-		row := (*[sfPSQTBuckets]int32)(unsafe.Add(base, int(add.rows[i])*(sfPSQTBuckets*4)))
-		d[0] += row[0]
-		d[1] += row[1]
-		d[2] += row[2]
-		d[3] += row[3]
-		d[4] += row[4]
-		d[5] += row[5]
-		d[6] += row[6]
-		d[7] += row[7]
-	}
-	for i := 0; i < rem.n; i++ {
-		row := (*[sfPSQTBuckets]int32)(unsafe.Add(base, int(rem.rows[i])*(sfPSQTBuckets*4)))
-		d[0] -= row[0]
-		d[1] -= row[1]
-		d[2] -= row[2]
-		d[3] -= row[3]
-		d[4] -= row[4]
-		d[5] -= row[5]
-		d[6] -= row[6]
-		d[7] -= row[7]
-	}
-	*dst = d
 }
 
 // refSFActivate is the definition of sfActivate.
@@ -489,24 +473,49 @@ type sfScratch struct {
 	idx [EightL1Size + 8]uint16 // its non-zero inputs (or groups of four)
 }
 
-// SFOutput is a Stockfish network's two outputs for the side to move, in
-// Stockfish's internal units.
-type SFOutput struct {
-	PSQT       int32
-	Positional int32
+// sfLayerStack picks the layer stack for b from its piece count, which
+// sides have a queen, where the pawns stand and how many officers (pieces
+// other than pawns and kings) a side has.
+func sfLayerStack(sf *sfNet, b *board.Board, occCount int) *sfStack {
+	stm := b.SideToMove
+	band := (occCount - 1) / 4
+	if band < 0 {
+		band = 0
+	} else if band > 7 {
+		band = 7
+	}
+	queens := 0
+	if b.PieceBB[types.MakePiece(stm, types.Queen)] != 0 {
+		queens = 2
+	}
+	if b.PieceBB[types.MakePiece(stm.Other(), types.Queen)] != 0 {
+		queens++
+	}
+	// Pawns on both halves of the board (files a-d and e-h), on one, or none.
+	const queenSide = bitboard.Bitboard(0x0f0f0f0f0f0f0f0f)
+	pawns := b.PieceBB[types.WhitePawn] | b.PieceBB[types.BlackPawn]
+	layout := 1
+	if pawns == 0 {
+		layout = 2
+	} else if pawns&queenSide != 0 && pawns&^queenSide != 0 {
+		layout = 0
+	}
+	officers := func(c types.Color) int {
+		return bitboard.Count(b.PieceBB[types.MakePiece(c, types.Knight)] | b.PieceBB[types.MakePiece(c, types.Bishop)] |
+			b.PieceBB[types.MakePiece(c, types.Rook)] | b.PieceBB[types.MakePiece(c, types.Queen)])
+	}
+	many := 0
+	if max(officers(types.White), officers(types.Black)) >= 2 {
+		many = 1
+	}
+	return &sf.stacks[sf.stackIndex[((band*4+queens)*3+layout)*2+many]]
 }
 
-// sfForward runs the network on finished accumulators. psqP and psqT are the
-// PSQT sums of the piece-square and of the threat/pawn-pair features.
-func sfForward(net *EightNetwork, scratch *sfScratch, accPst, accThr *[2][EightL1Size]int16, psqP, psqT *[2][sfPSQTBuckets]int32, b *board.Board, occCount int) SFOutput {
+// sfForward runs the network on finished accumulators and returns its output
+// for the side to move, in Stockfish's internal units.
+func sfForward(net *EightNetwork, scratch *sfScratch, accPst, accThr *[2][EightL1Size]int16, b *board.Board, occCount int) int32 {
 	stm := int(b.SideToMove)
-	bucket := (occCount - 1) / 4
-	if bucket < 0 {
-		bucket = 0
-	} else if bucket >= sfLayerStacks {
-		bucket = sfLayerStacks - 1
-	}
-	st := &net.sf.stacks[bucket]
+	st := sfLayerStack(net.sf, b, occCount)
 
 	// Clipped pairwise product of each perspective's accumulator, the side
 	// to move first.
@@ -537,53 +546,97 @@ func sfForward(net *EightNetwork, scratch *sfScratch, accPst, accThr *[2][EightL
 	out += fc0[sfL2-2] - fc0[sfL2-1]
 
 	// 1.0 is 128 * 64 * 2 here, and 600 * 16 on the way out.
-	positional := int32(int64(out) * (600 * 16) / (128 * 64 * 2))
-	psqt := (psqP[stm][bucket] + psqT[stm][bucket] - psqP[stm^1][bucket] - psqT[stm^1][bucket]) / 2
-	return SFOutput{PSQT: psqt / 16, Positional: positional / 16}
+	return int32(int64(out)*(600*16)/(128*64*2)) / 16
 }
 
-// sfToCP turns the network outputs into centipawns for the side to move:
-// Stockfish's blend of the two outputs and its material scaling (with no
-// optimism term), then its conversion from internal units, under which 100
-// is the advantage that wins half the time.
-func sfToCP(o SFOutput, b *board.Board) int32 {
-	count := func(t types.PieceType) int64 {
-		return int64(bitboard.Count(b.PieceBB[types.MakePiece(types.White, t)] | b.PieceBB[types.MakePiece(types.Black, t)]))
-	}
-	p, n, bi, r, q := count(types.Pawn), count(types.Knight), count(types.Bishop), count(types.Rook), count(types.Queen)
+// sfMaterial holds what Stockfish's evaluation scaling reads from a position.
+type sfMaterial struct {
+	simple   int64   // material balance for the side to move (pawn 208)
+	total    int64   // 521 per pawn plus the pieces' values, both sides
+	unitsPer float64 // internal units to the pawn (the win-rate model's a)
+}
 
-	nnue := int64(o.PSQT) + int64(o.Positional)
-	complexity := int64(o.PSQT) - int64(o.Positional)
-	if complexity < 0 {
-		complexity = -complexity
+func sfMaterialOf(b *board.Board) (m sfMaterial) {
+	us, them := b.SideToMove, b.SideToMove.Other()
+	value := [...]int64{types.Pawn: 208, types.Knight: 781, types.Bishop: 825, types.Rook: 1276, types.Queen: 2538}
+	weight := [...]int64{types.Pawn: 1, types.Knight: 3, types.Bishop: 3, types.Rook: 5, types.Queen: 9}
+	var count int64
+	for t := types.Pawn; t <= types.Queen; t++ {
+		mine := int64(bitboard.Count(b.PieceBB[types.MakePiece(us, t)]))
+		theirs := int64(bitboard.Count(b.PieceBB[types.MakePiece(them, t)]))
+		m.simple += value[t] * (mine - theirs)
+		if t == types.Pawn {
+			m.total += 521 * (mine + theirs)
+		} else {
+			m.total += value[t] * (mine + theirs)
+		}
+		count += weight[t] * (mine + theirs)
 	}
-	nnue -= nnue * complexity / 18236
-	material := 534*p + 781*n + 825*bi + 1276*r + 2538*q
-	v := nnue + nnue*material/91000
+	x := float64(min(max(count, 17), 78)) / 58.0
+	m.unitsPer = ((-142.72052667*x+372.35176398)*x-340.71073572)*x + 415.23490212
+	return m
+}
 
-	m := float64(min(max(p+3*n+3*bi+5*r+9*q, 17), 78)) / 58.0
-	a := ((-142.72052667*m+372.35176398)*m-340.71073572)*m + 415.23490212
-	return int32(math.Round(100 * float64(v) / a))
+// sfAlignment measures whether the network's output and the material balance
+// agree: positive when they do (a straightforward position), negative when
+// the evaluation rests on compensation. Within -2048..2048.
+func sfAlignment(simple, nnue int64) int64 {
+	se := simple * 1024 / (abs(simple) + 1024)
+	nn := nnue * 1024 / (abs(nnue) + 1024)
+	return se * nn / 512
+}
+
+// sfToCP turns the network output into centipawns for the side to move:
+// Stockfish's scaling by alignment and by material (with no optimism term),
+// then its conversion from internal units, under which 100 is the advantage
+// that wins half the time.
+func sfToCP(nnue int32, b *board.Board) int32 {
+	m := sfMaterialOf(b)
+	n := int64(nnue)
+	base := n + n*sfAlignment(m.simple, n)/65536
+	v := base * (90649 + m.total) / 90649
+	return int32(math.Round(100 * float64(v) / m.unitsPer))
+}
+
+// SFOptimismCP is Stockfish's optimism term for a position whose evaluation
+// (from sfToCP) is cp, in centipawns for the side to move. optimism is that
+// side's optimism in internal units. The term is optimism scaled by the
+// alignment of evaluation and material, so it favours straightforward
+// positions for the side that is ahead and complicated ones for the other.
+func SFOptimismCP(b *board.Board, cp int32, optimism int32) int32 {
+	m := sfMaterialOf(b)
+	// The network output that cp came from, near enough (the alignment
+	// scaling changes it by at most 3%).
+	nnue := int64(float64(cp) * m.unitsPer / 100 * 90649 / float64(90649+m.total))
+	v := int64(optimism) * sfAlignment(m.simple, nnue) / 16384 * (90649 + m.total) / 90649
+	return int32(math.Round(100 * float64(v) / m.unitsPer))
+}
+
+func abs(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // sfStates holds evaluator states for one-off evaluations.
 var sfStates = sync.Pool{New: func() any { return NewEightState(1) }}
 
-// SFEvaluateRaw returns the network's outputs for b, as Stockfish's "eval"
-// command reports them (their sum is its "NNUE evaluation ... internal
-// units"). ok is false if b has no king of either colour.
-func SFEvaluateRaw(net *EightNetwork, b *board.Board) (out SFOutput, ok bool) {
+// SFEvaluateRaw returns the network's output for b, as Stockfish's "eval"
+// command reports it ("NNUE evaluation ... internal units"). ok is false if
+// b has no king of either colour.
+func SFEvaluateRaw(net *EightNetwork, b *board.Board) (out int32, ok bool) {
 	if net == nil || net.sf == nil {
-		return out, false
+		return 0, false
 	}
 	s := sfStates.Get().(*EightState)
 	defer sfStates.Put(s)
 	s.Reset()
 	if !s.Prepare(net, b, 0, 0, false) {
-		return out, false
+		return 0, false
 	}
 	cur := &s.plies[0]
-	return sfForward(net, &s.sfScratch, &cur.pst, &cur.thr, &cur.psqP, &cur.psqT, b, bitboard.Count(b.Occupied())), true
+	return sfForward(net, &s.sfScratch, &cur.pst, &cur.thr, b, bitboard.Count(b.Occupied())), true
 }
 
 // sfEvaluate evaluates b from nothing, in centipawns for the side to move.
