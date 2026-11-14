@@ -80,7 +80,7 @@ func TestEvalCacheFollowsNetwork(t *testing.T) {
 	w := e.workers[0]
 	filled := 0
 	for _, c := range w.EvalCache {
-		if c.hash != 0 {
+		if c.key != 0 {
 			filled++
 		}
 	}
@@ -89,7 +89,7 @@ func TestEvalCacheFollowsNetwork(t *testing.T) {
 	}
 	tm := NewTimeManager(SearchLimits{MaxDepth: 1}, b.SideToMove, &e.Stopped, &e.Nodes, b)
 	e.worker(0, b, tm)
-	if w.EvalCache[b.Hash&(evalCacheSize-1)].hash != b.Hash {
+	if w.EvalCache[b.Hash&(evalCacheSize-1)].key != evalCacheKey(b.Hash) {
 		t.Error("eval cache dropped with the network unchanged")
 	}
 
@@ -98,7 +98,7 @@ func TestEvalCacheFollowsNetwork(t *testing.T) {
 	defer func() { nnue.Enabled = saved }()
 	e.worker(0, b, tm)
 	for _, c := range w.EvalCache {
-		if c.hash != 0 {
+		if c.key != 0 {
 			t.Fatal("eval cache kept after the network changed")
 		}
 	}

@@ -1,6 +1,7 @@
 package search
 
 import (
+	"math"
 	"sync/atomic"
 
 	"devilfish/internal/bitboard"
@@ -20,8 +21,16 @@ const (
 )
 
 // evalCacheSize is the number of entries in each worker's static-eval cache
-// (16 bytes each). Must be a power of two.
-const evalCacheSize = 1 << 17
+// (8 bytes each, 16 MB in all). Must be a power of two. A network evaluation
+// costs far more than a probe, and the search asks for the same positions
+// again and again: with 2 MB of cache 27% of the requests were answered from
+// it; 16 MB made the search 6 to 8% faster and 64 MB only 9%.
+const evalCacheSize = 1 << 21
+
+// evalCacheKey is what an entry stores to recognise its position: the upper
+// half of the hash (the index is the lower part), never zero, so that an
+// empty entry matches nothing.
+func evalCacheKey(h uint64) uint32 { return uint32(h>>32) | 1 }
 
 // LMRTable is built from P.LMRBase / P.LMRDivisor by rebuildLMRTable (params.go).
 var LMRTable [128][128]int8
@@ -43,9 +52,11 @@ type SearchWorker struct {
 	PVArray           [MaxPly][MaxPly]types.Move
 	PVLength          [MaxPly]int
 	StaticEvalHistory [MaxPly]int32
+	rootDepth         int             // depth of the root search in progress
+	plies             [MaxPly]plyInfo // P.HistUpdate 1: what each node on the path knows about itself and the move it is searching
 	Accumulators      [MaxPly]nnue.Accumulator
 	EvalCache         [evalCacheSize]struct {
-		hash uint64
+		key  uint32
 		eval int32
 	}
 	Eight             *nnue.EightState   // incremental 8Chess accumulators (nil unless that net is active)
@@ -81,18 +92,17 @@ func (w *SearchWorker) rawEval(ply int) int32 {
 	if nnue.Enabled {
 		if nnue.ActiveEightNetwork != nil {
 			w.NnueEvals++
-			h := w.Board.Hash
-			idx := h & (evalCacheSize - 1)
-			if w.EvalCache[idx].hash == h {
-				staticEval = w.EvalCache[idx].eval
-			} else if w.Eight != nil {
-				staticEval = w.evaluateEight(ply)
-				w.EvalCache[idx].hash = h
-				w.EvalCache[idx].eval = staticEval
+			e := &w.EvalCache[w.Board.Hash&(evalCacheSize-1)]
+			key := evalCacheKey(w.Board.Hash)
+			if e.key == key {
+				staticEval = e.eval
 			} else {
-				staticEval = nnue.EvaluateEight(nnue.ActiveEightNetwork, w.Board)
-				w.EvalCache[idx].hash = h
-				w.EvalCache[idx].eval = staticEval
+				if w.Eight != nil {
+					staticEval = w.evaluateEight(ply)
+				} else {
+					staticEval = nnue.EvaluateEight(nnue.ActiveEightNetwork, w.Board)
+				}
+				e.key, e.eval = key, staticEval
 			}
 		} else if nnue.ActiveNetwork != nil && ply < MaxPly {
 			w.NnueEvals++
@@ -215,6 +225,8 @@ func (w *SearchWorker) resetFor(b *board.Board, ttTable *tt.TT, tm *TimeManager,
 	clear(w.PVArray[:])
 	clear(w.PVLength[:])
 	clear(w.StaticEvalHistory[:])
+	clear(w.plies[:])
+	w.rootDepth = 0
 	clear(w.Accumulators[:])
 	w.RootBestMove = types.MoveNone
 	w.RootScore = 0
@@ -442,6 +454,13 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	}
 	if ply < MaxPly {
 		w.StaticEvalHistory[ply] = staticEval
+		w.plies[ply].inCheck, w.plies[ply].ttHit, w.plies[ply].eval = inCheck, ttFound, rawEval
+	}
+	if ply+2 < MaxPly {
+		w.plies[ply+2].cutoffs = 0
+	}
+	if ply == 0 {
+		w.rootDepth = int(depth)
 	}
 
 	// Improving flag: static evaluation is higher than 2 plies ago (same player's last turn)
@@ -659,6 +678,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				}
 				w.pushAccumulator(ply, m)
 				w.History.PushMove(ply, w.Board.Pieces[m.From()], m.To())
+				w.pushMoveInfo(ply, &hc, m, 0)
 				if !w.Board.MakeMove(m) {
 					continue
 				}
@@ -717,6 +737,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 		w.pushAccumulator(ply, ttMove)
 		w.History.PushMove(ply, w.Board.Pieces[ttMove.From()], ttMove.To())
+		w.pushMoveInfo(ply, &hc, ttMove, 1)
 		if w.Board.MakeMove(ttMove) {
 			w.TT.Prefetch(w.Board.Hash)
 			legalMoves++
@@ -748,6 +769,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				st.BetaCuts++
 				st.BetaCutsFirst++
 				st.BetaCutsTT++
+				w.plies[ply].cutoffs++
 				if excludedMove == types.MoveNone && (ply > 0 || len(w.ExcludedRootMoves) == 0) {
 					w.TT.StoreEval(w.Board.Hash, ttMove, tt.ScoreToTT(score, ply), netEval, depth, tt.LowerBound)
 				}
@@ -939,6 +961,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		w.pushAccumulator(ply, m)
 		w.History.PushMove(ply, movedPiece, toSq)
+		w.pushMoveInfo(ply, &hc, m, movesSearched+1)
 		if !w.Board.MakeMove(m) {
 			continue
 		}
@@ -974,6 +997,108 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		if movesSearched == 0 {
 			// First move: full window (extended if 7th rank pawn push)
 			score = -w.Search(depth-1+moveExtension, -beta, -alpha, ply+1, isPVNode, !isPVNode && !cutNode, types.MoveNone, m, prevMove, prevMove2)
+		} else if P.LMRMode == 1 {
+			// Stockfish's late-move reductions: see sfReduction.
+			newDepth := int32(depth) - 1 + int32(moveExtension)
+			r := sfReduction(improving, int(depth), movesSearched+1)
+			if isPVNode {
+				// Stockfish keys these on whether the position has ever been
+				// on a principal variation, which the hash table here does
+				// not record; being a PV node stands in for it.
+				r += 929 - 512 - 3023 - 1004
+				if ttFound && ttScore > alpha {
+					r -= 885
+				}
+				if ttFound && ttDepth >= depth {
+					r -= 816
+				}
+			}
+			r += 697 - 65*int32(movesSearched+1)
+			if cutNode {
+				r += 4026
+				if ttMove == types.MoveNone {
+					r += 933
+				}
+			}
+			if ttMoveNoisy {
+				r += 1079
+			}
+			if ply+1 < MaxPly {
+				if c := w.plies[ply+1].cutoffs; c > 1 {
+					r += 264
+					if c > 2 {
+						r += 1095
+					}
+					if !isPVNode && !cutNode {
+						r += 1138
+					}
+				}
+			}
+			if P.HistUpdate != 0 && ply < MaxPly {
+				r -= w.plies[ply].statScore * 439 / 4096
+			}
+			if isQuiet && !inCheck && abs(alpha) < MateThreshold {
+				// In Stockfish's units, three to the centipawn.
+				r += 3 * max(-64, min(3*(alpha-staticEval), 96))
+			}
+			if !isPVNode && !cutNode {
+				r += r * 276 / (256*int32(depth) + 268)
+			}
+
+			if depth >= 2 {
+				// A negative reduction extends, by up to two plies, unless
+				// the line is already far deeper than the root search.
+				ext := int32(0)
+				if ply < 2*w.rootDepth {
+					ext = 2
+				}
+				d := max(1, newDepth+min(-r/1024, ext))
+				if isPVNode {
+					d++
+				}
+				if d < newDepth {
+					reduction = int8(newDepth - d)
+					st.LMRSearches++
+					st.LMRPlies += uint64(reduction)
+				}
+				st.LMREligible++
+				score = -w.Search(int8(d), -alpha-1, -alpha, ply+1, false, true, types.MoveNone, m, prevMove, prevMove2)
+
+				if score > alpha && !w.TimeMan.Stopped.Load() {
+					// The full-depth search goes a ply deeper if the reduced
+					// one did well and a ply shallower if it barely passed
+					// (53 and 8 in Stockfish's units).
+					if d < newDepth && score > bestScore+18 {
+						newDepth++
+					}
+					if score < bestScore+3 {
+						newDepth--
+					}
+					if newDepth > d {
+						st.LMRReSearches++
+						score = -w.Search(int8(newDepth), -alpha-1, -alpha, ply+1, false, !cutNode, types.MoveNone, m, prevMove, prevMove2)
+					}
+					if P.HistUpdate != 0 && isQuiet {
+						hc.updateContSF(movedPiece, toSq, 1334, inCheck)
+					}
+				}
+			} else {
+				if ttMove == types.MoveNone {
+					r += 1127
+				}
+				if r > 5234 {
+					newDepth--
+				}
+				if r > 5487 && newDepth > 2 {
+					newDepth--
+				}
+				score = -w.Search(int8(newDepth), -alpha-1, -alpha, ply+1, false, !cutNode, types.MoveNone, m, prevMove, prevMove2)
+			}
+
+			if isPVNode && score > alpha && !w.TimeMan.Stopped.Load() {
+				st.PVSReSearches++
+				score = -w.Search(int8(newDepth), -beta, -alpha, ply+1, true, false, types.MoveNone, m, prevMove, prevMove2)
+			}
 		} else {
 			// Late Move Reductions (LMR)
 			if depth >= 3 && movesSearched >= int(P.LMRMinMove) && (!inCheck || P.CheckLMR != 0) {
@@ -1119,8 +1244,24 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 			// If reduced search fails high, re-search at full depth with null window
 			if reduction > 0 && score > alpha && !w.TimeMan.Stopped.Load() {
-				st.LMRReSearches++
-				score = -w.Search(depth-1+moveExtension, -alpha-1, -alpha, ply+1, false, !cutNode, types.MoveNone, m, prevMove, prevMove2)
+				full := depth - 1 + moveExtension
+				if P.LMRMode == 2 {
+					// As Stockfish: a ply deeper if the reduced search did
+					// well, a ply shallower if it barely passed.
+					if score > bestScore+18 {
+						full++
+					}
+					if score < bestScore+3 {
+						full--
+					}
+					if P.HistUpdate != 0 && isQuiet {
+						hc.updateContSF(movedPiece, toSq, 1334, inCheck)
+					}
+				}
+				if full > depth-1+moveExtension-reduction {
+					st.LMRReSearches++
+					score = -w.Search(full, -alpha-1, -alpha, ply+1, false, !cutNode, types.MoveNone, m, prevMove, prevMove2)
+				}
 			}
 
 			// If null-window fails high and in PV node, re-search with full PV window
@@ -1152,6 +1293,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		if score >= beta {
 			st.NodesWithMoves++
 			st.BetaCuts++
+			w.plies[ply].cutoffs++
 			if movesSearched == 1 {
 				st.BetaCutsFirst++
 			}
@@ -1254,6 +1396,10 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			return -MateScore + int32(ply)
 		}
 		return 0
+	}
+
+	if P.HistUpdate != 0 && bestType == tt.UpperBound && ply > 0 && prevMove != types.MoveNone {
+		w.rewardPriorMove(ply, depth, bestScore, alpha, rawEval, inCheck)
 	}
 
 	// An upper bound only says the eval was too high when it sits below rawEval
@@ -1556,8 +1702,26 @@ func (w *SearchWorker) updateStatsSF(hc *histCtx, best types.Move, tried []types
 		}
 		return b.Pieces[m.From()].Type(), victim
 	}
+	// The move that led here, if any (see plyInfo).
+	var prior *plyInfo
+	if ply > 0 && ply <= MaxPly && prevMove != types.MoveNone {
+		prior = &w.plies[ply-1]
+	}
 	bonus := sfStatBonus(depth, isTTMove, isPV, len(tried))
 	malus := sfStatMalus(depth)
+
+	// The previous move was a quiet move tried early (first, or first after
+	// the hash move) and has just been refuted: an extra penalty for it.
+	if prior != nil && prior.quiet() {
+		early := int32(1)
+		if prior.ttHit {
+			early = 2
+		}
+		if prior.moveCount == early {
+			c := w.History.contCtx(ply - 1)
+			c.updateContSF(prior.piece, prior.to, -malus*713/1024, prior.inCheck)
+		}
+	}
 
 	if !best.IsCapture() && !best.IsPromotion() {
 		w.History.UpdateKillers(ply, best)
@@ -1580,6 +1744,111 @@ func (w *SearchWorker) updateStatsSF(hc *histCtx, best types.Move, tried []types
 			w.History.UpdateCaptureSF(attacker, victim, m.To(), -malus*1489/1024)
 		}
 	}
+}
+
+// plyInfo is what a main-search node records for the nodes below it
+// (P.HistUpdate 1): about itself, and about the move it is searching.
+type plyInfo struct {
+	inCheck, ttHit bool
+	cutoffs        int32 // beta cutoffs at this ply since the node two plies up was entered
+	eval           int32 // static evaluation, before the hash score replaces it (unset in check)
+
+	moveCount int32 // the move's place among the moves searched, from 1 (0: a ProbCut try)
+	statScore int32 // its history score, as late-move reductions use it
+	piece     types.Piece
+	to        types.Square
+	captured  types.PieceType
+	promotion bool
+	main      *int16 // its main history entry
+}
+
+func (p *plyInfo) quiet() bool { return p.captured == types.PieceTypeNone && !p.promotion }
+
+// pushMoveInfo records m, about to be played at ply, for the node below.
+func (w *SearchWorker) pushMoveInfo(ply int, hc *histCtx, m types.Move, moveCount int) {
+	if P.HistUpdate == 0 || ply >= MaxPly {
+		return
+	}
+	b := w.Board
+	p := &w.plies[ply]
+	p.moveCount = int32(moveCount)
+	p.piece, p.to = b.Pieces[m.From()], m.To()
+	p.captured = b.Pieces[m.To()].Type()
+	if m.IsEnPassant() {
+		p.captured = types.Pawn
+	}
+	p.promotion = m.IsPromotion()
+	p.main = hc.mainEntry(m)
+	if p.quiet() {
+		p.statScore = hc.Stat(p.piece, m)
+	} else {
+		p.statScore = 873*sfPieceValue[p.captured]/128 + w.History.CaptureHistory[p.piece.Type()][p.to][p.captured]
+	}
+}
+
+// rewardPriorMove is called when no move at this node reached alpha, which
+// makes the move that led here a good one: its history goes up, as in
+// Stockfish. The bonus is larger when that move was tried late, had a poor
+// history, or the result is well below what either side's static evaluation
+// promised. A prior capture gets a fixed bonus instead.
+func (w *SearchWorker) rewardPriorMove(ply int, depth int8, bestScore, alpha, eval int32, inCheck bool) {
+	p := &w.plies[ply-1]
+	if p.promotion {
+		return
+	}
+	if p.captured != types.PieceTypeNone {
+		w.History.UpdateCaptureSF(p.piece.Type(), p.captured, p.to, 892)
+		return
+	}
+	if bestScore == -Infinity {
+		bestScore = alpha
+	}
+	// Stockfish's margins are 106 and 68 in its units, three to the centipawn.
+	scale := -241 - p.statScore/98 + min(59*int32(depth), 420)
+	if p.moveCount > 9 {
+		scale += 186
+	}
+	if !inCheck && bestScore <= eval-35 {
+		scale += 142
+	}
+	if !p.inCheck && bestScore <= -p.eval-23 {
+		scale += 159
+	}
+	if scale <= 0 {
+		return
+	}
+	bonus := min(150*int32(depth)-85, 1337) * scale
+
+	c := w.History.contCtx(ply - 1)
+	c.updateContSF(p.piece, p.to, bonus*263/16384, p.inCheck)
+	sfGravity(p.main, bonus*215/32768, sfMainLimit)
+	if p.piece.Type() != types.Pawn {
+		sfGravity(&w.History.PawnHist[w.Board.PawnHash%pawnHistSize][p.piece][p.to], bonus*324/8192, sfPawnLimit)
+	}
+}
+
+// sfReductions is Stockfish's table: 2872/128 * ln(i).
+var sfReductions = func() (t [256]int32) {
+	for i := 1; i < len(t); i++ {
+		t[i] = int32(2872.0 / 128.0 * math.Log(float64(i)))
+	}
+	return
+}()
+
+// sfReduction is the base late-move reduction under P.LMRMode 1, in 1024ths
+// of a ply, for the moveCount-th move at depth. The search then adjusts it:
+// less at PV nodes, for moves with good history and for early moves; more at
+// expected cut nodes, when the hash move is a capture, when the node below
+// keeps cutting off and when the evaluation is below alpha. Only the whole
+// plies of the total are applied. A move whose total is negative is searched
+// up to two plies deeper than the first move.
+func sfReduction(improving bool, depth, moveCount int) int32 {
+	scale := sfReductions[min(depth, 255)] * sfReductions[min(moveCount, 255)]
+	r := scale + 948
+	if !improving {
+		r += scale * 197 / 512
+	}
+	return r
 }
 
 // scoreQuiescenceSF scores the moves of a quiescence node for P.MoveOrder 2.

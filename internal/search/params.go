@@ -81,6 +81,22 @@ type Params struct {
 	// first-move cutoffs 84.0% against 83.0%. Not match-tested.
 	MoveOrder int32
 
+	// LMRMode 2: the late-move reductions are unchanged, but a reduced
+	// search that beats alpha is searched again a ply deeper than normal if
+	// it beat the best score so far by 18 cp, and a ply shallower (or not
+	// at all) if by less than 3 cp, as in Stockfish; the move also gains
+	// continuation history. Against 0, to depth 18 on 60 positions: 93% of
+	// the nodes; WAC positions solved in 100k / 400k nodes: 267 and 276
+	// against 269 and 276. Not match-tested.
+	//
+	// LMRMode 1: Stockfish's whole reduction formula as well (sfReduction
+	// in search.go), in place of the LMR table, the killer, threat,
+	// pawn-push and check exemptions and the separate rule for captures.
+	// Measured worse here: 120% of the nodes (73% without its two
+	// extension rules), and 238 and 257 WAC positions. Its history term
+	// assumes HistUpdate 1.
+	LMRMode int32
+
 	// HistUpdate 1: the history tables are updated with Stockfish's bonuses,
 	// per-table bounds and weights (see sfGravity and updateStatsSF in
 	// history.go and search.go), and history pruning and the history part
@@ -89,6 +105,10 @@ type Params struct {
 	// positions: 58% of the nodes; first-move cutoffs 88.1% against 85.0%;
 	// reduced moves 2.45 plies on average against 2.34; 264 against 259 of
 	// 300 WAC positions solved in 100k nodes. Not match-tested.
+	// It includes the bonus for the previous move when a node fails low
+	// and the extra penalty for an early quiet move that gets refuted
+	// (rewardPriorMove, updateStatsSF): with them, the same nodes to depth
+	// 18 and 269 WAC positions.
 	HistUpdate int32
 
 	// Optimism 1: the evaluation leans toward the side the last iteration
@@ -193,6 +213,7 @@ var P = Params{
 	CheckSEEPrune:  1,
 	MoveOrder:      2,
 	HistUpdate:     1,
+	LMRMode:        2,
 
 	Optimism: 0, // not match-tested
 
@@ -272,6 +293,7 @@ func TunableParams() []ParamSpec {
 		{"CheckSEEPrune", &P.CheckSEEPrune, 0, 1},
 		{"MoveOrder", &P.MoveOrder, 0, 2},
 		{"HistUpdate", &P.HistUpdate, 0, 1},
+		{"LMRMode", &P.LMRMode, 0, 2},
 		{"Optimism", &P.Optimism, 0, 1},
 		{"AspDelta", &P.AspDelta, 5, 100},
 		{"AspTries", &P.AspTries, 0, 10},

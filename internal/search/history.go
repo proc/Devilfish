@@ -128,6 +128,18 @@ func (h *SearchHistory) Context(b *board.Board, ply int, threatened bitboard.Bit
 	return c
 }
 
+// contCtx returns only the continuation-history rows of the node at ply,
+// for updating the history of the move that node played from a node below.
+func (h *SearchHistory) contCtx(ply int) histCtx {
+	var c histCtx
+	if ply >= 0 && ply < MaxPly {
+		i := ply + contPad
+		c.cont = [3]*contRow{h.contStack[i-1], h.contStack[i-2], h.contStack[i-4]}
+		c.contFar = [2]*contRow{h.contStack[i-3], h.contStack[i-6]}
+	}
+	return c
+}
+
 func (c *histCtx) mainEntry(m types.Move) *int16 {
 	from, to := m.From(), m.To()
 	ft, tt := 0, 0
@@ -284,6 +296,10 @@ func sfGravity(e *int16, bonus, limit int32) {
 
 // sfStatBonus and sfStatMalus are what the move that caused a cutoff earns
 // and what the moves tried before it lose. tried counts those earlier moves.
+//
+// Stockfish also adds a 28th of the history score of the move that led to
+// the node. Here that made ordering worse (first-move cutoffs 78% against
+// 88%), so it is left out.
 func sfStatBonus(depth int8, isTTMove, isPV bool, tried int) int32 {
 	b := min(133*int32(depth)-81, 1487)
 	if isTTMove {
