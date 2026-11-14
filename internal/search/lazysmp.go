@@ -504,6 +504,7 @@ func (e *Engine) Search(
 			iterStartNodes := master.LocalNodes
 			master.RootMoveNodes = [64][64]uint64{}
 			tm.SetRootFailLow(false)
+			setOptimism(tm, rootScore, b.SideToMove)
 
 			var score int32
 			if depth < 4 {

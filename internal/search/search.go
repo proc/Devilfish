@@ -112,8 +112,46 @@ func (w *SearchWorker) rawEval(ply int) int32 {
 // raw evaluation of the current position.
 func (w *SearchWorker) adjustEval(raw int32) int32 {
 	v := raw + w.History.GetCorrection(w.Board)
+	if P.Optimism != 0 {
+		if o := w.TimeMan.Optimism.Load(); o != 0 {
+			v += optimismCP(w.Board, o)
+		}
+	}
 	// Fade the eval toward a draw as the fifty-move counter runs up
 	return v * (200 - int32(w.Board.HalfmoveClock)) / 200
+}
+
+// setOptimism records how far ahead the side to move at the root was found
+// to be (rootScore, centipawns), as Stockfish does: 142*s/(|s|+91) in its
+// internal units, where a pawn is roughly 3.6 times a centipawn.
+func setOptimism(tm *TimeManager, rootScore int32, rootSide types.Color) {
+	if P.Optimism == 0 {
+		tm.Optimism.Store(0)
+		return
+	}
+	x := max(min(rootScore, 2000), -2000) * 36 / 10
+	o := 142 * x / (abs(x) + 91)
+	if rootSide == types.Black {
+		o = -o
+	}
+	tm.Optimism.Store(o)
+}
+
+// optimismCP is the optimism term for the side to move, in centipawns. It
+// follows Stockfish 18's blend, optimism*(7191+material)/77871, without the
+// scaling by the network's complexity (the two network outputs are not kept
+// with a cached evaluation).
+func optimismCP(b *board.Board, whiteOptimism int32) int32 {
+	count := func(t types.PieceType) int32 {
+		return int32(bitboard.Count(b.PieceBB[types.MakePiece(types.White, t)] | b.PieceBB[types.MakePiece(types.Black, t)]))
+	}
+	material := 534*count(types.Pawn) + 781*count(types.Knight) + 825*count(types.Bishop) + 1276*count(types.Rook) + 2538*count(types.Queen)
+	o := whiteOptimism
+	if b.SideToMove == types.Black {
+		o = -o
+	}
+	// 360 internal units to the pawn, near enough at every material level.
+	return o * (7191 + material) * 100 / (77871 * 360)
 }
 
 func NewWorker(id int, b *board.Board, ttTable *tt.TT, tm *TimeManager, nodes *atomic.Uint64, tbHits *atomic.Uint64) *SearchWorker {

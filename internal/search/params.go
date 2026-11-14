@@ -71,6 +71,11 @@ type Params struct {
 	CheckLMR       int32 // 1: late evasions are reduced like other late moves (one ply less)
 	CheckSEEPrune  int32 // 1: SEE pruning also applies to evasions
 
+	// Optimism 1: the evaluation leans toward the side the last iteration
+	// found ahead at the root, by up to about 16 centipawns with all the
+	// material on the board (after Stockfish's optimism term).
+	Optimism int32
+
 	// Aspiration windows at the root.
 	AspDelta  int32 // half-width of the first window
 	AspTries  int32 // open the window fully after this many failures (0: only once it is AspOpen wide)
@@ -167,6 +172,8 @@ var P = Params{
 	CheckLMR:       1,
 	CheckSEEPrune:  1,
 
+	Optimism: 0, // not match-tested
+
 	// A narrower window that widens gradually and searches a ply shallower
 	// after a fail high (10, 0, 1000, 1) cut the tree to depth 19 by 14% but
 	// scored -1 Elo +-15 over 604 games at 8s+0.08s. IIRCut 1 cut it by 8%
@@ -241,6 +248,7 @@ func TunableParams() []ParamSpec {
 		{"QSEvasionPrune", &P.QSEvasionPrune, 0, 1},
 		{"CheckLMR", &P.CheckLMR, 0, 1},
 		{"CheckSEEPrune", &P.CheckSEEPrune, 0, 1},
+		{"Optimism", &P.Optimism, 0, 1},
 		{"AspDelta", &P.AspDelta, 5, 100},
 		{"AspTries", &P.AspTries, 0, 10},
 		{"AspOpen", &P.AspOpen, 50, 5000},

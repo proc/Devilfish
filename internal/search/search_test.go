@@ -815,3 +815,41 @@ func TestQueenThreatEvasion(t *testing.T) {
 		})
 	}
 }
+
+// The optimism term favours the side found ahead at the root, by the same
+// amount against the other side, and is bounded.
+func TestOptimism(t *testing.T) {
+	old := P.Optimism
+	defer func() { P.Optimism = old }()
+	b, err := board.ParseFEN(board.StartFEN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm := &TimeManager{}
+
+	P.Optimism = 0
+	setOptimism(tm, 150, types.White)
+	if tm.Optimism.Load() != 0 {
+		t.Fatalf("optimism set with the option off")
+	}
+
+	P.Optimism = 1
+	setOptimism(tm, 150, types.White)
+	white := optimismCP(b, tm.Optimism.Load())
+	if white <= 0 || white > 20 {
+		t.Errorf("White ahead by 150 at the root: optimism for White to move = %d, want 1..20", white)
+	}
+	b.SideToMove = types.Black
+	if black := optimismCP(b, tm.Optimism.Load()); black != -white {
+		t.Errorf("optimism for Black to move = %d, want %d", black, -white)
+	}
+	setOptimism(tm, 150, types.Black) // Black to move at the root, and ahead
+	if black := optimismCP(b, tm.Optimism.Load()); black != white {
+		t.Errorf("Black ahead at the root: optimism for Black to move = %d, want %d", black, white)
+	}
+	setOptimism(tm, MateScore, types.White)
+	b.SideToMove = types.White
+	if v := optimismCP(b, tm.Optimism.Load()); v > 20 {
+		t.Errorf("optimism at a mate score = %d, want at most 20", v)
+	}
+}

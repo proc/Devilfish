@@ -26,6 +26,7 @@ type SearchLimits struct {
 
 type TimeManager struct {
 	StartTime     time.Time
+	Optimism      atomic.Int32 // optimism for White, in the network's internal units (see setOptimism)
 	OptTime       time.Duration
 	MaxTime       time.Duration
 	MaxDepth      int8
