@@ -32,13 +32,14 @@ const (
 	sfThreatFeatures = 59808
 	sfPawnIDs        = 96 // 48 squares x 2 colours
 	sfPairFeatures   = sfPawnIDs * (sfPawnIDs - 1) / 2
-	sfThreatRows     = sfThreatFeatures + sfPairFeatures // rows of the int8 table
+	sfThreatRows     = sfThreatFeatures + sfPairFeatures // threat and pawn-pair rows of the int8 table
 	sfKingSquares    = 32                                // king buckets: the squares of half a board
 	sfPieceSquares   = 11 * 64                           // per king bucket
 	sfBlocks         = 3                                 // piece-square blocks, by heavy material (see sfBlock)
 	sfKingBuckets    = sfBlocks * sfKingSquares          // block and king bucket together
 	sfPieceFeatures  = sfKingBuckets * sfPieceSquares
-	sfRawStacks      = 192 // layer stacks before those sharing weights are merged
+	sfRows           = sfThreatRows + sfPieceFeatures // rows of the int8 table; piece-square rows come last
+	sfRawStacks      = 192                            // layer stacks before those sharing weights are merged
 	sfL2             = 32
 	sfL3             = 32
 
@@ -236,21 +237,15 @@ func LoadSFBytes(data []byte) (*EightNetwork, error) {
 	}
 	// The two tables are read row by row at random during search, so they go
 	// on huge pages where the OS allows, as the 8Chess tables do.
-	raw = r.take(sfThreatRows * EightL1Size)
+	// All three kinds of row are int8 and go into one table, in file order:
+	// threat, pawn-pair, then piece-square rows. One accumulator per
+	// perspective then takes every row of an update in a single pass.
+	raw = r.take(sfRows * EightL1Size)
 	if r.err != nil {
 		return nil, r.err
 	}
-	net.FTThreatWeights, _ = hugemem.Make[int8](sfThreatRows * EightL1Size)
+	net.FTThreatWeights, _ = hugemem.Make[int8](sfRows * EightL1Size)
 	copy(net.FTThreatWeights, unsafe.Slice((*int8)(unsafe.Pointer(&raw[0])), len(raw)))
-
-	// Piece-square rows are int8 too, and are kept so: the accumulator
-	// kernel for threat rows applies them.
-	raw = r.take(sfPieceFeatures * EightL1Size)
-	if r.err != nil {
-		return nil, r.err
-	}
-	net.FTPieceWeights8, _ = hugemem.Make[int8](sfPieceFeatures * EightL1Size)
-	copy(net.FTPieceWeights8, unsafe.Slice((*int8)(unsafe.Pointer(&raw[0])), len(raw)))
 
 	// Layer stacks: biases (int32), then weights (int8) by output.
 	sf.stacks = make([]sfStack, stored)
@@ -367,15 +362,16 @@ func sfView(pov int, ksq int, block int) eightView {
 	return v
 }
 
-// sfPieceFeature numbers piece p on sq: own and enemy pieces of each type get
-// 64 squares each, and the two kings share one block.
+// sfPieceFeature is the row, in the int8 table, of piece p on sq: own and
+// enemy pieces of each type get 64 squares each, and the two kings share one
+// block.
 func sfPieceFeature(v *eightView, pov int, p types.Piece, sq int) int32 {
 	ptype := int(p.Type()) - 1
 	block := 10
 	if ptype < 5 {
 		block = ptype*2 + (int(p.Color()) ^ pov)
 	}
-	return int32(v.bucket*sfPieceSquares + block*64 + (sq ^ v.flip))
+	return int32(sfThreatRows + v.bucket*sfPieceSquares + block*64 + (sq ^ v.flip))
 }
 
 // sfPawnPairRow is the row, in the threat table, of the pair formed by a
@@ -513,7 +509,7 @@ func sfLayerStack(sf *sfNet, b *board.Board, occCount int) *sfStack {
 
 // sfForward runs the network on finished accumulators and returns its output
 // for the side to move, in Stockfish's internal units.
-func sfForward(net *EightNetwork, scratch *sfScratch, accPst, accThr *[2][EightL1Size]int16, b *board.Board, occCount int) int32 {
+func sfForward(net *EightNetwork, scratch *sfScratch, acc *[2][EightL1Size]int16, b *board.Board, occCount int) int32 {
 	stm := int(b.SideToMove)
 	st := sfLayerStack(net.sf, b, occCount)
 
@@ -522,7 +518,7 @@ func sfForward(net *EightNetwork, scratch *sfScratch, accPst, accThr *[2][EightL
 	ftOut := &scratch.ft
 	for flip := 0; flip < 2; flip++ {
 		pov := stm ^ flip
-		activateEightFTNEON(&ftOut[flip*(EightL1Size/2)], &accPst[pov][0], &accThr[pov][0])
+		activateEightFTNEON(&ftOut[flip*(EightL1Size/2)], &acc[pov][0], &eightZeroAcc[0])
 	}
 
 	// First layer: 32 outputs from the (mostly zero) 1024 inputs.
@@ -636,7 +632,7 @@ func SFEvaluateRaw(net *EightNetwork, b *board.Board) (out int32, ok bool) {
 		return 0, false
 	}
 	cur := &s.plies[0]
-	return sfForward(net, &s.sfScratch, &cur.pst, &cur.thr, b, bitboard.Count(b.Occupied())), true
+	return sfForward(net, &s.sfScratch, &cur.pst, b, bitboard.Count(b.Occupied())), true
 }
 
 // sfEvaluate evaluates b from nothing, in centipawns for the side to move.

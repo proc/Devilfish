@@ -104,8 +104,11 @@ func TestSFIncrementalMatchesScratch(t *testing.T) {
 	if checked < 1000 {
 		t.Fatalf("only %d positions checked", checked)
 	}
-	t.Logf("checked %d positions; %.1f rows per accumulator set, %d king-bucket refreshes, %d threat rebuilds",
-		checked, float64(st.RowOps)/float64(st.Evals), st.FinnyRefreshes, st.ThreatRebuilds)
+	if st.Hybrids == 0 || st.ThreatRebuilds == 0 {
+		t.Errorf("%d hybrid updates and %d threat rebuilds: both paths should be exercised", st.Hybrids, st.ThreatRebuilds)
+	}
+	t.Logf("checked %d positions; %.1f rows per accumulator set, %d king-bucket refreshes (%d keeping the threat rows), %d threat rebuilds",
+		checked, float64(st.RowOps)/float64(st.Evals), st.FinnyRefreshes, st.Hybrids, st.ThreatRebuilds)
 }
 
 func BenchmarkSFIncremental(b *testing.B) {

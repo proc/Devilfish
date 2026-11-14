@@ -38,6 +38,10 @@ import (
 // which is again a difference of a few squares. A king changing side also
 // renumbers that perspective's threat features; those are rebuilt in full.
 //
+// A Stockfish network has every row in one int8 table, so it keeps a single
+// accumulator per perspective (bias, piece rows and threat rows together)
+// and applies all the rows of an update in one pass: see sfApply.
+//
 // The result is bit-identical to EvaluateEight: accumulators are int16 sums
 // with wrapping arithmetic, so the order of adds and subtracts cannot matter.
 
@@ -116,8 +120,8 @@ func pieceCode(p types.Piece) int {
 type eightPly struct {
 	valid bool
 	hash  uint64
-	pst   [2][EightL1Size]int16
-	thr   [2][EightL1Size]int16
+	pst   [2][EightL1Size]int16 // piece accumulators; for a Stockfish network, the whole accumulators
+	thr   [2][EightL1Size]int16 // threat accumulators (unused for a Stockfish network)
 	snap  eightSnap
 	view  [2]eightView
 }
@@ -133,6 +137,16 @@ type rowList struct {
 	n    int
 	over bool
 	rows [eightMaxRows]int32
+}
+
+// append adds every row of o.
+func (l *rowList) append(o *rowList) {
+	if l.n+o.n > eightMaxRows {
+		l.over = true
+		return
+	}
+	copy(l.rows[l.n:], o.rows[:o.n])
+	l.n += o.n
 }
 
 func (l *rowList) push(r int32) {
@@ -154,13 +168,20 @@ type EightState struct {
 
 	pieceAdd, pieceRem [2]rowList
 	thrAdd, thrRem     [2]rowList
-	sfScratch          sfScratch
+	// Stockfish networks, a perspective whose piece numbering changed: the
+	// piece rows that take the cache entry for the old numbering to the base
+	// position (see sfApply).
+	oldAdd, oldRem [2]rowList
+	hybrid         [2]bool
+	pair           [2][EightL1Size]int16
+	sfScratch      sfScratch
 
 	// Statistics.
 	Evals          uint64 // accumulator sets produced
 	RowOps         uint64 // weight rows applied
 	FinnyRefreshes uint64 // piece accumulators taken from the king-bucket cache
 	ThreatRebuilds uint64 // threat accumulators rebuilt from nothing
+	Hybrids        uint64 // Stockfish networks: piece rows renumbered, threat rows carried over
 }
 
 // NewEightState allocates an accumulator stack for maxPly search plies.
@@ -200,7 +221,7 @@ func (s *EightState) Evaluate(net *EightNetwork, b *board.Board, ply int, parent
 	cur := &s.plies[ply]
 	occCount := bits.OnesCount64(uint64(b.Occupied()))
 	if net.sf != nil {
-		return sfToCP(sfForward(net, &s.sfScratch, &cur.pst, &cur.thr, b, occCount), b)
+		return sfToCP(sfForward(net, &s.sfScratch, &cur.pst, b, occCount), b)
 	}
 	return eightForward(net, &cur.pst, &cur.thr, b, occCount)
 }
@@ -249,6 +270,14 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 			pieceInc[pov] = base.view[pov] == views[pov]
 			thrInc[pov] = base.view[pov].mirror == views[pov].mirror
 		}
+		s.hybrid[pov] = false
+		if net.sf != nil && !pieceInc[pov] && thrInc[pov] {
+			// The accumulator holds piece and threat rows together, so the
+			// threat rows can only be carried over if the old piece rows can
+			// be taken out again (sfHybrid); otherwise they are all rebuilt.
+			s.hybrid[pov] = s.sfHybrid(base, pov)
+			thrInc[pov] = s.hybrid[pov]
+		}
 	}
 	if base != nil {
 		d := changedSquares(&base.snap, &cs)
@@ -288,8 +317,8 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 		if pieceInc[pov] {
 			a, r := &s.pieceAdd[pov], &s.pieceRem[pov]
 			if net.sf != nil {
-				prefetchRows(unsafe.Pointer(&net.FTPieceWeights8[0]), &a.rows[0], a.n, 10, 2)
-				prefetchRows(unsafe.Pointer(&net.FTPieceWeights8[0]), &r.rows[0], r.n, 10, 2)
+				prefetchRows(unsafe.Pointer(&net.FTThreatWeights[0]), &a.rows[0], a.n, 10, 2)
+				prefetchRows(unsafe.Pointer(&net.FTThreatWeights[0]), &r.rows[0], r.n, 10, 2)
 			} else {
 				prefetchRows(unsafe.Pointer(&net.FTPieceWeights[0]), &a.rows[0], a.n, 11, 2)
 				prefetchRows(unsafe.Pointer(&net.FTPieceWeights[0]), &r.rows[0], r.n, 11, 2)
@@ -301,13 +330,24 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 	}
 
 	s.Evals++
+	if net.sf != nil {
+		if !s.sfApply(net, base, cur, &cs, &views, pieceInc) {
+			cur.valid = false
+			return false
+		}
+		cur.snap = cs
+		cur.view = views
+		cur.hash = b.Hash
+		cur.valid = true
+		return true
+	}
 	for pov := 0; pov < 2; pov++ {
 		if pieceInc[pov] {
 			a, r := &s.pieceAdd[pov], &s.pieceRem[pov]
 			net.applyPieceRows(&cur.pst[pov], &base.pst[pov], a, r)
 			s.RowOps += uint64(a.n + r.n)
 		} else {
-			s.finnyRefresh(net, &cs, &views[pov], pov, &cur.pst[pov])
+			cur.pst[pov] = s.finnyRefresh(net, &cs, &views[pov], pov).acc
 		}
 
 		a, r := &s.thrAdd[pov], &s.thrRem[pov]
@@ -332,8 +372,8 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 // those in rem. dst may be src.
 func (net *EightNetwork) applyPieceRows(dst, src *[EightL1Size]int16, add, rem *rowList) {
 	if net.sf != nil {
-		// int8 rows: the threat kernel.
-		fusedThreat(dst, src, &net.FTPieceWeights8[0], &add.rows[0], add.n, &rem.rows[0], rem.n)
+		// int8 rows, in the same table as the threat rows: the threat kernel.
+		fusedThreat(dst, src, &net.FTThreatWeights[0], &add.rows[0], add.n, &rem.rows[0], rem.n)
 		return
 	}
 	fusedPiece(dst, src, &net.FTPieceWeights[0], &add.rows[0], add.n, &rem.rows[0], rem.n)
@@ -362,15 +402,21 @@ func pieceDelta(old, cur *eightSnap, d bitboard.Bitboard, v *eightView, pov int,
 	}
 }
 
-// finnyRefresh builds a piece accumulator for a perspective whose king bucket
-// or side differs from the stored accumulator's, starting from the cached
-// accumulator for that bucket and side.
-func (s *EightState) finnyRefresh(net *EightNetwork, cs *eightSnap, v *eightView, pov int, dst *[EightL1Size]int16) {
+// finnyEntry returns the cache entry for perspective pov numbered as v.
+func (s *EightState) finnyEntry(v *eightView, pov int) *finnyEntry {
 	m := 0
 	if v.mirror {
 		m = 1
 	}
-	e := &s.finny[pov][v.bucket][m]
+	return &s.finny[pov][v.bucket][m]
+}
+
+// finnyRefresh builds the piece accumulator (bias plus piece rows) for a
+// perspective whose king bucket or side differs from the stored
+// accumulator's, starting from the cached accumulator for that bucket and
+// side. It returns the cache entry, which then holds that accumulator.
+func (s *EightState) finnyRefresh(net *EightNetwork, cs *eightSnap, v *eightView, pov int) *finnyEntry {
+	e := s.finnyEntry(v, pov)
 	if !e.ready {
 		e.acc = net.FTBiases
 		e.snap = eightSnap{}
@@ -382,9 +428,87 @@ func (s *EightState) finnyRefresh(net *EightNetwork, cs *eightSnap, v *eightView
 	pieceDelta(&e.snap, cs, d, v, pov, a, r)
 	net.applyPieceRows(&e.acc, &e.acc, a, r)
 	e.snap = *cs
-	*dst = e.acc
 	s.RowOps += uint64(a.n + r.n)
 	s.FinnyRefreshes++
+	return e
+}
+
+// sfHybridMaxRows is the most piece rows sfHybrid will spend on taking the
+// old numbering's cache entry to the base position. Beyond it, rebuilding
+// the threat rows costs about the same.
+const sfHybridMaxRows = 12
+
+// sfHybrid reports whether a perspective whose piece numbering differs from
+// base's (its king moved, or its piece-square block changed) can still start
+// from base's accumulator. That needs base's piece rows taken out again,
+// which the cache entry for base's numbering gives if it is close to base's
+// position; the rows between the two are left in s.oldAdd and s.oldRem.
+func (s *EightState) sfHybrid(base *eightPly, pov int) bool {
+	old := s.finnyEntry(&base.view[pov], pov)
+	if !old.ready {
+		return false
+	}
+	a, r := &s.oldAdd[pov], &s.oldRem[pov]
+	a.n, r.n, a.over, r.over = 0, 0, false, false
+	d := changedSquares(&old.snap, &base.snap)
+	if bitboard.Count(d) > sfHybridMaxRows {
+		return false
+	}
+	pieceDelta(&old.snap, &base.snap, d, &base.view[pov], pov, a, r)
+	return a.n+r.n <= sfHybridMaxRows
+}
+
+// sfApply writes the accumulators of a Stockfish network, which hold bias,
+// piece rows and threat rows together, from the row lists Prepare made. For
+// each perspective one of:
+//
+//   - numbering unchanged: base's accumulator plus every changed row, in one
+//     pass;
+//   - piece numbering changed, threat numbering not, and sfHybrid allowed
+//     it: base's accumulator, minus base's piece rows (the cache entry for
+//     the old numbering, corrected to base's position), plus the new piece
+//     accumulator from the cache, plus the changed threat rows;
+//   - otherwise: the new piece accumulator from the cache plus every threat
+//     row.
+//
+// It returns false if a row list overflowed.
+func (s *EightState) sfApply(net *EightNetwork, base, cur *eightPly, cs *eightSnap, views *[2]eightView, pieceInc [2]bool) bool {
+	w := &net.FTThreatWeights[0]
+	for pov := 0; pov < 2; pov++ {
+		a, r := &s.thrAdd[pov], &s.thrRem[pov]
+		dst := &cur.pst[pov]
+		switch {
+		case pieceInc[pov]:
+			// The threat numbering is part of the view, so it is unchanged too.
+			a.append(&s.pieceAdd[pov])
+			r.append(&s.pieceRem[pov])
+			if a.over || r.over {
+				return false
+			}
+			fusedThreat(dst, &base.pst[pov], w, &a.rows[0], a.n, &r.rows[0], r.n)
+		case s.hybrid[pov]:
+			// base = old entry + oldAdd - oldRem + threats, so
+			// dst = base - old entry - oldAdd + oldRem + new entry + threat changes.
+			old := s.finnyEntry(&base.view[pov], pov)
+			s.Hybrids++
+			a.append(&s.oldRem[pov])
+			r.append(&s.oldAdd[pov])
+			if a.over || r.over {
+				return false
+			}
+			fusedThreat(dst, &base.pst[pov], w, &a.rows[0], a.n, &r.rows[0], r.n)
+			e := s.finnyRefresh(net, cs, &views[pov], pov)
+			s.pair[0], s.pair[1] = e.acc, old.acc
+			plus, minus := [1]int32{0}, [1]int32{1}
+			fusedPiece(dst, dst, &s.pair[0][0], &plus[0], 1, &minus[0], 1)
+		default:
+			e := s.finnyRefresh(net, cs, &views[pov], pov)
+			s.ThreatRebuilds++
+			fusedThreat(dst, &e.acc, w, &a.rows[0], a.n, &r.rows[0], r.n)
+		}
+		s.RowOps += uint64(a.n + r.n)
+	}
+	return true
 }
 
 func (s *EightState) resetFinny(net *EightNetwork) {

@@ -64,7 +64,7 @@ func GetNetworkInfo() NetworkInfo {
 			HiddenSize:    EightL1Size,
 			Layer1Size:    sfL2,
 			NumParameters: features*EightL1Size + EightL1Size + len(ActiveEightNetwork.sf.stacks)*(sfL2*(EightL1Size+1)+sfL3*(2*sfL2+1)+2*sfL2+2*sfL3+1),
-			SizeBytes:     sfThreatRows*EightL1Size + sfPieceFeatures*EightL1Size,
+			SizeBytes:     sfRows * EightL1Size,
 		}
 	}
 	if ActiveEightNetwork != nil {

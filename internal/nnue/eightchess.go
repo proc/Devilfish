@@ -263,12 +263,10 @@ type EightNetwork struct {
 	L3Biases         [EightOutputBuckets]float32
 
 	// sf is set for a Stockfish network. Such a network keeps its feature
-	// transformer in FTBiases, FTThreatWeights (the threat rows followed by
-	// the pawn-pair rows) and FTPieceWeights8 (its piece-square rows, which
-	// are int8; FTPieceWeights is then empty), and everything else in sf.
-	// See stockfish.go.
-	FTPieceWeights8 []int8 // [sfPieceFeatures * EightL1Size]
-	sf              *sfNet
+	// transformer in FTBiases and FTThreatWeights (the threat rows, then the
+	// pawn-pair rows, then the piece-square rows, all int8; FTPieceWeights
+	// is empty), and everything else in sf. See stockfish.go.
+	sf *sfNet
 }
 
 // threatTables returns the threat feature numbering of the network.
