@@ -72,11 +72,24 @@ type Params struct {
 	CheckSEEPrune  int32 // 1: SEE pruning also applies to evasions
 
 	// MoveOrder 1: Stockfish-style move ordering in the main search (see
-	// picker_sf.go). 0: the staged picker with killers, counter-move and
+	// picker_sf.go); 2: in quiescence as well (scoreQuiescenceSF), which
+	// then also tries the hash move first (against 1, to depth 18 on 60
+	// positions: 96% of the nodes, 1.4% fewer nodes per second).
+	// 0: the staged picker with killers, counter-move and
 	// hand-written quiet-move classes. Against 0, to depth 18 on 60
 	// positions: the same tree size (101%), 9% more nodes per second,
 	// first-move cutoffs 84.0% against 83.0%. Not match-tested.
 	MoveOrder int32
+
+	// HistUpdate 1: the history tables are updated with Stockfish's bonuses,
+	// per-table bounds and weights (see sfGravity and updateStatsSF in
+	// history.go and search.go), and history pruning and the history part
+	// of late-move reductions use its formulas for those scales. 0: one
+	// bonus, 160*depth-80, for every table. Against 0, to depth 18 on 60
+	// positions: 58% of the nodes; first-move cutoffs 88.1% against 85.0%;
+	// reduced moves 2.45 plies on average against 2.34; 264 against 259 of
+	// 300 WAC positions solved in 100k nodes. Not match-tested.
+	HistUpdate int32
 
 	// Optimism 1: the evaluation leans toward the side the last iteration
 	// found ahead at the root, by a few centipawns where material is
@@ -178,7 +191,8 @@ var P = Params{
 	QSEvasionPrune: 1,
 	CheckLMR:       1,
 	CheckSEEPrune:  1,
-	MoveOrder:      1,
+	MoveOrder:      2,
+	HistUpdate:     1,
 
 	Optimism: 0, // not match-tested
 
@@ -256,7 +270,8 @@ func TunableParams() []ParamSpec {
 		{"QSEvasionPrune", &P.QSEvasionPrune, 0, 1},
 		{"CheckLMR", &P.CheckLMR, 0, 1},
 		{"CheckSEEPrune", &P.CheckSEEPrune, 0, 1},
-		{"MoveOrder", &P.MoveOrder, 0, 1},
+		{"MoveOrder", &P.MoveOrder, 0, 2},
+		{"HistUpdate", &P.HistUpdate, 0, 1},
 		{"Optimism", &P.Optimism, 0, 1},
 		{"AspDelta", &P.AspDelta, 5, 100},
 		{"AspTries", &P.AspTries, 0, 10},

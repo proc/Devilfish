@@ -766,7 +766,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					w.PVLength[0] = 1
 				}
 
-				if !ttMove.IsCapture() && !ttMove.IsPromotion() {
+				if P.HistUpdate != 0 {
+					w.updateStatsSF(&hc, ttMove, nil, depth, true, isPVNode, inCheck, ply, prevMove)
+				} else if !ttMove.IsCapture() && !ttMove.IsPromotion() {
 					w.History.UpdateKillers(ply, ttMove)
 					hc.Update(w.Board.Pieces[ttMove.From()], ttMove, quietStatBonus(depth))
 					w.History.UpdateCounterMove(prevMove, ttMove)
@@ -901,6 +903,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				if !improving {
 					histMargin = -max(lmrDepth, 1) * P.HistPrNonImp
 				}
+				if P.HistUpdate != 0 {
+					histMargin = -max(lmrDepth, 1) * 4136 // Stockfish's, for its history scale
+				}
 				if histScore < histMargin {
 					st.HistPruned++
 					movesPruned = true
@@ -1018,6 +1023,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					// Continuous history adjustment: one ply per LMRHistDiv
 					// of combined history, capped at three plies each way.
 					hAdj := hist / P.LMRHistDiv
+					if P.HistUpdate != 0 {
+						hAdj = hist * 439 / 4096 / 1024 // Stockfish's, for its history scale
+					}
 					if hAdj > 3 {
 						hAdj = 3
 					} else if hAdj < -3 {
@@ -1048,7 +1056,11 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 						}
 
 						capHist := w.History.CaptureHistory[attacker][toSq][victim]
-						if capHist < 0 {
+						if P.HistUpdate != 0 {
+							// Stockfish's, for its history scale: the piece
+							// taken counts as well as the capture history.
+							reduction -= int8((873*sfPieceValue[victim]/128 + capHist) * 439 / 4096 / 1024)
+						} else if capHist < 0 {
 							reduction++
 						} else if capHist > 2000 {
 							reduction--
@@ -1162,6 +1174,13 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				w.PVLength[0] = 1
 			}
 
+			if P.HistUpdate != 0 {
+				w.updateStatsSF(&hc, m, searchedMoves[:movesSearched-1], depth, m == ttMove, isPVNode, inCheck, ply, prevMove)
+				if P.FailSoft&softMoves == 0 {
+					return beta
+				}
+				return score
+			}
 			if isQuiet {
 				w.History.UpdateKillers(ply, m)
 				bonus := quietStatBonus(depth)
@@ -1310,8 +1329,11 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 	// TT probe: any stored bound is at least as deep as a quiescence search.
 	// Stores go in at depth 0; tt.Store never lets those displace a current-generation entry.
 	origAlpha := alpha
-	_, ttScore, ttEval, _, ttType, ttFound := w.TT.ProbeEval(w.Board.Hash)
+	ttMove, ttScore, ttEval, _, ttType, ttFound := w.TT.ProbeEval(w.Board.Hash)
 	netEval := tt.EvalNone
+	if !ttFound {
+		ttMove = types.MoveNone
+	}
 	if ttFound {
 		ttScore = tt.ScoreFromTT(ttScore, ply)
 		switch {
@@ -1362,8 +1384,18 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 		checkers = w.Board.Checkers(w.Board.SideToMove)
 	}
 
+	// P.MoveOrder 2 orders the moves as Stockfish's quiescence does: the hash
+	// move first; captures by capture history plus seven times the value of
+	// the piece taken; in check, captures by the piece taken and then the
+	// other evasions by main and continuation history. (Queen promotions
+	// keep their place at the front when not in check, and the first-ply
+	// quiet checks theirs at the back.)
+	sfOrder := P.MoveOrder >= 2
 	var scores [256]int32
-	for i := 0; i < ml.Count; i++ {
+	if sfOrder {
+		w.scoreQuiescenceSF(&ml, &scores, ttMove, ply, inCheck)
+	}
+	for i := 0; i < ml.Count && !sfOrder; i++ {
 		m := ml.Moves[i]
 		if m.IsPromotion() && m.PromotionType() == types.Queen {
 			scores[i] = 100000 + eval.SEE(w.Board, m)
@@ -1453,6 +1485,10 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 			continue
 		}
 
+		if sfOrder {
+			// For the continuation history of the evasions below.
+			w.History.PushMove(ply, w.Board.Pieces[m.From()], m.To())
+		}
 		w.pushAccumulator(ply, m)
 		if !w.Board.MakeMove(m) {
 			continue
@@ -1504,6 +1540,86 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 		w.TT.StoreEval(w.Board.Hash, types.MoveNone, tt.ScoreToTT(bestScore, ply), netEval, 0, bound)
 	}
 	return bestScore
+}
+
+// updateStatsSF is the history update after best caused a cutoff, as
+// Stockfish does it (P.HistUpdate 1): best earns a bonus that grows with
+// depth and with the number of moves tried before it; the quiet moves tried
+// before it lose a penalty that shrinks down the list, and the captures
+// tried before it a fixed one. tried holds the moves searched before best.
+func (w *SearchWorker) updateStatsSF(hc *histCtx, best types.Move, tried []types.Move, depth int8, isTTMove, isPV, inCheck bool, ply int, prevMove types.Move) {
+	b := w.Board
+	captureOf := func(m types.Move) (types.PieceType, types.PieceType) {
+		victim := b.Pieces[m.To()].Type()
+		if m.IsEnPassant() {
+			victim = types.Pawn
+		}
+		return b.Pieces[m.From()].Type(), victim
+	}
+	bonus := sfStatBonus(depth, isTTMove, isPV, len(tried))
+	malus := sfStatMalus(depth)
+
+	if !best.IsCapture() && !best.IsPromotion() {
+		w.History.UpdateKillers(ply, best)
+		w.History.UpdateCounterMove(prevMove, best)
+		hc.UpdateSF(b.Pieces[best.From()], best, bonus*899/1024, inCheck)
+		step := malus * 1159 / 1024
+		for _, m := range tried {
+			if !m.IsCapture() && !m.IsPromotion() {
+				step = step * 921 / 1024
+				hc.UpdateSF(b.Pieces[m.From()], m, -step, inCheck)
+			}
+		}
+	} else if best.IsCapture() {
+		attacker, victim := captureOf(best)
+		w.History.UpdateCaptureSF(attacker, victim, best.To(), bonus*1427/1024)
+	}
+	for _, m := range tried {
+		if m.IsCapture() {
+			attacker, victim := captureOf(m)
+			w.History.UpdateCaptureSF(attacker, victim, m.To(), -malus*1489/1024)
+		}
+	}
+}
+
+// scoreQuiescenceSF scores the moves of a quiescence node for P.MoveOrder 2.
+func (w *SearchWorker) scoreQuiescenceSF(ml *movegen.MoveList, scores *[256]int32, ttMove types.Move, ply int, inCheck bool) {
+	const (
+		first    = 1 << 30
+		captures = 1 << 28
+		last     = -(1 << 28)
+	)
+	b := w.Board
+	var hc histCtx
+	if inCheck {
+		hc = w.History.Context(b, ply, 0)
+	}
+	for i := 0; i < ml.Count; i++ {
+		m := ml.Moves[i]
+		tactical := m.IsCapture() || m.IsPromotion()
+		switch {
+		case m == ttMove:
+			scores[i] = first
+		case inCheck && !tactical:
+			scores[i] = hc.Evasion(b.Pieces[m.From()], m)
+		case !tactical:
+			scores[i] = last
+		default:
+			attacker := b.Pieces[m.From()].Type()
+			victim := b.Pieces[m.To()].Type()
+			if m.IsEnPassant() {
+				victim = types.Pawn
+			}
+			switch {
+			case inCheck:
+				scores[i] = captures + sfPieceValue[victim]
+			case m.PromotionType() == types.Queen && m.IsPromotion():
+				scores[i] = captures + eval.SEE(b, m)
+			default:
+				scores[i] = w.History.CaptureHistory[attacker][m.To()][victim] + 7*sfPieceValue[victim]
+			}
+		}
+	}
 }
 
 func abs(x int32) int32 {

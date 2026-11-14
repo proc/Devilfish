@@ -118,7 +118,7 @@ func (h *SearchHistory) Context(b *board.Board, ply int, threatened bitboard.Bit
 	if ply >= 0 && ply < MaxPly {
 		i := ply + contPad
 		c.cont = [3]*contRow{h.contStack[i-1], h.contStack[i-2], h.contStack[i-4]}
-		if P.MoveOrder != 0 {
+		if P.MoveOrder != 0 || P.HistUpdate != 0 {
 			c.contFar = [2]*contRow{h.contStack[i-3], h.contStack[i-6]}
 			if ply < lowPlySize {
 				c.low = &h.LowPly[ply]
@@ -188,7 +188,22 @@ func (c *histCtx) Evasion(piece types.Piece, m types.Move) int32 {
 // Stat is the score late-move reductions are adjusted by (main and
 // continuation history); Prune the one history pruning compares (the same
 // without the move four plies back).
+//
+// Under P.HistUpdate 1 both are Stockfish's: Stat weighs main history about
+// twice the continuation histories one and two plies back; Prune is those
+// two continuation histories plus pawn history.
 func (c *histCtx) Stat(piece types.Piece, m types.Move) int32 {
+	if P.HistUpdate != 0 {
+		to := m.To()
+		s := 2252 * int32(*c.mainEntry(m))
+		if c.cont[0] != nil {
+			s += 1126 * int32(c.cont[0][piece][to])
+		}
+		if c.cont[1] != nil {
+			s += 1093 * int32(c.cont[1][piece][to])
+		}
+		return s / 1024
+	}
 	s := c.Prune(piece, m)
 	if c.cont[2] != nil {
 		s += int32(c.cont[2][piece][m.To()])
@@ -198,6 +213,16 @@ func (c *histCtx) Stat(piece types.Piece, m types.Move) int32 {
 
 func (c *histCtx) Prune(piece types.Piece, m types.Move) int32 {
 	to := m.To()
+	if P.HistUpdate != 0 {
+		s := int32(c.pawn[piece][to])
+		if c.cont[0] != nil {
+			s += int32(c.cont[0][piece][to])
+		}
+		if c.cont[1] != nil {
+			s += int32(c.cont[1][piece][to])
+		}
+		return s
+	}
 	s := int32(*c.mainEntry(m))
 	if c.cont[0] != nil {
 		s += int32(c.cont[0][piece][to])
@@ -232,6 +257,100 @@ func (c *histCtx) Update(piece types.Piece, m types.Move, bonus int32) {
 	if c.low != nil {
 		histGravity(&c.low[m.From()][to], bonus*712/1024)
 	}
+}
+
+// Stockfish's history updates (P.HistUpdate 1). Each table has its own
+// bound, and the bonus a move earns is split between the tables in fixed
+// proportions; the thresholds in picker_sf.go assume these scales.
+const (
+	sfMainLimit    = 7183 // main and low-ply history
+	sfContLimit    = 30000
+	sfPawnLimit    = 8192
+	sfCaptureLimit = 10692
+)
+
+// sfGravity is Stockfish's history update: the entry moves by bonus, less
+// the fraction |bonus|/limit of its value, which keeps it within +-limit.
+func sfGravity(e *int16, bonus, limit int32) {
+	bonus = max(-limit, min(bonus, limit))
+	cur := int32(*e)
+	if cur > limit {
+		cur = limit // an entry written under the other update rule
+	} else if cur < -limit {
+		cur = -limit
+	}
+	*e = int16(cur + bonus - cur*abs(bonus)/limit)
+}
+
+// sfStatBonus and sfStatMalus are what the move that caused a cutoff earns
+// and what the moves tried before it lose. tried counts those earlier moves.
+func sfStatBonus(depth int8, isTTMove, isPV bool, tried int) int32 {
+	b := min(133*int32(depth)-81, 1487)
+	if isTTMove {
+		b += 364
+	}
+	if !isPV {
+		b += b * int32(tried) / 256
+	}
+	return b
+}
+
+func sfStatMalus(depth int8) int32 {
+	return min(968*int32(depth)-235, 2244)
+}
+
+// updateContSF spreads bonus over the continuation histories 1, 2, 3, 4 and
+// 6 plies back (only the first two when in check), each with its own weight.
+// The more of them already agree the move is good, the larger the step.
+func (c *histCtx) updateContSF(piece types.Piece, to types.Square, bonus int32, inCheck bool) {
+	rows := [5]*contRow{c.cont[0], c.cont[1], c.contFar[0], c.cont[2], c.contFar[1]}
+	weights := [5]int32{520, 390, 145, 251, 209}
+	mult := [6]int32{94, 103, 110, 106, 119, 126}
+	positive := 0
+	for i, row := range rows {
+		if inCheck && i >= 2 {
+			break
+		}
+		if row == nil {
+			continue
+		}
+		e := &row[piece][to]
+		if *e > 0 {
+			positive++
+		}
+		b := bonus * weights[i] * mult[positive] / 65536
+		if i == 0 {
+			b += 73
+		}
+		sfGravity(e, b, sfContLimit)
+	}
+}
+
+// UpdateSF moves every table's entry for the quiet move m by bonus (negative
+// to penalize), as Stockfish's update_quiet_histories does.
+func (c *histCtx) UpdateSF(piece types.Piece, m types.Move, bonus int32, inCheck bool) {
+	to := m.To()
+	sfGravity(c.mainEntry(m), bonus, sfMainLimit)
+	if c.low != nil {
+		sfGravity(&c.low[m.From()][to], bonus*712/1024, sfMainLimit)
+	}
+	c.updateContSF(piece, to, bonus*750/1024, inCheck)
+	pawn := bonus * 459 / 1024
+	if bonus > -4 {
+		pawn = bonus * 1104 / 1024
+	}
+	sfGravity(&c.pawn[piece][to], pawn, sfPawnLimit)
+}
+
+// UpdateCaptureSF moves a capture's history entry by bonus.
+func (h *SearchHistory) UpdateCaptureSF(attacker, victim types.PieceType, to types.Square, bonus int32) {
+	if attacker >= 7 || victim >= 7 || to >= 64 {
+		return
+	}
+	e := &h.CaptureHistory[attacker][to][victim]
+	bonus = max(-sfCaptureLimit, min(bonus, sfCaptureLimit))
+	cur := max(-sfCaptureLimit, min(*e, sfCaptureLimit))
+	*e = cur + bonus - cur*abs(bonus)/sfCaptureLimit
 }
 
 // histGravity adds bonus to *e, pulling large entries back toward zero so

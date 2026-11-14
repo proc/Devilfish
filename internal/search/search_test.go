@@ -307,7 +307,7 @@ func TestQuietHistoryTables(t *testing.T) {
 	}
 	// The same squares with the knight under threat are a different entry.
 	threat := h.Context(b, 2, bitboard.SquareBB[types.G1])
-	if threat.Prune(types.WhiteKnight, m) >= c.Prune(types.WhiteKnight, m) {
+	if threat.Stat(types.WhiteKnight, m) >= c.Stat(types.WhiteKnight, m) {
 		t.Errorf("threatened-piece history should not share the unthreatened entry")
 	}
 	before := c.Stat(types.WhiteKnight, m)
@@ -425,11 +425,11 @@ func TestWAC055(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A quiet mating threat behind a queen sacrifice. Found at depth 9 (about
-	// 35k nodes); internal iterative reductions make a nominal ply shallower
-	// than it was when depth 7 was enough.
+	// A quiet mating threat behind a queen sacrifice. Found at depth 11 (about
+	// 60k nodes) with Stockfish's history updates, which reduce late quiet
+	// moves a little more; at depth 9 with P.HistUpdate 0.
 	engine := NewEngine(64, 1)
-	bm, _ := engine.Search(b, SearchLimits{MaxDepth: 10}, func(si SearchInfo) {
+	bm, _ := engine.Search(b, SearchLimits{MaxDepth: 12}, func(si SearchInfo) {
 		var pvStrs []string
 		for _, m := range si.PV {
 			pvStrs = append(pvStrs, m.String())
