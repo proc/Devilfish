@@ -876,7 +876,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		// SEE Pruning
 		// Do not prune tactical/killer moves, countermoves, advanced pawn pushes, or moves that give check
-		if !isPVNode && !inCheck && int32(depth) <= P.SEEDepth && movesSearched > 0 && !pruneExempt {
+		if !isPVNode && (!inCheck || (P.CheckSEEPrune != 0 && bestScore > -MateThreshold)) && int32(depth) <= P.SEEDepth && movesSearched > 0 && !pruneExempt {
 			if !givesCheck {
 				if !seeKnown {
 					moveSEE, seeKnown = eval.SEE(w.Board, m), true
@@ -936,7 +936,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			score = -w.Search(depth-1+moveExtension, -beta, -alpha, ply+1, isPVNode, !isPVNode && !cutNode, types.MoveNone, m, prevMove, prevMove2)
 		} else {
 			// Late Move Reductions (LMR)
-			if depth >= 3 && movesSearched >= int(P.LMRMinMove) && !inCheck {
+			if depth >= 3 && movesSearched >= int(P.LMRMinMove) && (!inCheck || P.CheckLMR != 0) {
 				dIdx := depth
 				if dIdx > 127 {
 					dIdx = 127
@@ -1021,6 +1021,10 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					} else {
 						reduction = 0
 					}
+				}
+
+				if inCheck {
+					reduction-- // evasions: a ply less than other late moves
 				}
 
 				// Checks: not reduced at all, or (LMRChecks) one ply less than
@@ -1374,6 +1378,35 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 				if bestScore < futValue {
 					bestScore = futValue
 				}
+				continue
+			}
+		}
+
+		if !inCheck && m.IsCapture() && !m.IsPromotion() {
+			// Far below alpha, a capture has to win material to matter.
+			if P.QSEvenPrune != 0 && futBase <= alpha && eval.SEE(w.Board, m) <= 0 && !w.Board.GivesCheck(m) {
+				st.QFutPruned++
+				if bestScore < futBase {
+					bestScore = futBase
+				}
+				continue
+			}
+			// The captures are ordered by victim: after the first few, the
+			// rest rarely change the result.
+			if P.QSMaxMoves != 0 && legalMoves >= int(P.QSMaxMoves) && !w.Board.GivesCheck(m) {
+				st.QFutPruned++
+				continue
+			}
+		}
+
+		// In check, once one evasion is known not to be mated: quiet evasions
+		// beyond the second move and captures that lose material are skipped.
+		if inCheck && P.QSEvasionPrune != 0 && legalMoves > 0 && bestScore > -MateThreshold {
+			if !m.IsCapture() && !m.IsPromotion() {
+				if legalMoves >= 2 {
+					continue
+				}
+			} else if eval.SEE(w.Board, m) < 0 {
 				continue
 			}
 		}

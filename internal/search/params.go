@@ -64,6 +64,13 @@ type Params struct {
 	// than the bound it was searching against (a sum of the soft* bits).
 	FailSoft int32
 
+	// Quiescence and in-check pruning.
+	QSEvenPrune    int32 // 1: with the stand-pat score well below alpha, captures that do not win material are skipped
+	QSMaxMoves     int32 // captures searched per quiescence node before the rest (unless they give check) are skipped; 0: no limit
+	QSEvasionPrune int32 // 1: in check in quiescence, once one evasion holds, quiet evasions after the second move and losing captures are skipped
+	CheckLMR       int32 // 1: late evasions are reduced like other late moves (one ply less)
+	CheckSEEPrune  int32 // 1: SEE pruning also applies to evasions
+
 	// Aspiration windows at the root.
 	AspDelta  int32 // half-width of the first window
 	AspTries  int32 // open the window fully after this many failures (0: only once it is AspOpen wide)
@@ -151,6 +158,15 @@ var P = Params{
 	// over 606 games: no worse than level, no better either.
 	FailSoft: 0,
 
+	// On at the user's request, not yet match-tested. None of them made the
+	// tree smaller (depth 16, 24 positions: between 100% and 122% of the
+	// nodes without them; all five together 103%).
+	QSEvenPrune:    1,
+	QSMaxMoves:     3,
+	QSEvasionPrune: 1,
+	CheckLMR:       1,
+	CheckSEEPrune:  1,
+
 	// A narrower window that widens gradually and searches a ply shallower
 	// after a fail high (10, 0, 1000, 1) cut the tree to depth 19 by 14% but
 	// scored -1 Elo +-15 over 604 games at 8s+0.08s. IIRCut 1 cut it by 8%
@@ -220,6 +236,11 @@ func TunableParams() []ParamSpec {
 		{"SENegExt", &P.SENegExt, 0, 1},
 		{"PawnPushExt", &P.PawnPushExt, 0, 2},
 		{"FailSoft", &P.FailSoft, 0, 31},
+		{"QSEvenPrune", &P.QSEvenPrune, 0, 1},
+		{"QSMaxMoves", &P.QSMaxMoves, 0, 16},
+		{"QSEvasionPrune", &P.QSEvasionPrune, 0, 1},
+		{"CheckLMR", &P.CheckLMR, 0, 1},
+		{"CheckSEEPrune", &P.CheckSEEPrune, 0, 1},
 		{"AspDelta", &P.AspDelta, 5, 100},
 		{"AspTries", &P.AspTries, 0, 10},
 		{"AspOpen", &P.AspOpen, 50, 5000},
