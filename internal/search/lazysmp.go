@@ -510,7 +510,8 @@ func (e *Engine) Search(
 				score = master.Search(depth, -Infinity, Infinity, 0, true, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
 			} else {
 				// Aspiration Windows
-				delta := int32(30)
+				delta := P.AspDelta
+				failHighs := int8(0)
 				alpha := rootScore - delta
 				beta := rootScore + delta
 				if alpha < -Infinity {
@@ -522,7 +523,13 @@ func (e *Engine) Search(
 
 				failedAttempts := 0
 				for {
-					score = master.Search(depth, alpha, beta, 0, true, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+					searchDepth := depth
+					if P.AspReduce != 0 {
+						// After a fail high the move is already known to be
+						// better; a shallower search settles by how much.
+						searchDepth = max(depth-failHighs, 1)
+					}
+					score = master.Search(searchDepth, alpha, beta, 0, true, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
 
 					if e.Stopped.Load() {
 						break
@@ -538,7 +545,11 @@ func (e *Engine) Search(
 							alpha = -Infinity
 						}
 						failedAttempts++
+						failHighs = 0
 					} else if score >= beta {
+						if failHighs < 3 {
+							failHighs++
+						}
 						beta = score + delta
 						if beta > Infinity {
 							beta = Infinity
@@ -549,7 +560,7 @@ func (e *Engine) Search(
 					}
 
 					delta += delta / 2
-					if failedAttempts >= 2 || delta >= 300 {
+					if (P.AspTries != 0 && failedAttempts >= int(P.AspTries)) || delta >= P.AspOpen {
 						alpha = -Infinity
 						beta = Infinity
 					}

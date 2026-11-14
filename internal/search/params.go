@@ -48,6 +48,10 @@ type Params struct {
 	PruneExempt    int32 // 1: those moves are also exempt from late-move, futility, history and SEE pruning; 0: only killers and the countermove are
 	NMPBase        int32 // null-move reduction = NMPBase + depth/NMPDepthDiv (+ eval and improving terms)
 	NMPDepthDiv    int32
+	NMPMargin      int32 // null move only with the evaluation this far above beta, less NMPMarginStep per ply of depth
+	NMPMarginStep  int32
+	NMPNonImpr     int32 // extra plies of null-move reduction when not improving
+	FutBase        int32 // futility margin = FutBase + FutMargin per ply of reduced depth
 	IIRDepth       int32 // internal iterative reduction from this depth, when there is no hash move
 	IIRPV          int32 // 1: also at PV nodes
 	RazorDepth     int32 // razoring up to this depth
@@ -59,6 +63,14 @@ type Params struct {
 	// FailSoft selects where the search returns the score it found rather
 	// than the bound it was searching against (a sum of the soft* bits).
 	FailSoft int32
+
+	// Aspiration windows at the root.
+	AspDelta  int32 // half-width of the first window
+	AspTries  int32 // open the window fully after this many failures (0: only once it is AspOpen wide)
+	AspOpen   int32 // open the window fully once its half-width reaches this
+	AspReduce int32 // 1: after a fail high, search again one ply shallower (up to three plies)
+
+	IIRCut int32 // extra plies of internal iterative reduction at expected cut nodes of depth >= 8 with no hash move
 
 	ProbCut       int32 // 1: ProbCut before the hash move, at every non-PV node of depth >= 5; 0: off (no gain measured in self-play)
 	ProbCutMargin int32 // ProbCut searches against beta plus this
@@ -109,12 +121,21 @@ var P = Params{
 	CheckExt:  2,
 	LMRChecks: 0,
 
-	LMRMinMove:     1,
-	LMRCutNode:     1,
-	LMRExempt:      0,
-	PruneExempt:    1,
-	NMPBase:        4,
+	LMRMinMove:  1,
+	LMRCutNode:  1,
+	LMRExempt:   0,
+	PruneExempt: 1,
+	// Null move. With NMPBase 4 and a further ply when not improving the
+	// null search was a bare quiescence search up to depth 9 or so, and only
+	// 24% of them cut off. Within 40 centipawns of beta fewer than 5% did:
+	// the side to move is worth about that much, and the null move gives it
+	// away. Not yet match-tested.
+	NMPBase:        3,
 	NMPDepthDiv:    3,
+	NMPMargin:      40,
+	NMPMarginStep:  3,
+	NMPNonImpr:     0,
+	FutBase:        0,
 	IIRDepth:       4,
 	IIRPV:          1,
 	RazorDepth:     3,
@@ -129,6 +150,17 @@ var P = Params{
 	// alpha, as it now always does, move loop and quiescence scored -8 +-16
 	// over 606 games: no worse than level, no better either.
 	FailSoft: 0,
+
+	// A narrower window that widens gradually and searches a ply shallower
+	// after a fail high (10, 0, 1000, 1) cut the tree to depth 19 by 14% but
+	// scored -1 Elo +-15 over 604 games at 8s+0.08s. IIRCut 1 cut it by 8%
+	// and scored +1 +-16 over 604. Both are left off.
+	AspDelta:  30,
+	AspTries:  2,
+	AspOpen:   300,
+	AspReduce: 0,
+
+	IIRCut: 0,
 
 	ProbCut:       0,
 	ProbCutMargin: 200,
@@ -176,6 +208,10 @@ func TunableParams() []ParamSpec {
 		{"PruneExempt", &P.PruneExempt, 0, 1},
 		{"NMPBase", &P.NMPBase, 2, 6},
 		{"NMPDepthDiv", &P.NMPDepthDiv, 2, 8},
+		{"NMPMargin", &P.NMPMargin, 0, 400},
+		{"NMPMarginStep", &P.NMPMarginStep, 0, 50},
+		{"NMPNonImpr", &P.NMPNonImpr, 0, 1},
+		{"FutBase", &P.FutBase, 0, 300},
 		{"IIRDepth", &P.IIRDepth, 2, 12},
 		{"IIRPV", &P.IIRPV, 0, 1},
 		{"RazorDepth", &P.RazorDepth, 1, 6},
@@ -184,6 +220,11 @@ func TunableParams() []ParamSpec {
 		{"SENegExt", &P.SENegExt, 0, 1},
 		{"PawnPushExt", &P.PawnPushExt, 0, 2},
 		{"FailSoft", &P.FailSoft, 0, 31},
+		{"AspDelta", &P.AspDelta, 5, 100},
+		{"AspTries", &P.AspTries, 0, 10},
+		{"AspOpen", &P.AspOpen, 50, 5000},
+		{"AspReduce", &P.AspReduce, 0, 1},
+		{"IIRCut", &P.IIRCut, 0, 2},
 		{"ProbCut", &P.ProbCut, 0, 1},
 		{"ProbCutMargin", &P.ProbCutMargin, 50, 500},
 	}

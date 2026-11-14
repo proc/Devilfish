@@ -509,11 +509,11 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	// Never pass if our Queen is under direct tactical threat, and never twice in a row
 	// (prevMove is MoveNone below the root only directly after a null move).
 	pieceCount := bitboard.Count(w.Board.Occupied())
-	if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && prevMove != types.MoveNone && nmpAllowed && depth >= 3 && staticEval >= beta && hasNonPawns && pieceCount > 6 {
+	if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && prevMove != types.MoveNone && nmpAllowed && depth >= 3 && staticEval >= beta+max(P.NMPMargin-P.NMPMarginStep*int32(depth), 0) && hasNonPawns && pieceCount > 6 {
 		st.NMPTries++
 		r := int8(P.NMPBase) + depth/int8(P.NMPDepthDiv)
 		if !improving {
-			r++
+			r += int8(P.NMPNonImpr)
 		}
 		// Reduce more the further static eval sits above beta
 		if evalR := (staticEval - beta) / P.NMPEvalDiv; evalR > 0 {
@@ -549,6 +549,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	if (!isPVNode || (P.IIRPV != 0 && ply > 0)) && !inCheck && excludedMove == types.MoveNone && int32(depth) >= P.IIRDepth && ttMove == types.MoveNone {
 		st.IIR++
 		depth--
+		if cutNode && depth >= 8 {
+			depth -= int8(P.IIRCut)
+		}
 	}
 
 	extension := int8(0)
@@ -840,7 +843,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		// Futility Pruning
 		if !isPVNode && !inCheck && lmrDepth <= P.FutDepth && isQuiet && movesSearched > 0 && !pruneExempt {
-			futMargin := P.FutMargin * max(lmrDepth, 1)
+			futMargin := P.FutBase + P.FutMargin*max(lmrDepth, 1)
 			if staticEval+futMargin <= alpha {
 				if !givesCheck {
 					st.FutPruned++
