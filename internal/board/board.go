@@ -158,14 +158,10 @@ func (b *Board) TacticalThreatsOnPieces(us types.Color) bitboard.Bitboard {
 		if !b.IsSquareAttacked(sq, them) {
 			continue
 		}
-		if !b.IsSquareAttacked(sq, us) {
-			threats |= bitboard.SquareBB[sq]
-			continue
-		}
 		allAtt := b.Attackers(sq, occ)
 		themAtt := allAtt & b.ColorBB[them]
 		usDef := allAtt & b.ColorBB[us]
-		if bitboard.Count(themAtt) > bitboard.Count(usDef) {
+		if usDef == 0 || bitboard.Count(themAtt) > bitboard.Count(usDef) {
 			threats |= bitboard.SquareBB[sq]
 		}
 	}
