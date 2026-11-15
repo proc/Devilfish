@@ -20,6 +20,9 @@ import (
 // 2018 revision distributed with the Arasan engine (tests/wacnew.epd), which
 // fixes broken positions and adds alternative solutions.
 //
+// One answer has been added here: c6 in WAC.176, next to Rxh2+. Stockfish
+// (nn-68752b755c93, depth 32-33) scores them +6.30 and +6.43.
+//
 //go:embed wac.epd
 var wacEPD string
 
