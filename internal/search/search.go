@@ -62,7 +62,14 @@ type SearchWorker struct {
 	done              threadResult       // helper threads: the last finished iteration (see pickThread)
 	nmpMinPly         int                // P.NMPGuard 3: no null move above this ply (inside a verification search), 0 otherwise
 	plies             [MaxPly]plyInfo    // P.HistUpdate 1: what each node on the path knows about itself and the move it is searching
-	Accumulators      [MaxPly]nnue.Accumulator
+	// Per-ply scratch for the move loops, kept here so that a node does not
+	// zero kilobytes of stack it mostly never reads. The only searches at
+	// the same ply as a running node (null-move verification, singular
+	// search, razoring) finish before that node's move loop starts.
+	searched     [MaxPly][256]types.Move // the main search's moves searched so far
+	qMoves       [MaxPly]movegen.MoveList
+	qScores      [MaxPly][256]int32
+	Accumulators [MaxPly]nnue.Accumulator
 	EvalCache         [evalCacheSize]struct {
 		key  uint32
 		eval int32
@@ -251,6 +258,9 @@ func (w *SearchWorker) resetFor(b *board.Board, ttTable *tt.TT, tm *TimeManager,
 	w.lastCorr = 0
 	clear(w.pickers[:])
 	clear(w.pickerHC[:])
+	clear(w.searched[:])
+	clear(w.qMoves[:])
+	clear(w.qScores[:])
 	clear(w.Accumulators[:])
 	w.RootBestMove = types.MoveNone
 	w.RootScore = 0
@@ -883,7 +893,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	var bestMove types.Move
 	var bestRootMove types.Move
 	bestRootScore := -Infinity
-	var searchedMoves [256]types.Move
+	searchedMoves := &w.searched[ply]
 	movesSearched := 0
 	// A capture/promotion TT move suggests the position is tactical: quiet
 	// alternatives are less likely to matter, so they get reduced more.
@@ -1764,9 +1774,9 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 	}
 
 	ci := w.Board.NewCheckInfo()
-	var ml movegen.MoveList
+	ml := &w.qMoves[ply]
 	qsChecks := !inCheck && qply == 0 && P.QSChecks != 0
-	movegen.GenerateMoves(w.Board, !inCheck && !qsChecks, &ml)
+	movegen.GenerateMoves(w.Board, !inCheck && !qsChecks, ml)
 
 	var checkers bitboard.Bitboard
 	if inCheck {
@@ -1780,9 +1790,11 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 	// keep their place at the front when not in check, and the first-ply
 	// quiet checks theirs at the back.)
 	sfOrder := P.MoveOrder >= 2
-	var scores [256]int32
+	scores := &w.qScores[ply]
 	if sfOrder {
-		w.scoreQuiescenceSF(&ml, &scores, ttMove, ply, inCheck)
+		w.scoreQuiescenceSF(ml, scores, ttMove, ply, inCheck)
+	} else {
+		clear(scores[:ml.Count]) // quiet evasions keep a score of 0
 	}
 	for i := 0; i < ml.Count && !sfOrder; i++ {
 		m := ml.Moves[i]
@@ -1812,7 +1824,7 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 
 	legalMoves := 0
 	for i := 0; i < ml.Count; i++ {
-		m := PickNextMove(&ml, scores[:ml.Count], i)
+		m := PickNextMove(ml, scores[:ml.Count], i)
 
 		// Quiet moves are only generated for the first-ply checks.
 		if qsChecks && !m.IsCapture() && !m.IsPromotion() {

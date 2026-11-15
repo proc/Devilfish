@@ -155,11 +155,13 @@ func (b *Board) TacticalThreatsOnPieces(us types.Color) bitboard.Bitboard {
 	unflagged := ourPieces &^ threats
 	for unflagged != 0 {
 		sq := bitboard.PopLSB(&unflagged)
-		if !b.IsSquareAttacked(sq, them) {
-			continue
-		}
+		// One attackers lookup answers both questions; most pieces are not
+		// attacked, and for those IsSquareAttacked costs as much anyway.
 		allAtt := b.Attackers(sq, occ)
 		themAtt := allAtt & b.ColorBB[them]
+		if themAtt == 0 {
+			continue
+		}
 		usDef := allAtt & b.ColorBB[us]
 		if usDef == 0 || bitboard.Count(themAtt) > bitboard.Count(usDef) {
 			threats |= bitboard.SquareBB[sq]
