@@ -28,6 +28,8 @@ const (
 // it; 16 MB made the search 6 to 8% faster and 64 MB only 9%.
 const evalCacheSize = 1 << 21
 
+const wdlCacheSize = 4096
+
 // evalCacheKey is what an entry stores to recognise its position: the upper
 // half of the hash (the index is the lower part), never zero, so that an
 // empty entry matches nothing.
@@ -64,6 +66,11 @@ type SearchWorker struct {
 	EvalCache         [evalCacheSize]struct {
 		key  uint32
 		eval int32
+	}
+	wdlCache          [wdlCacheSize]struct {
+		key uint64
+		wdl int8
+		ok  bool
 	}
 	Eight             *nnue.EightState   // incremental 8Chess accumulators (nil unless that net is active)
 	useAcc            bool               // the 768->256 accumulator stack is in use this search
@@ -441,7 +448,16 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		w.Board.Castling == 0 &&
 		bitboard.Count(w.Board.Occupied()) <= syzygy.MaxPieces() {
 
-		wdl, ok := syzygy.ProbeWDL(w.Board)
+		key := w.Board.Hash | 1
+		ce := &w.wdlCache[w.Board.Hash&(wdlCacheSize-1)]
+		var wdl int
+		var ok bool
+		if ce.key == key {
+			wdl, ok = int(ce.wdl), ce.ok
+		} else {
+			wdl, ok = syzygy.ProbeWDL(w.Board)
+			ce.key, ce.wdl, ce.ok = key, int8(wdl), ok
+		}
 		if ok {
 			if w.TBHits != nil {
 				w.TBHits.Add(1)
@@ -820,7 +836,6 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				if !w.makeMove(m, &ci, inCheck) {
 					continue
 				}
-				w.TT.Prefetch(w.Board.Hash)
 				if !probTried {
 					probTried = true
 					st.ProbTries++
@@ -889,7 +904,6 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		w.History.PushMove(ply, w.Board.Pieces[ttMove.From()], ttMove.To())
 		w.pushMoveInfo(ply, &hc, ttMove, 1)
 		if w.makeMove(ttMove, &ci, inCheck) {
-			w.TT.Prefetch(w.Board.Hash)
 			legalMoves++
 			st.MovesSearched++
 			searchedMoves[movesSearched] = ttMove
@@ -1161,7 +1175,6 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		if !w.makeMove(m, &ci, inCheck) {
 			continue
 		}
-		w.TT.Prefetch(w.Board.Hash)
 
 		legalMoves++
 		st.MovesSearched++
@@ -1870,7 +1883,6 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 		if !w.makeMove(m, &ci, inCheck) {
 			continue
 		}
-		w.TT.Prefetch(w.Board.Hash)
 
 		legalMoves++
 		st.QMoves++
