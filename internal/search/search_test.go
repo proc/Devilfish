@@ -918,3 +918,18 @@ func TestSearchTestsUseDefaultNetwork(t *testing.T) {
 		t.Fatalf("active network %s (enabled %v), want the default %s", nnue.CurrentFilePath, nnue.Enabled, nnue.DefaultName)
 	}
 }
+
+// A mate must not end the search while a shorter one may still be found:
+// WAC 160 has a mate in 3 (Ne6+) that is seen first and a mate in 2 (Qxd7+).
+func TestKeepsSearchingForShorterMate(t *testing.T) {
+	b, err := board.ParseFEN("qn1kr2r/1pRbb3/pP5p/P2pP1pP/3N1pQ1/3B4/3B1PP1/R5K1 w - -")
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := NewEngine(64, 1)
+	var last SearchInfo
+	bm, _ := engine.Search(b, SearchLimits{MaxDepth: 12}, func(si SearchInfo) { last = si })
+	if bm.String() != "g4d7" || !last.IsMate || last.MateIn != 2 {
+		t.Errorf("best move %s, mate %v in %d; want g4d7, mate in 2", bm, last.IsMate, last.MateIn)
+	}
+}

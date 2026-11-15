@@ -661,8 +661,15 @@ func (e *Engine) Search(
 			logger.Profilef("Iteration depth=%d seldepth=%d: Score=%d (IsMate=%t, MateIn=%d), Nodes=%d, NPS=%d, Elapsed=%v, HashFull=%d/1000, TBHits=%d, PV=%v",
 				depth, master.SelDepth, score, isMate, mateIn, totalNodes, nps, elapsed, e.TT.HashFull(), e.TBHits.Load(), pv)
 
-			// Check if we found checkmate: exit immediately without burning extra clock
-			if isMate && mateIn > 0 {
+			// A mate was found. Stop once the search has gone two plies
+			// deeper than a mate of that length needs (2n plies for a mate
+			// in n): until then a shorter mate may still be hidden behind a
+			// reduced or pruned move. Stopping at the first mate seen meant
+			// playing a mate in 3 with a mate in 2 on the board (WAC 160),
+			// and stopping at 2n plies still missed the mate in 4 of WAC 161
+			// behind a mate in 5. Mate trees are small, so the extra
+			// iterations cost little clock.
+			if isMate && mateIn > 0 && int(depth) >= 2*mateIn+2 {
 				if !tm.Ponder.Load() {
 					break
 				}

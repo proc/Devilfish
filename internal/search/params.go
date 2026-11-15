@@ -147,6 +147,9 @@ type Params struct {
 	// nodes with 1 and 102% with 2; WAC with the Stockfish network in
 	// 100k / 400k nodes 271 / 283 and 265 / 280 against 273 / 288. 1 is
 	// on at the user's request; not match-tested.
+	// 3: as 1, also when a piece of the mover's own is under threat.
+	// Whole WAC suite at one million nodes a position (default network):
+	// 0 292, 1 289, 3 286 of 300, which is within the suite's noise.
 	PruneKing int32
 
 	// HistUpdate 1: the history tables are updated with Stockfish's bonuses,
@@ -359,7 +362,7 @@ func TunableParams() []ParamSpec {
 		{"MoveOrder", &P.MoveOrder, 0, 2},
 		{"HistUpdate", &P.HistUpdate, 0, 1},
 		{"LMRMode", &P.LMRMode, 0, 2},
-		{"PruneKing", &P.PruneKing, 0, 2},
+		{"PruneKing", &P.PruneKing, 0, 3},
 		{"HistExtra", &P.HistExtra, 0, 15},
 		{"Cycle", &P.Cycle, 0, 1},
 		{"TTPV", &P.TTPV, 0, 1},

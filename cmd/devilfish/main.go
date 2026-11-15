@@ -26,6 +26,9 @@ func printHelp() {
 	}
 	fmt.Println("  devilfish wac [ms]          Run the Win At Chess tactical suite (300 positions, default 1000 ms each)")
 	fmt.Println("  devilfish testsuite <wac|file.epd> [ms]  Run an EPD test suite with bm/am moves")
+	for _, l := range configUsage {
+		fmt.Println("  devilfish " + l)
+	}
 	fmt.Println("  devilfish --version         Show version information")
 	fmt.Println("  devilfish --help            Show this help message")
 	fmt.Println("\nConfiguration Flags:")
@@ -66,6 +69,14 @@ func main() {
 	var suiteArgs []string // non-nil: run a test suite
 
 	args := os.Args[1:]
+	// "devilfish config ..." edits the config file and exits.
+	if sub, path, ok := configCommandArgs(args); ok {
+		if err := runConfigCommand(sub, config.FindConfigFile(path), os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 

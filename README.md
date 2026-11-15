@@ -141,6 +141,17 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
 
    The embedded suites are stored packed (`internal/book/*.epdb.gz`) and decoded only when selected. To embed another suite, pack it with `go run ./cmd/epdpack -in suite.epd -out internal/book/suite.epdb.gz` and register it in `internal/book/epdbook.go`.
 
+   The config file can also be edited from the command line. Names are matched the same way as in the file (`PruneKing`, `prune_king` and `pruneking` are one option), values are checked against the option's type and range, and every other key in the file is left as it is:
+   ```bash
+   ./devilfish config set PruneKing 1       # writes "PruneKing": 1
+   ./devilfish config set eval_file "<8chess>"
+   ./devilfish config rm PruneKing          # back to the default
+   ./devilfish config get PruneKing
+   ./devilfish config list                  # show the file
+   ./devilfish config path                  # which file is used
+   ```
+   `-c <path>` selects another file. Without it the file is the one the engine loads: `./config.json` if present, else one next to the executable, else `~/.devilfish/config.json`.
+
    Every UCI option can be set in `config.json`. The settings above cover the standard ones (`Hash`, `Threads`, `Ponder`, `UseNNUE`, `EvalFile`, the `Syzygy*` options, `LogFile`, `Move Overhead`, `MultiPV`, `OwnBook`, `BookFile`). The search tunables (`LMRBase`, `LMRDivisor`, `LMRHistDiv`, `RFPMargin`, `RFPNonImpr`, `RazorMargin`, `NMPEvalDiv`, `LMPMultImpr`, `LMPMultNonImp`, `FutMargin`, `HistPrImpr`, `HistPrNonImp`, `SEEQuietMul`, `SEENoisyMul`, `QSFutMargin`, `CheckExtSEE`, `QSChecks`, `RFPDepth`, `LMPDepth`, `FutDepth`, `HistDepth`, `SEEDepth`, `RFPGuard`, `NMPGuard`, `CheckExt`, `LMRChecks`) go in a `search_params` object or directly at the top level, by their UCI name (case, spaces, `_` and `-` are ignored):
    ```json
    {

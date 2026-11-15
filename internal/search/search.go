@@ -964,6 +964,11 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		if isQuiet && isKingThreat && (P.PruneKing == 2 || (P.PruneKing == 1 && hasActiveAttack)) {
 			pruneExempt = true
 		}
+		// 3: as 1, and also when a piece of the mover's own is under threat
+		// (after a sacrifice one usually is).
+		if P.PruneKing == 3 && isQuiet && hasActiveAttack && (isKingThreat || (threatenedPieces != 0 && IsKingAttack(w.Board, m))) {
+			pruneExempt = true
+		}
 		isKingZoneMove := (bitboard.SquareBB[toSq] & themKingRing) != 0
 
 		// Late Move Pruning (LMP)
