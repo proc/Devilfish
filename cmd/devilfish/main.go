@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"runtime/pprof"
 	"strconv"
 	"strings"
@@ -434,6 +435,12 @@ func main() {
 	}
 	logger.Infof("NNUE Startup Status: %s | Network=%s | Arch=%s | SIMD=%s | Params=%d (%.1f KB)",
 		statusStr, netInfo.FilePath, netInfo.Architecture, netInfo.SIMD, netInfo.NumParameters, float64(netInfo.SizeBytes)/1024.0)
+
+	// Reclaim temporary buffers from loading the NNUE network before search/profiling
+	// begins, and disable automatic GC so background GC/scavenging does not contend with search.
+	runtime.GC()
+	debug.FreeOSMemory()
+	debug.SetGCPercent(-1)
 
 	// 5. Run benchmark or UCI loop
 	if cpuProfilePath != "" {

@@ -74,7 +74,9 @@ type MovePicker struct {
 
 	// History rows for this node. Set by the search; without it the picker
 	// builds a context that has no continuation history.
-	hc *histCtx
+	hc         *histCtx
+	checkSq    [7]bitboard.Bitboard
+	hasCheckSq bool
 }
 
 // SetNodeInfo hands the picker values the caller has already computed for this
@@ -156,6 +158,7 @@ func (mp *MovePicker) reset(b *board.Board, ttMove, excludedMove types.Move, ply
 	mp.threats, mp.enemyKingRing = 0, 0
 	mp.kingInDanger, mp.hasActiveAttack = false, false
 	mp.hc = nil
+	mp.hasCheckSq = false
 	if ply < MaxPly {
 		mp.killer1 = history.Killers[ply][0]
 		mp.killer2 = history.Killers[ply][1]

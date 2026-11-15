@@ -558,19 +558,6 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	prevIsKingThreat := IsKingThreatAfterMove(w.Board, prevMove)
 
 	them := us.Other()
-	themKingSq := w.Board.KingSquare(them)
-	themKingRing := bitboard.Bitboard(0)
-	if themKingSq < types.SquareNone {
-		themKingRing = bitboard.KingAttacks(themKingSq) | bitboard.SquareBB[themKingSq]
-		if them == types.White {
-			themKingRing |= (themKingRing << 8) | (themKingRing << 16)
-		} else {
-			themKingRing |= (themKingRing >> 8) | (themKingRing >> 16)
-		}
-	}
-	myAttackers, myAttackUnits := w.Board.KingAttackersCount(them)
-	hasActiveAttack := myAttackers >= 2 || myAttackUnits >= 4
-
 	threatenedPieces := w.Board.TacticalThreatsOnPieces(us)
 
 	hc := w.History.Context(w.Board, ply, threatenedPieces)
@@ -969,10 +956,26 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	// One picker per ply, reused: nothing below this point searches at this
 	// ply again before the move loop is done (the singular and null-move
 	// verification searches come earlier).
+	// Compute enemy king ring and our attack pressure only for nodes that enter the move loop.
+	themKingSq := w.Board.KingSquare(them)
+	themKingRing := bitboard.Bitboard(0)
+	if themKingSq < types.SquareNone {
+		themKingRing = bitboard.KingAttacks(themKingSq) | bitboard.SquareBB[themKingSq]
+		if them == types.White {
+			themKingRing |= (themKingRing << 8) | (themKingRing << 16)
+		} else {
+			themKingRing |= (themKingRing >> 8) | (themKingRing >> 16)
+		}
+	}
+	myAttackers, myAttackUnits := w.Board.KingAttackersCount(them)
+	hasActiveAttack := myAttackers >= 2 || myAttackUnits >= 4
+
 	mp := &w.pickers[ply]
 	mp.reset(w.Board, ttMove, excludedMove, ply, prevMove, prevMove2, prevMove4, w.History)
 	mp.stage = StageGenCaptures
 	mp.SetNodeInfo(threatenedPieces, kingInDanger, hasActiveAttack, themKingRing)
+	mp.checkSq = ci.CheckSq
+	mp.hasCheckSq = true
 	// The picker gets its own copy, kept with it in the worker: pointing it
 	// at the local would move that local to the heap at every node.
 	w.pickerHC[ply] = hc

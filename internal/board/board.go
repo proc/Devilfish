@@ -244,15 +244,16 @@ func (b *Board) KingSquare(c types.Color) types.Square {
 }
 
 func (b *Board) PutPiece(p types.Piece, sq types.Square) {
-	if p == types.PieceNone || p.Color() >= types.ColorNone || sq >= types.SquareNone {
+	if p == types.PieceNone || p > types.BlackKing || p.Color() >= types.ColorNone || sq >= types.SquareNone {
 		return
 	}
 	b.Pieces[sq] = p
 	bb := bitboard.SquareBB[sq]
 	b.PieceBB[p] |= bb
 	b.ColorBB[p.Color()] |= bb
-	b.Hash ^= ZobristPiece[p][sq]
-	b.xorPieceKeys(p, ZobristPiece[p][sq])
+	z := ZobristPiece[p][sq]
+	b.Hash ^= z
+	b.xorPieceKeys(p, z)
 }
 
 func (b *Board) RemovePiece(sq types.Square) types.Piece {
@@ -260,20 +261,21 @@ func (b *Board) RemovePiece(sq types.Square) types.Piece {
 		return types.PieceNone
 	}
 	p := b.Pieces[sq]
-	if p == types.PieceNone || p.Color() >= types.ColorNone {
+	if p == types.PieceNone || p > types.BlackKing || p.Color() >= types.ColorNone {
 		return types.PieceNone
 	}
 	b.Pieces[sq] = types.PieceNone
 	bb := bitboard.SquareBB[sq]
 	b.PieceBB[p] &= ^bb
 	b.ColorBB[p.Color()] &= ^bb
-	b.Hash ^= ZobristPiece[p][sq]
-	b.xorPieceKeys(p, ZobristPiece[p][sq])
+	z := ZobristPiece[p][sq]
+	b.Hash ^= z
+	b.xorPieceKeys(p, z)
 	return p
 }
 
 func (b *Board) MovePiece(p types.Piece, from, to types.Square) {
-	if p == types.PieceNone || p.Color() >= types.ColorNone || from >= types.SquareNone || to >= types.SquareNone {
+	if p == types.PieceNone || p > types.BlackKing || p.Color() >= types.ColorNone || from >= types.SquareNone || to >= types.SquareNone {
 		return
 	}
 	fromBB := bitboard.SquareBB[from]
@@ -286,8 +288,9 @@ func (b *Board) MovePiece(p types.Piece, from, to types.Square) {
 	b.PieceBB[p] ^= fromToBB
 	b.ColorBB[p.Color()] ^= fromToBB
 
-	b.Hash ^= ZobristPiece[p][from] ^ ZobristPiece[p][to]
-	b.xorPieceKeys(p, ZobristPiece[p][from]^ZobristPiece[p][to])
+	z := ZobristPiece[p][from] ^ ZobristPiece[p][to]
+	b.Hash ^= z
+	b.xorPieceKeys(p, z)
 }
 
 // xorPieceKeys applies a change z of piece p's placement to the partial

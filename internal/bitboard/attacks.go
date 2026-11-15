@@ -6,6 +6,13 @@ import (
 	"devilfish/internal/types"
 )
 
+type magicEntry struct {
+	mask   Bitboard
+	magic  uint64
+	offset uint32
+	shift  uint8
+}
+
 var (
 	PawnAttacksTable   [2][64]Bitboard
 	KnightAttacksTable [64]Bitboard
@@ -14,12 +21,14 @@ var (
 	BishopMasks  [64]Bitboard
 	BishopShifts [64]uint8
 	BishopOffset [64]uint32
-	BishopTable  []Bitboard
+	BishopTable  [5248]Bitboard
+	bishopMagic  [64]magicEntry
 
 	RookMasks  [64]Bitboard
 	RookShifts [64]uint8
 	RookOffset [64]uint32
-	RookTable  []Bitboard
+	RookTable  [102400]Bitboard
+	rookMagic  [64]magicEntry
 
 	BetweenTable [64][64]Bitboard
 	LineTable    [64][64]Bitboard
@@ -210,9 +219,17 @@ func initMagics() {
 		numBits := bits.OnesCount64(mask)
 		BishopShifts[sq] = uint8(64 - numBits)
 		BishopOffset[sq] = bTotal
+		bishopMagic[sq] = magicEntry{
+			mask:   mask,
+			magic:  BishopMagics[sq],
+			offset: bTotal,
+			shift:  uint8(64 - numBits),
+		}
 		bTotal += 1 << numBits
 	}
-	BishopTable = make([]Bitboard, bTotal)
+	if int(bTotal) > len(BishopTable) {
+		panic("BishopTable too small")
+	}
 
 	for sq := 0; sq < 64; sq++ {
 		mask := BishopMasks[sq]
@@ -238,9 +255,17 @@ func initMagics() {
 		numBits := bits.OnesCount64(mask)
 		RookShifts[sq] = uint8(64 - numBits)
 		RookOffset[sq] = rTotal
+		rookMagic[sq] = magicEntry{
+			mask:   mask,
+			magic:  RookMagics[sq],
+			offset: rTotal,
+			shift:  uint8(64 - numBits),
+		}
 		rTotal += 1 << numBits
 	}
-	RookTable = make([]Bitboard, rTotal)
+	if int(rTotal) > len(RookTable) {
+		panic("RookTable too small")
+	}
 
 	for sq := 0; sq < 64; sq++ {
 		mask := RookMasks[sq]
@@ -336,13 +361,15 @@ func initBetweenAndLine() {
 }
 
 func BishopAttacks(sq types.Square, occ Bitboard) Bitboard {
-	idx := ((occ & BishopMasks[sq]) * BishopMagics[sq]) >> BishopShifts[sq]
-	return BishopTable[BishopOffset[sq]+uint32(idx)]
+	m := &bishopMagic[sq&63]
+	idx := ((occ & m.mask) * m.magic) >> m.shift
+	return BishopTable[m.offset+uint32(idx)]
 }
 
 func RookAttacks(sq types.Square, occ Bitboard) Bitboard {
-	idx := ((occ & RookMasks[sq]) * RookMagics[sq]) >> RookShifts[sq]
-	return RookTable[RookOffset[sq]+uint32(idx)]
+	m := &rookMagic[sq&63]
+	idx := ((occ & m.mask) * m.magic) >> m.shift
+	return RookTable[m.offset+uint32(idx)]
 }
 
 func QueenAttacks(sq types.Square, occ Bitboard) Bitboard {
@@ -350,7 +377,7 @@ func QueenAttacks(sq types.Square, occ Bitboard) Bitboard {
 }
 
 func KnightAttacks(sq types.Square) Bitboard {
-	return KnightAttacksTable[sq]
+	return KnightAttacksTable[sq&63]
 }
 
 func KingAttacks(sq types.Square) Bitboard {

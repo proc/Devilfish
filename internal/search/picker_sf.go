@@ -93,8 +93,11 @@ func (mp *MovePicker) scoreQuietsSF(evasion bool) {
 	occ := b.Occupied()
 
 	// Squares from which each piece type checks the enemy king directly.
-	var checkSq [7]bitboard.Bitboard
-	if ksq := b.KingSquare(them); ksq < types.SquareNone {
+	var checkSqArr [7]bitboard.Bitboard
+	checkSq := &checkSqArr
+	if mp.hasCheckSq {
+		checkSq = &mp.checkSq
+	} else if ksq := b.KingSquare(them); ksq < types.SquareNone {
 		checkSq[types.Pawn] = bitboard.PawnAttacks(them, ksq)
 		checkSq[types.Knight] = bitboard.KnightAttacks(ksq)
 		checkSq[types.Bishop] = bitboard.BishopAttacks(ksq, occ)
