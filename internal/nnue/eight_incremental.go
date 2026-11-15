@@ -71,6 +71,17 @@ func (s *eightSnap) load(b *board.Board) {
 	s.occ = b.Occupied()
 }
 
+// typesBB returns the pieces of x, of either colour, whose types are in m
+// (bit t for piece type t+1: pawn 0 .. king 5).
+func (x *eightSnap) typesBB(m uint8) bitboard.Bitboard {
+	var r bitboard.Bitboard
+	for ; m != 0; m &= m - 1 {
+		t := bits.TrailingZeros8(m)
+		r |= x.bb[(t+1)&15] | x.bb[(t+9)&15]
+	}
+	return r
+}
+
 // eightView is how one perspective numbers its features in a position.
 type eightView struct {
 	bucket int  // king input bucket (piece features)
@@ -126,11 +137,17 @@ type eightPly struct {
 	view  [2]eightView
 }
 
+// finnyEntry is one king-bucket cache entry. Its accumulator is row idx of
+// EightState.finnyAcc: keeping the accumulators in one table whose rows are
+// as wide as a weight row lets the vector kernels take one entry from
+// another directly (see sfApply).
 type finnyEntry struct {
 	ready bool
-	acc   [EightL1Size]int16
-	snap  eightSnap // pieces acc was built from
+	idx   int32
+	snap  eightSnap // pieces the accumulator was built from
 }
+
+const finnyEntries = 2 * sfKingBuckets * 2 // [pov][bucket][mirror]
 
 // rowList collects weight-row indices for one fused update.
 type rowList struct {
@@ -164,7 +181,8 @@ type EightState struct {
 	plies []eightPly
 	net   *EightNetwork // network the finny entries were built for
 
-	finny [2][sfKingBuckets][2]finnyEntry // [pov][bucket][mirror]; 8Chess networks use the first EightInputBuckets
+	finny    [finnyEntries]finnyEntry // [pov][bucket][mirror]; 8Chess networks use the first EightInputBuckets
+	finnyAcc [finnyEntries][EightL1Size]int16
 
 	pieceAdd, pieceRem [2]rowList
 	thrAdd, thrRem     [2]rowList
@@ -173,7 +191,6 @@ type EightState struct {
 	// position (see sfApply).
 	oldAdd, oldRem [2]rowList
 	hybrid         [2]bool
-	pair           [2][EightL1Size]int16
 	sfScratch      sfScratch
 
 	// Statistics.
@@ -279,6 +296,13 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 			thrInc[pov] = s.hybrid[pov]
 		}
 	}
+	// A Stockfish network keeps piece and threat rows in one table and one
+	// accumulator, so its piece rows go straight into the threat lists.
+	pieceAdd, pieceRem := &s.pieceAdd, &s.pieceRem
+	if net.sf != nil {
+		pieceAdd, pieceRem = &s.thrAdd, &s.thrRem
+	}
+
 	// The stored position is one move back and numbered the same way from
 	// both sides: take the threat changes from the move (move_delta.go).
 	fromMove := false
@@ -292,7 +316,7 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 		}
 		d := changedSquares(&earlier, &cs)
 		for pov := 0; pov < 2; pov++ {
-			pieceDelta(&earlier, &cs, d, &views[pov], pov, &s.pieceAdd[pov], &s.pieceRem[pov])
+			pieceDelta(&earlier, &cs, d, &views[pov], pov, &pieceAdd[pov], &pieceRem[pov])
 		}
 		pawnPairs(&earlier, d, &views, bothViews, &s.thrRem)
 		pawnPairs(&cs, d, &views, bothViews, &s.thrAdd)
@@ -301,7 +325,7 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 		d := changedSquares(&base.snap, &cs)
 		for pov := 0; pov < 2; pov++ {
 			if pieceInc[pov] {
-				pieceDelta(&base.snap, &cs, d, &views[pov], pov, &s.pieceAdd[pov], &s.pieceRem[pov])
+				pieceDelta(&base.snap, &cs, d, &views[pov], pov, &pieceAdd[pov], &pieceRem[pov])
 			}
 		}
 		if thrInc[0] || thrInc[1] {
@@ -332,15 +356,10 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 	// follows the rest of a row once it is being read. (Measured: fetching
 	// whole rows up front is slower than not prefetching at all.)
 	for pov := 0; pov < 2 && rowPrefetch; pov++ {
-		if pieceInc[pov] {
+		if pieceInc[pov] && net.sf == nil {
 			a, r := &s.pieceAdd[pov], &s.pieceRem[pov]
-			if net.sf != nil {
-				prefetchRows(unsafe.Pointer(&net.FTThreatWeights[0]), &a.rows[0], a.n, 10, 2)
-				prefetchRows(unsafe.Pointer(&net.FTThreatWeights[0]), &r.rows[0], r.n, 10, 2)
-			} else {
-				prefetchRows(unsafe.Pointer(&net.FTPieceWeights[0]), &a.rows[0], a.n, 11, 2)
-				prefetchRows(unsafe.Pointer(&net.FTPieceWeights[0]), &r.rows[0], r.n, 11, 2)
-			}
+			prefetchRows(unsafe.Pointer(&net.FTPieceWeights[0]), &a.rows[0], a.n, 11, 2)
+			prefetchRows(unsafe.Pointer(&net.FTPieceWeights[0]), &r.rows[0], r.n, 11, 2)
 		}
 		a, r := &s.thrAdd[pov], &s.thrRem[pov]
 		prefetchRows(unsafe.Pointer(&net.FTThreatWeights[0]), &a.rows[0], a.n, 10, 2)
@@ -365,7 +384,7 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 			net.applyPieceRows(&cur.pst[pov], &base.pst[pov], a, r)
 			s.RowOps += uint64(a.n + r.n)
 		} else {
-			cur.pst[pov] = s.finnyRefresh(net, &cs, &views[pov], pov).acc
+			cur.pst[pov] = *s.accOf(s.finnyRefresh(net, &cs, &views[pov], pov))
 		}
 
 		a, r := &s.thrAdd[pov], &s.thrRem[pov]
@@ -422,11 +441,18 @@ func pieceDelta(old, cur *eightSnap, d bitboard.Bitboard, v *eightView, pov int,
 
 // finnyEntry returns the cache entry for perspective pov numbered as v.
 func (s *EightState) finnyEntry(v *eightView, pov int) *finnyEntry {
-	m := 0
+	i := (pov*sfKingBuckets + v.bucket) * 2
 	if v.mirror {
-		m = 1
+		i++
 	}
-	return &s.finny[pov][v.bucket][m]
+	e := &s.finny[i]
+	e.idx = int32(i)
+	return e
+}
+
+// accOf returns the accumulator of cache entry e.
+func (s *EightState) accOf(e *finnyEntry) *[EightL1Size]int16 {
+	return &s.finnyAcc[e.idx]
 }
 
 // finnyRefresh builds the piece accumulator (bias plus piece rows) for a
@@ -435,8 +461,9 @@ func (s *EightState) finnyEntry(v *eightView, pov int) *finnyEntry {
 // side. It returns the cache entry, which then holds that accumulator.
 func (s *EightState) finnyRefresh(net *EightNetwork, cs *eightSnap, v *eightView, pov int) *finnyEntry {
 	e := s.finnyEntry(v, pov)
+	acc := s.accOf(e)
 	if !e.ready {
-		e.acc = net.FTBiases
+		*acc = net.FTBiases
 		e.snap = eightSnap{}
 		e.ready = true
 	}
@@ -444,7 +471,7 @@ func (s *EightState) finnyRefresh(net *EightNetwork, cs *eightSnap, v *eightView
 	a, r := &s.pieceAdd[pov], &s.pieceRem[pov]
 	a.n, r.n = 0, 0
 	pieceDelta(&e.snap, cs, d, v, pov, a, r)
-	net.applyPieceRows(&e.acc, &e.acc, a, r)
+	net.applyPieceRows(acc, acc, a, r)
 	e.snap = *cs
 	s.RowOps += uint64(a.n + r.n)
 	s.FinnyRefreshes++
@@ -497,12 +524,8 @@ func (s *EightState) sfApply(net *EightNetwork, base, cur *eightPly, cs *eightSn
 		dst := &cur.pst[pov]
 		switch {
 		case pieceInc[pov]:
-			// The threat numbering is part of the view, so it is unchanged too.
-			a.append(&s.pieceAdd[pov])
-			r.append(&s.pieceRem[pov])
-			if a.over || r.over {
-				return false
-			}
+			// The threat numbering is part of the view, so it is unchanged
+			// too. Prepare put the piece rows in the same lists.
 			fusedThreat(dst, &base.pst[pov], w, &a.rows[0], a.n, &r.rows[0], r.n)
 		case s.hybrid[pov]:
 			// base = old entry + oldAdd - oldRem + threats, so
@@ -516,13 +539,14 @@ func (s *EightState) sfApply(net *EightNetwork, base, cur *eightPly, cs *eightSn
 			}
 			fusedThreat(dst, &base.pst[pov], w, &a.rows[0], a.n, &r.rows[0], r.n)
 			e := s.finnyRefresh(net, cs, &views[pov], pov)
-			s.pair[0], s.pair[1] = e.acc, old.acc
-			plus, minus := [1]int32{0}, [1]int32{1}
-			fusedPiece(dst, dst, &s.pair[0][0], &plus[0], 1, &minus[0], 1)
+			// The cache accumulators are rows of one table, so the kernel
+			// adds the new entry and takes out the old one in place.
+			plus, minus := [1]int32{e.idx}, [1]int32{old.idx}
+			fusedPiece(dst, dst, &s.finnyAcc[0][0], &plus[0], 1, &minus[0], 1)
 		default:
 			e := s.finnyRefresh(net, cs, &views[pov], pov)
 			s.ThreatRebuilds++
-			fusedThreat(dst, &e.acc, w, &a.rows[0], a.n, &r.rows[0], r.n)
+			fusedThreat(dst, s.accOf(e), w, &a.rows[0], a.n, &r.rows[0], r.n)
 		}
 		s.RowOps += uint64(a.n + r.n)
 	}
@@ -530,12 +554,8 @@ func (s *EightState) sfApply(net *EightNetwork, base, cur *eightPly, cs *eightSn
 }
 
 func (s *EightState) resetFinny(net *EightNetwork) {
-	for pov := range s.finny {
-		for b := range s.finny[pov] {
-			for m := range s.finny[pov][b] {
-				s.finny[pov][b][m].ready = false
-			}
-		}
+	for i := range s.finny {
+		s.finny[i].ready = false
 	}
 	s.net = net
 }
@@ -559,6 +579,12 @@ func emitThreat(tt *threatTables, ac, a, tc, t int, views *[2]eightView, want [2
 // targets at once: everything that depends only on the attacker and the
 // perspective is looked up once, not once per target.
 func emitFrom(tt *threatTables, x *eightSnap, ac, sq int, targets uint64, views *[2]eightView, want [2]bool, out *[2]rowList) {
+	if m := tt.noTarget[ac>>1]; m != 0 {
+		if m == 0x3F {
+			return // an attacker type with no features (a Stockfish king)
+		}
+		targets &^= uint64(x.typesBB(m))
+	}
 	if targets == 0 {
 		return
 	}
@@ -614,6 +640,12 @@ func emitFrom(tt *threatTables, x *eightSnap, ac, sq int, targets uint64, views 
 // emitTo is emitThreat for one target (piece code tc on sq) and all of
 // attackers at once.
 func emitTo(tt *threatTables, x *eightSnap, tc, sq int, attackers uint64, views *[2]eightView, want [2]bool, out *[2]rowList) {
+	if m := tt.noAttacker[tc>>1]; m != 0 {
+		if m == 0x3F {
+			return // a target type with no features (a Stockfish king)
+		}
+		attackers &^= uint64(x.typesBB(m))
+	}
 	if attackers == 0 {
 		return
 	}
@@ -728,13 +760,24 @@ func threatDelta(tt *threatTables, old, cur *eightSnap, d bitboard.Bitboard, vie
 	threatsOf(tt, cur, old.occ, d, sl, views, want, add)
 }
 
+// noFeatureTypes returns the attacker types that form no threat feature.
+func noFeatureTypes(tt *threatTables) uint8 {
+	var m uint8
+	for t, n := range tt.noTarget {
+		if n == 0x3F {
+			m |= 1 << t
+		}
+	}
+	return m
+}
+
 // fullThreats lists every threat feature of x for one perspective.
 func fullThreats(tt *threatTables, x *eightSnap, v *eightView, pov int, out *rowList) {
 	occ := uint64(x.occ)
-	for a := x.occ; a != 0; {
+	for a := x.occ &^ x.typesBB(noFeatureTypes(tt)); a != 0; {
 		sq := int(bitboard.PopLSB(&a))
 		ac := pieceCode(x.pieces[sq])
-		for t := attacksWithOcc(ac, sq, occ) & occ; t != 0; t &= t - 1 {
+		for t := attacksWithOcc(ac, sq, occ) & occ &^ uint64(x.typesBB(tt.noTarget[ac>>1])); t != 0; t &= t - 1 {
 			to := bits.TrailingZeros64(t)
 			if idx := getThreatIndex(tt, ac, sq, pieceCode(x.pieces[to]), to, v.mirror, pov); idx >= 0 {
 				out.push(int32(idx))

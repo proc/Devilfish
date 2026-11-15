@@ -66,6 +66,12 @@ type threatTables struct {
 	offset   [12][64]int32     // attacks of this piece from the squares before `from`
 	attack   [12][64][64]uint8 // attacked squares of this piece on `from` below `to`
 	features int
+
+	// By piece type (pawn 0 .. king 5), as bit sets of piece types: the
+	// targets an attacker of that type never forms a feature with, and the
+	// attackers that never form one with a target of that type. Lets the
+	// feature listings drop such pairs before looking them up.
+	noTarget, noAttacker [6]uint8
 }
 
 // buildThreatTables builds the lookups. Pieces are numbered type*2+colour
@@ -107,6 +113,10 @@ func buildThreatTables(interaction [6][6]int32, targetCount [6]int32) *threatTab
 			defColor := attacked & 1
 
 			m := interaction[atkType][defType]
+			if m < 0 {
+				t.noTarget[atkType] |= 1 << defType
+				t.noAttacker[defType] |= 1 << atkType
+			}
 			base := offsetTable[attacking] +
 				(int32(defColor)*(targetCount[atkType]/2)+m)*pieceOffset[attacking]
 

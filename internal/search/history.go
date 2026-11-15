@@ -102,12 +102,26 @@ type histCtx struct {
 
 // Context returns the history rows for the node at ply, where b is the
 // position and threatened the side to move's pieces under tactical threat.
+// zeroContRow is a read-only zeroed continuation-history row used so
+// read paths (Order, OrderSF, Evasion, Stat, Prune) can index cont/contFar
+// without nil checks. Write paths (Update, updateContSF) must skip it.
+var zeroContRow contRow
+
+func orZeroRow(r *contRow) *contRow {
+	if r == nil {
+		return &zeroContRow
+	}
+	return r
+}
+
 func (h *SearchHistory) Context(b *board.Board, ply int, threatened bitboard.Bitboard) histCtx {
 	us := b.SideToMove
 	c := histCtx{
 		main:       &h.Main[us],
 		threatened: threatened,
 		pawn:       &h.PawnHist[b.PawnHash%pawnHistSize],
+		cont:       [3]*contRow{&zeroContRow, &zeroContRow, &zeroContRow},
+		contFar:    [2]*contRow{&zeroContRow, &zeroContRow},
 	}
 	if us == types.White {
 		p := b.PieceBB[types.BlackPawn]
@@ -118,9 +132,16 @@ func (h *SearchHistory) Context(b *board.Board, ply int, threatened bitboard.Bit
 	}
 	if ply >= 0 && ply < MaxPly {
 		i := ply + contPad
-		c.cont = [3]*contRow{h.contStack[i-1], h.contStack[i-2], h.contStack[i-4]}
+		c.cont = [3]*contRow{
+			orZeroRow(h.contStack[i-1]),
+			orZeroRow(h.contStack[i-2]),
+			orZeroRow(h.contStack[i-4]),
+		}
 		if P.MoveOrder != 0 || P.HistUpdate != 0 {
-			c.contFar = [2]*contRow{h.contStack[i-3], h.contStack[i-6]}
+			c.contFar = [2]*contRow{
+				orZeroRow(h.contStack[i-3]),
+				orZeroRow(h.contStack[i-6]),
+			}
 			if ply < lowPlySize {
 				c.low = &h.LowPly[ply]
 			}
@@ -132,11 +153,21 @@ func (h *SearchHistory) Context(b *board.Board, ply int, threatened bitboard.Bit
 // contCtx returns only the continuation-history rows of the node at ply,
 // for updating the history of the move that node played from a node below.
 func (h *SearchHistory) contCtx(ply int) histCtx {
-	var c histCtx
+	c := histCtx{
+		cont:    [3]*contRow{&zeroContRow, &zeroContRow, &zeroContRow},
+		contFar: [2]*contRow{&zeroContRow, &zeroContRow},
+	}
 	if ply >= 0 && ply < MaxPly {
 		i := ply + contPad
-		c.cont = [3]*contRow{h.contStack[i-1], h.contStack[i-2], h.contStack[i-4]}
-		c.contFar = [2]*contRow{h.contStack[i-3], h.contStack[i-6]}
+		c.cont = [3]*contRow{
+			orZeroRow(h.contStack[i-1]),
+			orZeroRow(h.contStack[i-2]),
+			orZeroRow(h.contStack[i-4]),
+		}
+		c.contFar = [2]*contRow{
+			orZeroRow(h.contStack[i-3]),
+			orZeroRow(h.contStack[i-6]),
+		}
 	}
 	return c
 }
@@ -156,13 +187,8 @@ func (c *histCtx) mainEntry(m types.Move) *int16 {
 // Order is the score quiet moves are sorted by: every table.
 func (c *histCtx) Order(piece types.Piece, m types.Move) int32 {
 	to := m.To()
-	s := int32(*c.mainEntry(m)) + int32(c.pawn[piece][to])
-	for _, row := range c.cont {
-		if row != nil {
-			s += int32(row[piece][to])
-		}
-	}
-	return s
+	return int32(*c.mainEntry(m)) + int32(c.pawn[piece][to]) +
+		int32(c.cont[0][piece][to]) + int32(c.cont[1][piece][to]) + int32(c.cont[2][piece][to])
 }
 
 // OrderSF is the history part of the score quiet moves are sorted by under
@@ -171,17 +197,9 @@ func (c *histCtx) Order(piece types.Piece, m types.Move) int32 {
 // once, and the low-ply history near the root.
 func (c *histCtx) OrderSF(piece types.Piece, m types.Move, ply int) int32 {
 	to := m.To()
-	s := 2*int32(*c.mainEntry(m)) + 2*int32(c.pawn[piece][to])
-	for _, row := range c.cont {
-		if row != nil {
-			s += int32(row[piece][to])
-		}
-	}
-	for _, row := range c.contFar {
-		if row != nil {
-			s += int32(row[piece][to])
-		}
-	}
+	s := 2*int32(*c.mainEntry(m)) + 2*int32(c.pawn[piece][to]) +
+		int32(c.cont[0][piece][to]) + int32(c.cont[1][piece][to]) + int32(c.cont[2][piece][to]) +
+		int32(c.contFar[0][piece][to]) + int32(c.contFar[1][piece][to])
 	if c.low != nil {
 		s += 8 * int32(c.low[m.From()][to]) / int32(1+ply)
 	}
@@ -191,11 +209,7 @@ func (c *histCtx) OrderSF(piece types.Piece, m types.Move, ply int) int32 {
 // Evasion is the score non-captures are sorted by when in check under
 // P.MoveOrder 1: main history and the continuation history one ply back.
 func (c *histCtx) Evasion(piece types.Piece, m types.Move) int32 {
-	s := int32(*c.mainEntry(m))
-	if c.cont[0] != nil {
-		s += int32(c.cont[0][piece][m.To()])
-	}
-	return s
+	return int32(*c.mainEntry(m)) + int32(c.cont[0][piece][m.To()])
 }
 
 // Stat is the score late-move reductions are adjusted by (main and
@@ -208,42 +222,20 @@ func (c *histCtx) Evasion(piece types.Piece, m types.Move) int32 {
 func (c *histCtx) Stat(piece types.Piece, m types.Move) int32 {
 	if P.HistUpdate != 0 {
 		to := m.To()
-		s := 2252 * int32(*c.mainEntry(m))
-		if c.cont[0] != nil {
-			s += 1126 * int32(c.cont[0][piece][to])
-		}
-		if c.cont[1] != nil {
-			s += 1093 * int32(c.cont[1][piece][to])
-		}
+		s := 2252*int32(*c.mainEntry(m)) +
+			1126*int32(c.cont[0][piece][to]) +
+			1093*int32(c.cont[1][piece][to])
 		return s / 1024
 	}
-	s := c.Prune(piece, m)
-	if c.cont[2] != nil {
-		s += int32(c.cont[2][piece][m.To()])
-	}
-	return s
+	return c.Prune(piece, m) + int32(c.cont[2][piece][m.To()])
 }
 
 func (c *histCtx) Prune(piece types.Piece, m types.Move) int32 {
 	to := m.To()
 	if P.HistUpdate != 0 {
-		s := int32(c.pawn[piece][to])
-		if c.cont[0] != nil {
-			s += int32(c.cont[0][piece][to])
-		}
-		if c.cont[1] != nil {
-			s += int32(c.cont[1][piece][to])
-		}
-		return s
+		return int32(c.pawn[piece][to]) + int32(c.cont[0][piece][to]) + int32(c.cont[1][piece][to])
 	}
-	s := int32(*c.mainEntry(m))
-	if c.cont[0] != nil {
-		s += int32(c.cont[0][piece][to])
-	}
-	if c.cont[1] != nil {
-		s += int32(c.cont[1][piece][to])
-	}
-	return s
+	return int32(*c.mainEntry(m)) + int32(c.cont[0][piece][to]) + int32(c.cont[1][piece][to])
 }
 
 // Update moves every table's entry for the quiet move m by bonus (negative to
@@ -256,14 +248,14 @@ func (c *histCtx) Update(piece types.Piece, m types.Move, bonus int32) {
 	histGravity(c.mainEntry(m), bonus)
 	histGravity(&c.pawn[piece][to], bonus)
 	for _, row := range c.cont {
-		if row != nil {
+		if row != nil && row != &zeroContRow {
 			histGravity(&row[piece][to], bonus)
 		}
 	}
 	// The far continuation histories and the low-ply history learn more
 	// slowly, about as Stockfish's do relative to its nearer ones.
 	for _, row := range c.contFar {
-		if row != nil {
+		if row != nil && row != &zeroContRow {
 			histGravity(&row[piece][to], bonus/2)
 		}
 	}
@@ -328,7 +320,7 @@ func (c *histCtx) updateContSF(piece types.Piece, to types.Square, bonus int32, 
 		if inCheck && i >= 2 {
 			break
 		}
-		if row == nil {
+		if row == nil || row == &zeroContRow {
 			continue
 		}
 		e := &row[piece][to]

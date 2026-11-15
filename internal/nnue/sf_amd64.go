@@ -11,6 +11,9 @@ func nonzeroChunksAVX2(ft *[EightL1Size]uint8, out *uint16) int
 func nonzeroChunksSSE2(ft *[EightL1Size]uint8, out *uint16) int
 
 //go:noescape
+func chunkDot32VNNI512(idx *uint16, n int, in *uint8, wt *int8, out *[32]int32)
+
+//go:noescape
 func chunkDot32AVX2(idx *uint16, n int, in *uint8, wt *int8, out *[32]int32)
 
 //go:noescape
@@ -42,10 +45,12 @@ var hasSSSE3 = func() bool {
 	return ecx1&(1<<9) != 0
 }()
 
-// sfDotTier says which group-of-four dot-product kernels to use: 2 for AVX2,
-// 1 for SSSE3, 0 for none. simd changes only in tests.
+// sfDotTier says which group-of-four dot-product kernels to use: 3 for
+// AVX-512 + VNNI, 2 for AVX2, 1 for SSSE3, 0 for none. simd changes only in tests.
 func sfDotTier() int {
 	switch {
+	case simd == simdAVX512 && vnni:
+		return 3
 	case simd >= simdAVX2:
 		return 2
 	case simd == simdSSE2 && hasSSSE3:
@@ -68,6 +73,9 @@ func sparse32(idx *uint16, n int, in *uint8, wt *int8, out *[32]int32) {
 // SSSE3 it runs as two 16-output layers through the 8Chess kernels.
 func sfFirstLayer(ft *[EightL1Size]uint8, st *sfStack, out *[32]int32, idx *[EightL1Size + 8]uint16) {
 	switch sfDotTier() {
+	case 3:
+		n := nonzeroChunksAVX2(ft, &idx[0])
+		chunkDot32VNNI512(&idx[0], n, &ft[0], &st.fc0Chunk[0][0][0], out)
 	case 2:
 		n := nonzeroChunksAVX2(ft, &idx[0])
 		chunkDot32AVX2(&idx[0], n, &ft[0], &st.fc0Chunk[0][0][0], out)
@@ -90,6 +98,8 @@ var sfAllGroups = [16]uint16{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 1
 // 64 activations in act[:64].
 func sfSecondLayer(act *[128]uint8, st *sfStack, out *[32]int32) {
 	switch sfDotTier() {
+	case 3:
+		chunkDot32VNNI512(&sfAllGroups[0], len(sfAllGroups), &act[0], &st.fc1Chunk[0][0][0], out)
 	case 2:
 		chunkDot32AVX2(&sfAllGroups[0], len(sfAllGroups), &act[0], &st.fc1Chunk[0][0][0], out)
 	case 1:

@@ -26,7 +26,7 @@ const (
 // costs far more than a probe, and the search asks for the same positions
 // again and again: with 2 MB of cache 27% of the requests were answered from
 // it; 16 MB made the search 6 to 8% faster and 64 MB only 9%.
-const evalCacheSize = 1 << 21
+const evalCacheSize = 1 << 20
 
 const wdlCacheSize = 4096
 

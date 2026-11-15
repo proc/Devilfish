@@ -86,6 +86,50 @@ block:
 // out receives the sums (no bias).
 // ---------------------------------------------------------------------------
 
+// func chunkDot32VNNI512(idx *uint16, n int, in *uint8, wt *int8, out *[32]int32)
+TEXT ·chunkDot32VNNI512(SB), NOSPLIT, $0-40
+	MOVQ idx+0(FP), SI
+	MOVQ n+8(FP), CX
+	MOVQ in+16(FP), R12
+	MOVQ wt+24(FP), DX
+	MOVQ out+32(FP), DI
+	VPXORD Z0, Z0, Z0
+	VPXORD Z1, Z1, Z1
+	VPXORD Z2, Z2, Z2
+	VPXORD Z3, Z3, Z3
+	CMPQ CX, $2
+	JB   tail
+pair:
+	MOVWLZX (SI), R8
+	MOVWLZX 2(SI), R9
+	VPBROADCASTD (R12)(R8*4), Z4
+	VPBROADCASTD (R12)(R9*4), Z5
+	SHLQ $7, R8
+	SHLQ $7, R9
+	VPDPBUSD 0(DX)(R8*1), Z4, Z0
+	VPDPBUSD 64(DX)(R8*1), Z4, Z1
+	VPDPBUSD 0(DX)(R9*1), Z5, Z2
+	VPDPBUSD 64(DX)(R9*1), Z5, Z3
+	ADDQ $4, SI
+	SUBQ $2, CX
+	CMPQ CX, $2
+	JAE  pair
+tail:
+	TESTQ CX, CX
+	JZ    done
+	MOVWLZX (SI), R8
+	VPBROADCASTD (R12)(R8*4), Z4
+	SHLQ $7, R8
+	VPDPBUSD 0(DX)(R8*1), Z4, Z0
+	VPDPBUSD 64(DX)(R8*1), Z4, Z1
+done:
+	VPADDD Z2, Z0, Z0
+	VPADDD Z3, Z1, Z1
+	VMOVDQU64 Z0, 0(DI)
+	VMOVDQU64 Z1, 64(DI)
+	VZEROUPPER
+	RET
+
 // func chunkDot32AVX2(idx *uint16, n int, in *uint8, wt *int8, out *[32]int32)
 TEXT ·chunkDot32AVX2(SB), NOSPLIT, $0-40
 	MOVQ idx+0(FP), SI
