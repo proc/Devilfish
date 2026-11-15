@@ -579,6 +579,13 @@ func emitFrom(tt *threatTables, x *eightSnap, ac, sq int, targets uint64, views 
 		base := int(tt.offset[attacking][from])
 		atk := &tt.attack[attacking][from]
 		l := &out[pov]
+		if l.over {
+			continue
+		}
+		n := l.n
+		const maxRows = len(l.rows)
+		rows := &l.rows
+		featLimit := uint(tt.features)
 		for t := targets; t != 0; t &= t - 1 {
 			sq2 := bits.TrailingZeros64(t)
 			to := sq2 ^ flip
@@ -591,10 +598,16 @@ func emitFrom(tt *threatTables, x *eightSnap, ac, sq int, targets uint64, views 
 			if pairBase < 0 {
 				continue
 			}
-			if idx := int(pairBase) + base + int(atk[to]); idx < tt.features {
-				l.push(int32(idx))
+			if idx := uint(int(pairBase) + base + int(atk[to])); idx < featLimit {
+				if n >= maxRows {
+					l.over = true
+					break
+				}
+				rows[n] = int32(idx)
+				n++
 			}
 		}
+		l.n = n
 	}
 }
 
@@ -618,6 +631,13 @@ func emitTo(tt *threatTables, x *eightSnap, tc, sq int, attackers uint64, views 
 		to := sq ^ flip
 		attacked := tc ^ pov
 		l := &out[pov]
+		if l.over {
+			continue
+		}
+		n := l.n
+		const maxRows = len(l.rows)
+		rows := &l.rows
+		featLimit := uint(tt.features)
 		for a := attackers; a != 0; a &= a - 1 {
 			sq2 := bits.TrailingZeros64(a)
 			from := sq2 ^ flip
@@ -631,10 +651,16 @@ func emitTo(tt *threatTables, x *eightSnap, tc, sq int, attackers uint64, views 
 			if pairBase < 0 {
 				continue
 			}
-			if idx := int(pairBase) + int(tt.offset[attacking][from]) + int(tt.attack[attacking][from][to]); idx < tt.features {
-				l.push(int32(idx))
+			if idx := uint(int(pairBase) + int(tt.offset[attacking][from]) + int(tt.attack[attacking][from][to])); idx < featLimit {
+				if n >= maxRows {
+					l.over = true
+					break
+				}
+				rows[n] = int32(idx)
+				n++
 			}
 		}
+		l.n = n
 	}
 }
 

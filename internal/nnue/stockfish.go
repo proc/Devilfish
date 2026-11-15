@@ -582,25 +582,43 @@ type sfMaterial struct {
 	spread   float64 // how gradually the win rate rises with the score (the model's b)
 }
 
-func sfMaterialOf(b *board.Board) (m sfMaterial) {
-	us, them := b.SideToMove, b.SideToMove.Other()
-	value := [...]int64{types.Pawn: 208, types.Knight: 781, types.Bishop: 825, types.Rook: 1276, types.Queen: 2538}
-	weight := [...]int64{types.Pawn: 1, types.Knight: 3, types.Bishop: 3, types.Rook: 5, types.Queen: 9}
-	var count int64
-	for t := types.Pawn; t <= types.Queen; t++ {
-		mine := int64(bitboard.Count(b.PieceBB[types.MakePiece(us, t)]))
-		theirs := int64(bitboard.Count(b.PieceBB[types.MakePiece(them, t)]))
-		m.simple += value[t] * (mine - theirs)
-		if t == types.Pawn {
-			m.total += 521 * (mine + theirs)
-		} else {
-			m.total += value[t] * (mine + theirs)
-		}
-		count += weight[t] * (mine + theirs)
+var (
+	sfInvUnitsPer [79]float64
+	sfSpreadTable [79]float64
+)
+
+func init() {
+	for c := 17; c <= 78; c++ {
+		x := float64(c) / 58.0
+		unitsPer := ((-142.72052667*x+372.35176398)*x-340.71073572)*x + 415.23490212
+		sfInvUnitsPer[c] = 100.0 / unitsPer
+		sfSpreadTable[c] = ((5.93832785*x+15.61267078)*x-30.57816876)*x + 69.63866711
 	}
-	x := float64(min(max(count, 17), 78)) / 58.0
-	m.unitsPer = ((-142.72052667*x+372.35176398)*x-340.71073572)*x + 415.23490212
-	m.spread = ((5.93832785*x+15.61267078)*x-30.57816876)*x + 69.63866711
+}
+
+func sfMaterialFast(b *board.Board) (simple, total, count int64) {
+	us, them := b.SideToMove, b.SideToMove.Other()
+	wp := int64(bitboard.Count(b.PieceBB[types.MakePiece(us, types.Pawn)]))
+	bp := int64(bitboard.Count(b.PieceBB[types.MakePiece(them, types.Pawn)]))
+	wn := int64(bitboard.Count(b.PieceBB[types.MakePiece(us, types.Knight)]))
+	bn := int64(bitboard.Count(b.PieceBB[types.MakePiece(them, types.Knight)]))
+	wb := int64(bitboard.Count(b.PieceBB[types.MakePiece(us, types.Bishop)]))
+	bb := int64(bitboard.Count(b.PieceBB[types.MakePiece(them, types.Bishop)]))
+	wr := int64(bitboard.Count(b.PieceBB[types.MakePiece(us, types.Rook)]))
+	br := int64(bitboard.Count(b.PieceBB[types.MakePiece(them, types.Rook)]))
+	wq := int64(bitboard.Count(b.PieceBB[types.MakePiece(us, types.Queen)]))
+	bq := int64(bitboard.Count(b.PieceBB[types.MakePiece(them, types.Queen)]))
+	simple = 208*(wp-bp) + 781*(wn-bn) + 825*(wb-bb) + 1276*(wr-br) + 2538*(wq-bq)
+	total = 521*(wp+bp) + 781*(wn+bn) + 825*(wb+bb) + 1276*(wr+br) + 2538*(wq+bq)
+	count = min(max((wp+bp)+3*(wn+bn+wb+bb)+5*(wr+br)+9*(wq+bq), 17), 78)
+	return simple, total, count
+}
+
+func sfMaterialOf(b *board.Board) (m sfMaterial) {
+	var count int64
+	m.simple, m.total, count = sfMaterialFast(b)
+	m.unitsPer = 100.0 / sfInvUnitsPer[count]
+	m.spread = sfSpreadTable[count]
 	return m
 }
 
@@ -618,11 +636,11 @@ func sfAlignment(simple, nnue int64) int64 {
 // then its conversion from internal units, under which 100 is the advantage
 // that wins half the time.
 func sfToCP(nnue int32, b *board.Board) int32 {
-	m := sfMaterialOf(b)
+	simple, total, count := sfMaterialFast(b)
 	n := int64(nnue)
-	base := n + n*sfAlignment(m.simple, n)/65536
-	v := base * (90649 + m.total) / 90649
-	return int32(math.Round(100 * float64(v) / m.unitsPer))
+	base := n + n*sfAlignment(simple, n)/65536
+	v := base * (90649 + total) / 90649
+	return int32(math.Round(float64(v) * sfInvUnitsPer[count]))
 }
 
 // WDL gives the chances, in thousandths, that the side to move wins, draws
