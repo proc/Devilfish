@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 
@@ -36,6 +37,7 @@ func printHelp() {
 	fmt.Println("  -hash <MB>, --hash <MB>     Transposition Table size in Megabytes")
 	fmt.Println("  -c, --config <path>         Path to JSON config file (default: ./config.json or ~/.devilfish/config.json)")
 	fmt.Println("  -l, --log <path>            Path to log file for engine internal details, profiling, and Syzygy status")
+	fmt.Println("  --cpuprofile <path>         Write a CPU profile (pprof/PGO) to <path>")
 	fmt.Println("  --multipv <N>               Number of principal variations to calculate (default: 1)")
 	fmt.Println("  --eval-file <path>          NNUE network: a file, <stockfish> (default, the built-in Stockfish network) or <8chess> (the built-in 8Chess network)")
 	fmt.Println("  --no-nnue                   Disable NNUE evaluation (use classical HCE)")
@@ -57,6 +59,7 @@ func main() {
 	var syzygyPath string
 	var syzygyPathSet bool
 	var cliLogPath string
+	var cpuProfilePath string
 	var cliThreads int
 	var cliHash int
 	var cliMultiPV int
@@ -178,6 +181,20 @@ func main() {
 		if strings.HasPrefix(arg, "--eval-file=") || strings.HasPrefix(arg, "-eval-file=") {
 			parts := strings.SplitN(arg, "=", 2)
 			evalFilePath = parts[1]
+			continue
+		}
+
+		// Handle --cpuprofile / -cpuprofile
+		if arg == "-cpuprofile" || arg == "--cpuprofile" {
+			if i+1 < len(args) {
+				cpuProfilePath = args[i+1]
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--cpuprofile=") || strings.HasPrefix(arg, "-cpuprofile=") {
+			parts := strings.SplitN(arg, "=", 2)
+			cpuProfilePath = parts[1]
 			continue
 		}
 
@@ -419,6 +436,22 @@ func main() {
 		statusStr, netInfo.FilePath, netInfo.Architecture, netInfo.SIMD, netInfo.NumParameters, float64(netInfo.SizeBytes)/1024.0)
 
 	// 5. Run benchmark or UCI loop
+	if cpuProfilePath != "" {
+		f, err := os.Create(cpuProfilePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating CPU profile %q: %v\n", cpuProfilePath, err)
+			os.Exit(1)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			_ = f.Close()
+			fmt.Fprintf(os.Stderr, "Error starting CPU profile: %v\n", err)
+			os.Exit(1)
+		}
+		defer func() {
+			pprof.StopCPUProfile()
+			_ = f.Close()
+		}()
+	}
 	if benchArgs != nil {
 		u := uci.New(os.Stdin, os.Stdout, cfg)
 		u.RunBench(benchArgs)
