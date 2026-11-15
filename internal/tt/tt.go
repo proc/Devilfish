@@ -45,98 +45,108 @@ func ScoreFromTT(score int32, ply int) int32 {
 	return score
 }
 
-type Entry struct {
-	Key  uint64
-	Data uint64
-}
-
-// Data packing:
-// Bits 0..15:  Move (16 bits)
-// Bits 16..47: Score (32 bits, int32 cast to uint32)
-// Bits 48..55: Depth (8 bits, int8 cast to uint8)
-// Bits 56..59: NodeType (4 bits)
-// Bits 60..63: Age (4 bits)
-
 // EvalNone marks an entry without a static evaluation (e.g. side in check).
 const EvalNone int32 = -32768
 
-// An entry's data word: move (16 bits), score (16), static eval (16),
-// depth (8), bound type (4), age (4). Scores and evals fit in int16: every
-// score is within +-Infinity (32000).
-func packData(m types.Move, score int32, depth int8, nodeType uint8, age uint8) uint64 {
-	return packDataEval(m, score, EvalNone, depth, nodeType, age)
+// entry is one stored position, 10 bytes, laid out as Stockfish's:
+//
+//	key    upper 16 bits of the hash (the bucket index comes from the lower bits)
+//	move   best move
+//	score  search score; every score is within +-Infinity (32000)
+//	eval   static evaluation, or EvalNone
+//	depth  search depth plus one; 0 marks an empty entry
+//	info   bound type and PV flag (low 4 bits), age (high 4 bits)
+//
+// Sixteen bits of key are not proof of identity: about one probe in eleven
+// thousand that should miss matches another position's entry instead. Its
+// score is then used as if it were this position's, as in Stockfish; its
+// move is checked for legality by the search before it is played.
+type entry struct {
+	key   uint16
+	move  uint16
+	score int16
+	eval  int16
+	depth uint8
+	info  uint8
 }
 
-func packDataEval(m types.Move, score, eval int32, depth int8, nodeType uint8, age uint8) uint64 {
-	return uint64(m) |
-		(uint64(uint16(int16(score))) << 16) |
-		(uint64(uint16(int16(eval))) << 32) |
-		(uint64(uint8(depth)) << 48) |
-		(uint64(nodeType&0x0F) << 56) |
-		(uint64(age&0x0F) << 60)
+// bucketSize entries share one 64-byte cache line. A position maps to one
+// bucket and may sit in any of its entries, so a deep result is not lost the
+// moment another position lands on the same index. (Entries used to be 16
+// bytes, four to a line: the same memory now holds half as many again.)
+const bucketSize = 6
+
+type bucket struct {
+	e [bucketSize]entry
+	_ [64 - bucketSize*10]byte
 }
 
-func unpackData(data uint64) (m types.Move, score int32, depth int8, nodeType uint8, age uint8) {
-	m = types.Move(data & 0xFFFF)
-	score = int32(int16(uint16(data >> 16)))
-	depth = int8(uint8((data >> 48) & 0xFF))
-	nodeType = uint8((data >> 56) & 0x0F)
-	age = uint8((data >> 60) & 0x0F)
-	return
-}
+func (e *entry) empty() bool      { return e.depth == 0 }
+func (e *entry) age() uint8       { return e.info >> 4 }
+func (e *entry) nodeType() uint8  { return e.info & 0x0F }
+func (e *entry) searched() int8   { return int8(e.depth - 1) }
+func entryKey(hash uint64) uint16 { return uint16(hash >> 48) }
 
-func unpackEval(data uint64) int32 {
-	return int32(int16(uint16(data >> 32)))
+func makeEntry(hash uint64, m types.Move, score, eval int32, depth int8, nodeType, age uint8) entry {
+	if depth < 0 {
+		depth = 0
+	}
+	return entry{
+		key:   entryKey(hash),
+		move:  uint16(m),
+		score: int16(score),
+		eval:  int16(eval),
+		depth: uint8(depth) + 1,
+		info:  nodeType&0x0F | age<<4,
+	}
 }
-
-// The table is an array of buckets of bucketSize entries, one 64-byte cache
-// line each. A position maps to one bucket and may sit in any of its entries,
-// so a deep result is not lost the moment another position lands on the same
-// index.
-const bucketSize = 4
 
 type TT struct {
-	entries []Entry
+	buckets []bucket
 	mask    uint64 // bucket index mask
 	age     uint8
 	mem     hugemem.Block // backing memory (huge pages where available)
 }
 
-// entryCount returns the power-of-two entry count for a table of sizeMB.
-func entryCount(sizeMB int) uint64 {
+// bucketCount returns the power-of-two number of buckets for a table of
+// sizeMB.
+func bucketCount(sizeMB int) uint64 {
 	if sizeMB < 1 {
 		sizeMB = 1
 	}
-	numEntries := uint64(sizeMB) * 1024 * 1024 / 16 // 8 bytes Key + 8 bytes Data
+	n := uint64(sizeMB) * 1024 * 1024 / 64
 
 	// Round to nearest power of 2 (round up if within 25% of next power of 2)
-	pow2 := uint64(1) << (63 - bits.LeadingZeros64(numEntries))
-	if pow2*2 <= numEntries || float64(numEntries)/float64(pow2*2) >= 0.75 {
+	pow2 := uint64(1) << (63 - bits.LeadingZeros64(n))
+	if pow2*2 <= n || float64(n)/float64(pow2*2) >= 0.75 {
 		pow2 *= 2
 	}
 	return pow2
 }
 
 func New(sizeMB int) *TT {
-	pow2 := entryCount(sizeMB)
-	entries, mem := hugemem.Make[Entry](int(pow2))
+	n := bucketCount(sizeMB)
+	buckets, mem := hugemem.Make[bucket](int(n))
 	return &TT{
-		entries: entries,
-		mask:    pow2/bucketSize - 1,
+		buckets: buckets,
+		mask:    n - 1,
 		age:     0,
 		mem:     mem,
 	}
 }
 
 func (tt *TT) SizeMB() int {
-	return int((uint64(len(tt.entries)) * 16) / (1024 * 1024))
+	return int((uint64(len(tt.buckets)) * 64) / (1024 * 1024))
 }
 
+// Entries returns how many positions the table can hold.
+func (tt *TT) Entries() int { return len(tt.buckets) * bucketSize }
+
 func (tt *TT) Resize(sizeMB int) {
-	pow2 := entryCount(sizeMB)
+	n := bucketCount(sizeMB)
 	old := tt.mem
-	tt.entries, tt.mem = hugemem.Make[Entry](int(pow2))
-	tt.mask = pow2/bucketSize - 1
+	tt.buckets, tt.mem = hugemem.Make[bucket](int(n))
+	tt.mask = n - 1
 	tt.age = 0
 	// A search thread may still be inside a probe of the old table (GUIs can
 	// change Hash while pondering), so release it only after a grace period.
@@ -144,10 +154,7 @@ func (tt *TT) Resize(sizeMB int) {
 }
 
 func (tt *TT) Clear() {
-	for i := range tt.entries {
-		tt.entries[i].Key = 0
-		tt.entries[i].Data = 0
-	}
+	clear(tt.buckets)
 	tt.age = 0
 }
 
@@ -156,52 +163,42 @@ func (tt *TT) IncrementAge() {
 }
 
 // bucket returns the entries hash may occupy.
-func (tt *TT) bucket(hash uint64) *[bucketSize]Entry {
-	return (*[bucketSize]Entry)(tt.entries[(hash&tt.mask)*bucketSize:])
+func (tt *TT) bucket(hash uint64) *[bucketSize]entry {
+	return &tt.buckets[hash&tt.mask].e
 }
 
 // Prefetch starts loading the bucket for hash into the cache, so that a
 // Probe or Store for it shortly afterwards does not wait on main memory.
 func (tt *TT) Prefetch(hash uint64) {
-	prefetch(unsafe.Pointer(&tt.entries[(hash&tt.mask)*bucketSize]))
+	prefetch(unsafe.Pointer(&tt.buckets[hash&tt.mask]))
 }
 
 // ProbeEval is Probe that also returns the entry's static evaluation, or
-// EvalNone if it has none.
+// EvalNone if it has none. The node type it returns includes PVFlag.
 func (tt *TT) ProbeEval(hash uint64) (m types.Move, score, eval int32, depth int8, nodeType uint8, found bool) {
 	b := tt.bucket(hash)
+	key := entryKey(hash)
 	for i := range b {
-		key, data := b[i].Key, b[i].Data
-		if key == hash^data && data != 0 {
-			m, score, depth, nodeType, _ = unpackData(data)
-			return m, score, unpackEval(data), depth, nodeType, true
+		// One copy of the entry: another thread may be rewriting it.
+		if e := b[i]; e.key == key && !e.empty() {
+			return types.Move(e.move), int32(e.score), int32(e.eval), e.searched(), e.nodeType(), true
 		}
 	}
 	return types.MoveNone, 0, EvalNone, 0, 0, false
 }
 
 func (tt *TT) Probe(hash uint64) (m types.Move, score int32, depth int8, nodeType uint8, found bool) {
-	b := tt.bucket(hash)
-	for i := range b {
-		key, data := b[i].Key, b[i].Data
-		// The key is stored XORed with the data, so a torn write by another
-		// thread fails this check instead of returning a mixed entry.
-		if key == hash^data && data != 0 {
-			m, score, depth, nodeType, _ = unpackData(data)
-			return m, score, depth, nodeType & BoundMask, true
-		}
-	}
-	return types.MoveNone, 0, 0, 0, false
+	m, score, _, depth, nodeType, found = tt.ProbeEval(hash)
+	return m, score, depth, nodeType & BoundMask, found
 }
 
 // worth ranks entries for replacement: deeper is worth more, and each
 // generation of age costs as much as eight plies of depth.
-func (tt *TT) worth(data uint64) int {
-	if data == 0 {
-		return -1 << 20 // empty
+func (tt *TT) worth(e *entry) int {
+	if e.empty() {
+		return -1 << 20
 	}
-	_, _, depth, _, age := unpackData(data)
-	return int(depth) - 8*int((tt.age-age)&0x0F)
+	return int(e.searched()) - 8*int((tt.age-e.age())&0x0F)
 }
 
 func (tt *TT) Store(hash uint64, m types.Move, score int32, depth int8, nodeType uint8) {
@@ -212,79 +209,67 @@ func (tt *TT) Store(hash uint64, m types.Move, score int32, depth int8, nodeType
 // unknown; an evaluation already stored for the position is then kept).
 func (tt *TT) StoreEval(hash uint64, m types.Move, score, eval int32, depth int8, nodeType uint8) {
 	b := tt.bucket(hash)
+	key := entryKey(hash)
 
 	// Same position already stored: update it in place.
 	for i := range b {
-		entry := &b[i]
-		currKey, currData := entry.Key, entry.Data
-		if currData == 0 || currKey != hash^currData {
+		cur := b[i]
+		if cur.empty() || cur.key != key {
 			continue
 		}
-		existingMove, existingScore, currDepth, existingType, currAge := unpackData(currData)
-		existingEval := unpackEval(currData)
-
 		// Never overwrite a valid move with MoveNone (e.g. on UpperBound fail-low)
-		if m == types.MoveNone && existingMove != types.MoveNone {
-			m = existingMove
+		if m == types.MoveNone {
+			m = types.Move(cur.move)
 		}
 		if eval == EvalNone {
-			eval = existingEval
+			eval = int32(cur.eval)
 		}
 
 		// Don't overwrite deeper entries from the current generation unless this is an exact score
-		if currAge == tt.age && currDepth > depth && nodeType&BoundMask != Exact {
-			if (m != types.MoveNone && existingMove == types.MoveNone) || (eval != EvalNone && existingEval == EvalNone) || nodeType&PVFlag > existingType&PVFlag {
-				existingType |= nodeType & PVFlag
-				newData := packDataEval(m, existingScore, eval, currDepth, existingType, currAge)
-				entry.Data = newData
-				entry.Key = hash ^ newData
+		if cur.age() == tt.age && cur.searched() > depth && nodeType&BoundMask != Exact {
+			if (m != types.MoveNone && cur.move == 0) || (eval != EvalNone && int32(cur.eval) == EvalNone) || nodeType&PVFlag > cur.info&PVFlag {
+				cur.move, cur.eval = uint16(m), int16(eval)
+				cur.info |= nodeType & PVFlag
+				b[i] = cur
 			}
 			return
 		}
-		newData := packDataEval(m, score, eval, depth, nodeType, tt.age)
-		entry.Data = newData
-		entry.Key = hash ^ newData
+		b[i] = makeEntry(hash, m, score, eval, depth, nodeType, tt.age)
 		return
 	}
 
 	// New position: replace the least valuable entry of the bucket.
 	victim := &b[0]
-	least := tt.worth(b[0].Data)
+	least := tt.worth(&b[0])
 	for i := 1; i < bucketSize; i++ {
-		if w := tt.worth(b[i].Data); w < least {
+		if w := tt.worth(&b[i]); w < least {
 			victim, least = &b[i], w
 		}
 	}
-	if victim.Data != 0 {
-		// Keep deep entries from this search: shallow subtrees and
-		// quiescence results do not displace them.
-		_, _, vDepth, _, vAge := unpackData(victim.Data)
-		if vAge == tt.age && (depth <= 0 || vDepth > depth+2) {
-			return
-		}
+	// Keep deep entries from this search: shallow subtrees and quiescence
+	// results do not displace them.
+	if !victim.empty() && victim.age() == tt.age && (depth <= 0 || victim.searched() > depth+2) {
+		return
 	}
-	newData := packDataEval(m, score, eval, depth, nodeType, tt.age)
-	victim.Data = newData
-	victim.Key = hash ^ newData
+	*victim = makeEntry(hash, m, score, eval, depth, nodeType, tt.age)
 }
 
+// HashFull returns how full the table is with entries of the current search,
+// in permille, from a sample.
 func (tt *TT) HashFull() int {
-	sampleCount := 2000
-	if len(tt.entries) < sampleCount {
-		sampleCount = len(tt.entries)
+	sample := min(len(tt.buckets), 2000/bucketSize+1)
+	if sample == 0 {
+		return 0
 	}
-
 	used := 0
-	for i := 0; i < sampleCount; i++ {
-		data := tt.entries[i].Data
-		if data != 0 {
-			age := uint8((data >> 60) & 0x0F)
-			if age == tt.age {
+	for i := 0; i < sample; i++ {
+		for j := range tt.buckets[i].e {
+			if e := &tt.buckets[i].e[j]; !e.empty() && e.age() == tt.age {
 				used++
 			}
 		}
 	}
-	hf := (used * 1000) / sampleCount
+	hf := (used * 1000) / (sample * bucketSize)
 	if used > 0 && hf == 0 {
 		hf = 1
 	}

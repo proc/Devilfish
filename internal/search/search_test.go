@@ -933,3 +933,35 @@ func TestKeepsSearchingForShorterMate(t *testing.T) {
 		t.Errorf("best move %s, mate %v in %d; want g4d7, mate in 2", bm, last.IsMate, last.MateIn)
 	}
 }
+
+func TestPickThread(t *testing.T) {
+	a := types.MakeMove(types.E2, types.E4, 0)
+	b := types.MakeMove(types.D2, types.D4, 0)
+	c := types.MakeMove(types.G1, types.F3, 0)
+	cases := []struct {
+		name string
+		rs   []threadResult
+		want int
+	}{
+		{"alone", []threadResult{{depth: 10, score: 20, move: a}}, 0},
+		{"all agree", []threadResult{{depth: 10, score: 20, move: a}, {depth: 12, score: 25, move: a}}, 1},
+		{"tie keeps the main thread", []threadResult{{depth: 10, score: 20, move: a}, {depth: 10, score: 20, move: b}}, 0},
+		{"majority outvotes the main thread", []threadResult{
+			{depth: 12, score: 30, move: a}, {depth: 12, score: 28, move: b}, {depth: 12, score: 27, move: b}}, 1},
+		{"deeper and better wins alone", []threadResult{
+			{depth: 10, score: 10, move: a}, {depth: 14, score: 60, move: b}}, 1},
+		{"shallow outlier does not", []threadResult{
+			{depth: 14, score: 40, move: a}, {depth: 13, score: 38, move: a}, {depth: 6, score: 90, move: c}}, 0},
+		{"a mate overrides the vote", []threadResult{
+			{depth: 14, score: 40, move: a}, {depth: 14, score: 41, move: a}, {depth: 9, score: MateScore - 7, move: c}}, 2},
+		{"the shorter mate", []threadResult{
+			{depth: 9, score: MateScore - 9, move: a}, {depth: 9, score: MateScore - 5, move: b}}, 1},
+		{"being mated never wins", []threadResult{
+			{depth: 10, score: -300, move: a}, {depth: 20, score: -MateScore + 8, move: b}}, 0},
+	}
+	for _, tc := range cases {
+		if got := pickThread(tc.rs); got != tc.want {
+			t.Errorf("%s: picked thread %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}

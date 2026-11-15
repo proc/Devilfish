@@ -55,7 +55,7 @@ func TestTTConcurrentAccess(t *testing.T) {
 }
 
 func TestTTHashFull(t *testing.T) {
-	table := New(1) // 1 MB: 65,536 entries
+	table := New(1) // 1 MB: 98,304 entries
 	defer table.Clear()
 
 	if hf := table.HashFull(); hf != 0 {
@@ -63,9 +63,9 @@ func TestTTHashFull(t *testing.T) {
 	}
 
 	// Fill roughly 50% of the entries using a linear congruential step to avoid stride harmonics
-	total := len(table.entries)
+	total := table.Entries()
 	for i := 0; i < total/2; i++ {
-		hash := uint64(i) * 2654435761
+		hash := uint64(i+1) * 0x9E3779B97F4A7C15 // spread over all 64 bits, as real hashes are
 		table.Store(hash, types.MakeMove(types.E2, types.E4, types.FlagQuiet), 100, 4, Exact)
 	}
 

@@ -53,6 +53,8 @@ type SearchWorker struct {
 	PVLength          [MaxPly]int
 	StaticEvalHistory [MaxPly]int32
 	rootDepth         int             // depth of the root search in progress
+	lastCorr          int32           // the correction-history value adjustEval last applied
+	done              threadResult    // helper threads: the last finished iteration (see pickThread)
 	nmpMinPly         int             // P.NMPGuard 3: no null move above this ply (inside a verification search), 0 otherwise
 	plies             [MaxPly]plyInfo // P.HistUpdate 1: what each node on the path knows about itself and the move it is searching
 	Accumulators      [MaxPly]nnue.Accumulator
@@ -122,7 +124,8 @@ func (w *SearchWorker) rawEval(ply int) int32 {
 // adjustEval applies the correction history and the fifty-move fade to a
 // raw evaluation of the current position.
 func (w *SearchWorker) adjustEval(raw int32) int32 {
-	v := raw + w.History.GetCorrection(w.Board)
+	w.lastCorr = w.History.GetCorrection(w.Board)
+	v := raw + w.lastCorr
 	if P.Optimism != 0 {
 		if o := w.TimeMan.Optimism.Load(); o != 0 {
 			v += optimismCP(w.Board, raw, o)
@@ -229,6 +232,8 @@ func (w *SearchWorker) resetFor(b *board.Board, ttTable *tt.TT, tm *TimeManager,
 	clear(w.plies[:])
 	w.rootDepth = 0
 	w.nmpMinPly = 0
+	w.done = threadResult{}
+	w.lastCorr = 0
 	clear(w.Accumulators[:])
 	w.RootBestMove = types.MoveNone
 	w.RootScore = 0
@@ -321,14 +326,14 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	// 1. Draw detection
 	if ply > 0 {
 		if w.Board.IsRepetition() || w.Board.IsFiftyMoveDraw() || w.Board.IsInsufficientMaterial() {
-			return 0
+			return w.drawScore()
 		}
 	}
 
 	// P.Cycle 1: the side to move can repeat a position at once, so it has
 	// at least a draw (Stockfish's upcoming-repetition rule).
-	if P.Cycle != 0 && ply > 0 && alpha < 0 && w.Board.UpcomingRepetition() {
-		alpha = 0
+	if draw := w.drawScore(); P.Cycle != 0 && ply > 0 && alpha < draw && w.Board.UpcomingRepetition() {
+		alpha = draw
 		if alpha >= beta {
 			return alpha
 		}
@@ -484,6 +489,37 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	if ply+2 < MaxPly {
 		w.plies[ply+2].cutoffs = 0
 	}
+	// corr: how far the correction history moved this node's evaluation.
+	// A large value marks a kind of position the evaluation gets wrong.
+	corr := int32(0)
+	if !inCheck && P.CorrSearch != 0 {
+		corr = abs(w.lastCorr)
+	}
+	// opponentWorsening: the evaluation is better for the side to move than
+	// it was one ply ago, seen from the same side. priorReduction: by how
+	// many plies the move that led here was reduced.
+	opponentWorsening := false
+	priorReduction := int32(0)
+	if ply > 0 && ply < MaxPly {
+		p := &w.plies[ply-1]
+		priorReduction, p.reduction = p.reduction, 0
+		if !inCheck && !p.inCheck && prevMove != types.MoveNone {
+			opponentWorsening = rawEval > -p.eval
+			// Hindsight (P.Hindsight 2, as Stockfish): a heavily reduced
+			// move after which the evaluation did not turn against the
+			// mover gets a ply back; a reduced move after which both
+			// sides' evaluations agree it was poor loses one more (166 of
+			// Stockfish's units, three to the centipawn).
+			if P.Hindsight&2 != 0 && excludedMove == types.MoveNone {
+				if priorReduction >= 3 && !opponentWorsening {
+					depth++
+				}
+				if priorReduction >= 2 && depth >= 2 && rawEval+p.eval > 55 {
+					depth--
+				}
+			}
+		}
+	}
 	if P.HistExtra&1 != 0 && P.HistUpdate != 0 && !inCheck && ply > 0 && ply < MaxPly && prevMove != types.MoveNone {
 		// The previous move, if quiet, gains or loses history by how the
 		// static evaluation moved across it (Stockfish's units: three to
@@ -558,6 +594,10 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		if threatenedPieces != 0 {
 			margin += 120 // Safety margin if pawns are contested
 		}
+		if P.Hindsight&1 != 0 && opponentWorsening {
+			margin -= P.RFPMargin / 3 // the opponent's last move made things worse for them
+		}
+		margin += corr * 2 / 3 // an evaluation that needed correcting is trusted less
 		if staticEval-margin >= beta {
 			st.RFPCuts++
 			if P.FailSoft&softPruning == 0 {
@@ -687,6 +727,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			// Multi-cut: another move also beats beta, even searched shallower
 			// and with the TT move excluded, so this node fails high.
 			st.SEMultiCut++
+			if P.SETriple != 0 {
+				sfGravity(&w.History.TTMoveHist, -421-110*int32(depth), sfPawnLimit)
+			}
 			if P.FailSoft&softPruning == 0 {
 				return beta
 			}
@@ -695,8 +738,20 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		if sScore < singularBeta {
 			st.SEExtends++
 			extension = 1
-			if !isPVNode && sScore < singularBeta-P.SEDoubleMargin {
+			doubleMargin := P.SEDoubleMargin
+			if P.SETriple != 0 {
+				// Stockfish: the margin narrows when hash moves have been
+				// proving best lately (in its units, three to the
+				// centipawn), and where the evaluation needed correcting.
+				doubleMargin -= 1175*int32(w.History.TTMoveHist)/114178/3 + corr*2/3
+			}
+			if !isPVNode && sScore < singularBeta-doubleMargin {
 				extension = 2
+				// A third ply when nothing else comes close, but not in
+				// lines already twice as long as the root search is deep.
+				if P.SETriple != 0 && sScore < singularBeta-doubleMargin-P.SETripleMargin && ply < 2*w.rootDepth {
+					extension = 3
+				}
 			}
 		} else if P.SENegExt != 0 && (ttScore >= beta || cutNode) {
 			// Not singular, and the node is expected to fail high whichever
@@ -844,6 +899,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				st.BetaCutsFirst++
 				st.BetaCutsTT++
 				w.plies[ply].cutoffs++
+				if P.SETriple != 0 && !isPVNode {
+					sfGravity(&w.History.TTMoveHist, 918, sfPawnLimit)
+				}
 				if excludedMove == types.MoveNone && (ply > 0 || len(w.ExcludedRootMoves) == 0) {
 					w.TT.StoreEval(w.Board.Hash, ttMove, tt.ScoreToTT(score, ply), netEval, depth, tt.LowerBound|pvBit)
 				}
@@ -1109,7 +1167,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					}
 				}
 			}
-			r += 697 - 65*int32(movesSearched+1)
+			r += 697 - 65*int32(movesSearched+1) - corr*15
 			if cutNode {
 				r += 4026
 				if ttMove == types.MoveNone {
@@ -1308,6 +1366,10 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 					}
 				}
 
+				// One ply less per 68 cp of evaluation correction (rounded),
+				// as Stockfish's |correction| / 26310 in 1024ths of a ply.
+				reduction -= int8(min((corr*15+512)/1024, 2))
+
 				if reduction < 0 {
 					reduction = 0
 				}
@@ -1339,7 +1401,13 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				st.LMRSearches++
 				st.LMRPlies += uint64(reduction)
 			}
+			if ply < MaxPly {
+				w.plies[ply].reduction = int32(reduction) // read by the node below (P.Hindsight)
+			}
 			score = -w.Search(depth-1+moveExtension-reduction, -alpha-1, -alpha, ply+1, false, reduction > 0 || !cutNode, types.MoveNone, m, prevMove, prevMove2)
+			if ply < MaxPly {
+				w.plies[ply].reduction = 0
+			}
 
 			// If reduced search fails high, re-search at full depth with null window
 			if reduction > 0 && score > alpha && !w.TimeMan.Stopped.Load() {
@@ -1393,6 +1461,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			st.NodesWithMoves++
 			st.BetaCuts++
 			w.plies[ply].cutoffs++
+			if P.SETriple != 0 && !isPVNode {
+				sfGravity(&w.History.TTMoveHist, -747, sfPawnLimit)
+			}
 			if movesSearched == 1 {
 				st.BetaCutsFirst++
 			}
@@ -1573,11 +1644,11 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 
 	// Draw detection in quiescence
 	if w.Board.IsRepetition() || w.Board.IsFiftyMoveDraw() || w.Board.IsInsufficientMaterial() {
-		return 0
+		return w.drawScore()
 	}
 
-	if P.Cycle != 0 && alpha < 0 && w.Board.UpcomingRepetition() {
-		alpha = 0
+	if draw := w.drawScore(); P.Cycle != 0 && alpha < draw && w.Board.UpcomingRepetition() {
+		alpha = draw
 		if alpha >= beta {
 			return alpha
 		}
@@ -1880,11 +1951,23 @@ func (w *SearchWorker) rewardHashCutoff(ply int, depth int8, ttMove, prevMove ty
 	}
 }
 
+// drawScore is the score of a drawn position: zero, or under P.DrawJitter
+// one centipawn either way depending on the node count, as in Stockfish.
+// Scoring every draw exactly alike lets the search treat different
+// repetitions as interchangeable and miss the way out of one.
+func (w *SearchWorker) drawScore() int32 {
+	if P.DrawJitter == 0 {
+		return 0
+	}
+	return int32(w.LocalNodes&2) - 1
+}
+
 // plyInfo is what a main-search node records for the nodes below it
 // (P.HistUpdate 1): about itself, and about the move it is searching.
 type plyInfo struct {
 	inCheck, ttHit bool
 	ttPv           bool  // the position is or has been on a principal variation
+	reduction      int32 // plies the move being searched is reduced by, while its reduced search runs
 	cutoffs        int32 // beta cutoffs at this ply since the node two plies up was entered
 	eval           int32 // static evaluation, before the hash score replaces it (unset in check)
 

@@ -152,6 +152,47 @@ type Params struct {
 	// 0 292, 1 289, 3 286 of 300, which is within the suite's noise.
 	PruneKing int32
 
+	// ThreadVote 1: with several threads, the move played is chosen by a
+	// vote among them (pickThread in lazysmp.go) instead of always being
+	// the main thread's. Not used at a fixed depth or with MultiPV.
+	// WAC with 9 threads, one second a position: 295 with it, 294 without
+	// (one run each, which is within run-to-run variation).
+	ThreadVote int32
+
+	// CorrSearch 1: the size of the correction-history adjustment at a node
+	// is read as a sign that the evaluation is unreliable there, as in
+	// Stockfish: reverse futility pruning needs a wider margin, late moves
+	// are reduced less, and (with SETriple) singular moves extend sooner.
+	CorrSearch int32
+
+	// Hindsight, a sum of
+	//   1  reverse futility pruning's margin is a third of RFPMargin
+	//      narrower when the opponent's last move made the evaluation worse
+	//      for them;
+	//   2  a node reached by a move reduced three plies or more is searched
+	//      a ply deeper if the evaluation did not then turn against the
+	//      mover, and one reached by a move reduced two or more a ply
+	//      shallower if both evaluations say the move was poor.
+	Hindsight int32
+
+	// SETriple 1: a singular hash move that beats the alternatives by
+	// SETripleMargin more than a double extension needs is extended three
+	// plies, and the double-extension margin follows a running measure of
+	// how often the hash move turns out best.
+	SETriple       int32
+	SETripleMargin int32
+
+	// DrawJitter 1: draws by repetition, fifty moves or material score +1
+	// or -1 centipawn, by node count, instead of 0.
+	//
+	// Measured one at a time against all four off (default network): nodes
+	// to depth 18 on 60 positions, and WAC solved in 100k / 400k nodes
+	// (off: 273 / 285). CorrSearch 116%, 276 / 291. Hindsight 1 93%,
+	// 274 / 286; Hindsight 2 95%, 273 / 286. SETriple 101%, 274 / 286.
+	// DrawJitter 101%, 273 / 285. All on: 110%, 280 / 288; with 9 threads
+	// and one second a position, 295 of 300 (292 before). Not match-tested.
+	DrawJitter int32
+
 	// HistUpdate 1: the history tables are updated with Stockfish's bonuses,
 	// per-table bounds and weights (see sfGravity and updateStatsSF in
 	// history.go and search.go), and history pruning and the history part
@@ -278,6 +319,12 @@ var P = Params{
 	MoveOrder:      2,
 	HistUpdate:     1,
 	LMRMode:        2,
+	CorrSearch:     1,
+	Hindsight:      3,
+	SETriple:       1,
+	SETripleMargin: 75,
+	DrawJitter:     1,
+	ThreadVote:     1,
 	PruneKing:      1,
 	HistExtra:      15,
 	Cycle:          1,
@@ -362,6 +409,12 @@ func TunableParams() []ParamSpec {
 		{"MoveOrder", &P.MoveOrder, 0, 2},
 		{"HistUpdate", &P.HistUpdate, 0, 1},
 		{"LMRMode", &P.LMRMode, 0, 2},
+		{"CorrSearch", &P.CorrSearch, 0, 1},
+		{"Hindsight", &P.Hindsight, 0, 3},
+		{"SETriple", &P.SETriple, 0, 1},
+		{"SETripleMargin", &P.SETripleMargin, 0, 400},
+		{"DrawJitter", &P.DrawJitter, 0, 1},
+		{"ThreadVote", &P.ThreadVote, 0, 1},
 		{"PruneKing", &P.PruneKing, 0, 3},
 		{"HistExtra", &P.HistExtra, 0, 15},
 		{"Cycle", &P.Cycle, 0, 1},

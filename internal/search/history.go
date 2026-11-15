@@ -32,6 +32,7 @@ type SearchHistory struct {
 	Main           [2][2][2][64][64]int16
 	Cont           [15][64]contRow
 	PawnHist       [pawnHistSize]contRow
+	TTMoveHist     int16                     // how reliably the hash move has been the best move lately (P.SETriple)
 	LowPly         [lowPlySize][64][64]int16 // by ply near the root, origin and destination (P.MoveOrder 1)
 	CounterMoves   [64][64]types.Move
 	CaptureHistory [7][64][7]int32

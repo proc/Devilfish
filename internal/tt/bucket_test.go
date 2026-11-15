@@ -11,7 +11,7 @@ func colliding(tt *TT, n int) []uint64 {
 	base := uint64(0x9E3779B97F4A7C15)
 	out := []uint64{}
 	for i := uint64(1); len(out) < n; i++ {
-		h := base + i*(tt.mask+1) // same low bits, different high bits
+		h := base + i*(tt.mask+1) + i<<48 // same bucket, different key
 		out = append(out, h)
 	}
 	return out
@@ -19,13 +19,14 @@ func colliding(tt *TT, n int) []uint64 {
 
 func TestBucketKeepsCollidingEntries(t *testing.T) {
 	tt := New(1)
-	hs := colliding(tt, 5)
+	hs := colliding(tt, bucketSize+1)
+	last := hs[bucketSize]
 	m := types.Move(0x1234)
 
-	for i, h := range hs[:4] {
+	for i, h := range hs[:bucketSize] {
 		tt.Store(h, m, int32(100+i), int8(10+i), Exact)
 	}
-	for i, h := range hs[:4] {
+	for i, h := range hs[:bucketSize] {
 		_, score, depth, _, found := tt.Probe(h)
 		if !found || score != int32(100+i) || depth != int8(10+i) {
 			t.Fatalf("entry %d lost from a full bucket: found=%v score=%d depth=%d", i, found, score, depth)
@@ -33,20 +34,20 @@ func TestBucketKeepsCollidingEntries(t *testing.T) {
 	}
 
 	// A quiescence result never displaces this search's entries.
-	tt.Store(hs[4], m, 7, 0, Exact)
-	if _, _, _, _, found := tt.Probe(hs[4]); found {
+	tt.Store(last, m, 7, 0, Exact)
+	if _, _, _, _, found := tt.Probe(last); found {
 		t.Fatal("depth-0 entry displaced a current-generation entry")
 	}
 
 	// A deeper one replaces the shallowest (depth 10).
-	tt.Store(hs[4], m, 7, 20, Exact)
-	if _, _, _, _, found := tt.Probe(hs[4]); !found {
+	tt.Store(last, m, 7, 20, Exact)
+	if _, _, _, _, found := tt.Probe(last); !found {
 		t.Fatal("deep entry not stored")
 	}
 	if _, _, _, _, found := tt.Probe(hs[0]); found {
 		t.Fatal("shallowest entry should have been replaced")
 	}
-	for _, h := range hs[1:4] {
+	for _, h := range hs[1:bucketSize] {
 		if _, _, _, _, found := tt.Probe(h); !found {
 			t.Fatal("a deeper entry was replaced instead of the shallowest")
 		}
@@ -73,7 +74,7 @@ func TestBucketUpdatesInPlace(t *testing.T) {
 	}
 	used := 0
 	for _, e := range tt.bucket(h) {
-		if e.Data != 0 {
+		if !e.empty() {
 			used++
 		}
 	}

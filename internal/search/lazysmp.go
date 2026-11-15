@@ -377,11 +377,20 @@ func (e *Engine) Search(
 		go func(workerID int, w *SearchWorker) {
 			defer wg.Done()
 			// Helper searches with depth variation
+			w.done = threadResult{}
 			for d := int8(1 + (workerID % 2)); d <= maxDepth; d++ {
 				if e.Stopped.Load() {
 					break
 				}
-				w.Search(d, -Infinity, Infinity, 0, true, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+				score := w.Search(d, -Infinity, Infinity, 0, true, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+				// Only a finished iteration counts in the vote for the
+				// move to play (pickThread).
+				if !e.Stopped.Load() && w.PVLength[0] > 0 {
+					w.done = threadResult{depth: d, score: score, move: w.PVArray[0][0]}
+					if w.PVLength[0] > 1 {
+						w.done.ponder = w.PVArray[0][1]
+					}
+				}
 			}
 		}(id, helper)
 	}
@@ -390,6 +399,7 @@ func (e *Engine) Search(
 	var prevIterationScore int32
 	var prevIterationBestMove types.Move
 	var bestMoveStability int
+	var masterDepth int8 // the main thread's last finished iteration
 	var rootPV []types.Move
 
 	multiPVCount := e.MultiPV
@@ -598,6 +608,7 @@ func (e *Engine) Search(
 			if bestMoveCandidate != types.MoveNone {
 				rootBestMove = bestMoveCandidate
 				rootScore = score
+				masterDepth = depth
 			}
 
 			// Construct PV line from TT / PVArray
@@ -746,6 +757,44 @@ func (e *Engine) Search(
 	// Stop helper threads
 	e.Stopped.Store(true)
 	wg.Wait()
+
+	// With several threads, the move comes from the thread the vote picks,
+	// which need not be the main one (as in Stockfish; not at a fixed depth,
+	// where the result should not depend on thread timing).
+	if P.ThreadVote != 0 && len(helpers) > 0 && multiPVCount == 1 && limits.MaxDepth == 0 && rootBestMove != types.MoveNone {
+		results := []threadResult{{depth: masterDepth, score: rootScore, move: rootBestMove, ponder: rootPonderMove}}
+		for _, h := range helpers {
+			if h.done.move != types.MoveNone && isLegalMove(b, h.done.move) {
+				results = append(results, h.done)
+			}
+		}
+		if i := pickThread(results); i > 0 && results[i].move != rootBestMove {
+			r := results[i]
+			logger.Profilef("Thread vote: %s (depth %d, score %d) from a helper over the main thread's %s (depth %d, score %d)",
+				r.move, r.depth, r.score, rootBestMove, masterDepth, rootScore)
+			rootBestMove, rootPonderMove, rootScore = r.move, r.ponder, r.score
+			if infoCallback != nil {
+				pv := []types.Move{r.move}
+				if r.ponder != types.MoveNone {
+					pv = append(pv, r.ponder)
+				}
+				elapsed := time.Since(startTime)
+				nodes := e.Nodes.Load()
+				var nps uint64
+				if elapsed.Seconds() > 0 {
+					nps = uint64(float64(nodes) / elapsed.Seconds())
+				}
+				info := SearchInfo{Depth: r.depth, SelDepth: r.depth, Score: r.score, Nodes: nodes, NPS: nps,
+					TimeMs: elapsed.Milliseconds(), HashFull: e.TT.HashFull(), TBHits: e.TBHits.Load(), PV: pv}
+				if r.score > MateThreshold {
+					info.IsMate, info.MateIn = true, int((MateScore-r.score+1)/2)
+				} else if r.score < -MateThreshold {
+					info.IsMate, info.MateIn = true, -int((MateScore+r.score+1)/2)
+				}
+				infoCallback(info)
+			}
+		}
+	}
 
 	// Fallback move if no move was found or if rootBestMove is not legal
 	if rootBestMove == types.MoveNone || !isLegalMove(b, rootBestMove) {
@@ -946,4 +995,52 @@ func FormatInfo(info SearchInfo) string {
 	}
 
 	return sb.String()
+}
+
+// threadResult is what one search thread concluded in its last finished
+// iteration.
+type threadResult struct {
+	depth  int8
+	score  int32
+	move   types.Move
+	ponder types.Move
+}
+
+// pickThread chooses whose move to play, as Stockfish does: every thread
+// votes for its move with a weight that grows with its depth and with how
+// far its score is above the lowest score any thread reports, and the move
+// with the most votes wins, credited to the deepest, best-scoring thread
+// that chose it. A thread that sees a forced mate overrides the vote, the
+// shortest mate first; a thread that sees itself mated never wins it.
+// results[0] is the main thread, which keeps the move on a tie.
+func pickThread(results []threadResult) int {
+	if len(results) == 0 {
+		return 0
+	}
+	minScore := results[0].score
+	for _, r := range results {
+		minScore = min(minScore, r.score)
+	}
+	weight := func(r threadResult) int64 { return int64(r.score-minScore+14) * int64(r.depth) }
+	votes := map[types.Move]int64{}
+	for _, r := range results {
+		votes[r.move] += weight(r)
+	}
+	best := 0
+	for i := 1; i < len(results); i++ {
+		r, b := results[i], results[best]
+		switch {
+		case b.score >= MateThreshold:
+			// A mate is already chosen: only a shorter one replaces it.
+			if r.score > b.score {
+				best = i
+			}
+		case r.score >= MateThreshold:
+			best = i
+		case r.score > -MateThreshold && (votes[r.move] > votes[b.move] ||
+			(votes[r.move] == votes[b.move] && weight(r) > weight(b))):
+			best = i
+		}
+	}
+	return best
 }
