@@ -2,6 +2,7 @@ package search
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 	"devilfish/internal/logger"
 	"devilfish/internal/movegen"
 	"devilfish/internal/syzygy"
+	"devilfish/internal/threadprio"
 	"devilfish/internal/tt"
 	"devilfish/internal/types"
 )
@@ -328,6 +330,7 @@ func (e *Engine) Search(
 	}
 
 	tm := NewTimeManager(limits, b.SideToMove, &e.Stopped, &e.Nodes, b)
+	tm.LowPriority = limits.LowPriority && limits.Ponder && threadprio.Supported()
 	e.currentTM.Store(tm)
 	defer e.currentTM.Store(nil)
 	// A ponderhit that arrived before the line above found no TimeManager
@@ -374,6 +377,10 @@ func (e *Engine) Search(
 
 	// Master worker
 	master := e.worker(0, b, tm)
+	if tm.LowPriority {
+		master.enterPriority()
+		defer master.leavePriority()
+	}
 
 	// WaitGroup for helper threads
 	var wg sync.WaitGroup
@@ -386,6 +393,10 @@ func (e *Engine) Search(
 		helpers = append(helpers, helper)
 		go func(workerID int, w *SearchWorker) {
 			defer wg.Done()
+			if tm.LowPriority {
+				w.enterPriority()
+				defer w.leavePriority()
+			}
 			// Helper searches with depth variation
 			w.done = threadResult{}
 			prev := int32(0)
@@ -1100,6 +1111,36 @@ func pickThread(results []threadResult) int {
 // P.SMPMode 1 it searches a window round the helper's previous score, as the
 // main thread does, widening it on a failure; a full-window search costs
 // several times as much and kept the helpers from ever getting ahead.
+// enterPriority ties the calling goroutine to its OS thread and gives the
+// thread the priority the search calls for. Only used when the search's
+// TimeManager has LowPriority set.
+func (w *SearchWorker) enterPriority() {
+	runtime.LockOSThread()
+	w.lowPrio = false
+	w.syncPriority()
+}
+
+// syncPriority makes the thread's priority follow the search: low while it
+// is pondering, normal from the ponderhit on.
+func (w *SearchWorker) syncPriority() {
+	if low := w.TimeMan.Ponder.Load(); low != w.lowPrio && threadprio.SetLow(low) {
+		w.lowPrio = low
+	}
+}
+
+// leavePriority undoes enterPriority. A thread whose normal priority could
+// not be restored stays tied to the goroutine, so it ends with it instead of
+// going back to the runtime's pool at low priority.
+func (w *SearchWorker) leavePriority() {
+	if w.lowPrio {
+		if !threadprio.SetLow(false) {
+			return
+		}
+		w.lowPrio = false
+	}
+	runtime.UnlockOSThread()
+}
+
 func (w *SearchWorker) helperIteration(d int8, prev int32) int32 {
 	full := func() int32 {
 		return w.Search(d, -Infinity, Infinity, 0, true, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)

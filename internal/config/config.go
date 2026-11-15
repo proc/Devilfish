@@ -22,8 +22,12 @@ type Config struct {
 	MoveOverhead     int    `json:"move_overhead"`
 	MultiPV          int    `json:"multipv"`
 	ShowWDL          bool   `json:"show_wdl"`
-	OwnBook          bool   `json:"own_book"`
-	BookFile         string `json:"book_file"`
+	// ShareCores makes this engine divide the CPU cores with the other
+	// Devilfish processes that have it on (see internal/coreshare). Off by
+	// default: every process then uses its full Threads.
+	ShareCores bool   `json:"share_cores"`
+	OwnBook    bool   `json:"own_book"`
+	BookFile   string `json:"book_file"`
 
 	// SearchParams sets the search tunables (the UCI spin options such as
 	// LMRBase or RFPDepth), by option name. They come from a "search_params"
@@ -39,7 +43,7 @@ var knownKeys = map[string]bool{
 	"syzygypath": true, "syzygy": true, "tbpath": true, "tablebases": true, "tablebasepath": true,
 	"syzygyprobedepth": true, "syzygy50moverule": true, "syzygyprobelimit": true,
 	"logfile": true, "log": true, "logpath": true, "logfilepath": true, "logfilelocation": true,
-	"moveoverhead": true, "overhead": true, "multipv": true, "showwdl": true, "ucishowwdl": true,
+	"moveoverhead": true, "overhead": true, "multipv": true, "showwdl": true, "ucishowwdl": true, "sharecores": true,
 	"ownbook": true, "usebook": true, "openingbook": true, "book": true, "bookfile": true, "bookpath": true,
 	"searchparams": true,
 }
@@ -282,6 +286,10 @@ func Load(path string) (Config, error) {
 			case "showwdl", "ucishowwdl":
 				if n, ok := paramValue(v); ok {
 					cfg.ShowWDL = n != 0
+				}
+			case "sharecores":
+				if n, ok := paramValue(v); ok {
+					cfg.ShareCores = n != 0
 				}
 			case "ownbook", "usebook", "openingbook":
 				if b, ok := v.(bool); ok {

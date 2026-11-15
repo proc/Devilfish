@@ -36,6 +36,8 @@ func printHelp() {
 	fmt.Println("\nConfiguration Flags:")
 	fmt.Println("  -t, --threads <N>           Number of Lazy SMP search threads (overrides config file)")
 	fmt.Println("  -hash <MB>, --hash <MB>     Transposition Table size in Megabytes")
+	fmt.Println("  --share-cores               Divide the CPU cores with other running Devilfish engines that also share (default: off)")
+	fmt.Println("                              Threads stays the upper limit; --no-share-cores turns it off again")
 	fmt.Println("  -c, --config <path>         Path to JSON config file (default: ./config.json or ~/.devilfish/config.json)")
 	fmt.Println("  -l, --log <path>            Path to log file for engine internal details, profiling, and Syzygy status")
 	fmt.Println("  --cpuprofile <path>         Write a CPU profile (pprof/PGO) to <path>")
@@ -69,6 +71,7 @@ func main() {
 	var cliNoBook bool
 	var cliOwnBook *bool
 	var cliPonder *bool
+	var cliShareCores *bool
 	var benchArgs []string // non-nil: run a benchmark
 	var suiteArgs []string // non-nil: run a test suite
 
@@ -327,6 +330,18 @@ func main() {
 			continue
 		}
 
+		// Handle --share-cores / --no-share-cores
+		if arg == "--share-cores" || arg == "-share-cores" {
+			val := true
+			cliShareCores = &val
+			continue
+		}
+		if arg == "--no-share-cores" || arg == "-no-share-cores" {
+			val := false
+			cliShareCores = &val
+			continue
+		}
+
 		// Handle --multipv / -multipv
 		if arg == "-multipv" || arg == "--multipv" {
 			if i+1 < len(args) {
@@ -388,6 +403,9 @@ func main() {
 	if cliPonder != nil {
 		cfg.Ponder = *cliPonder
 	}
+	if cliShareCores != nil {
+		cfg.ShareCores = *cliShareCores
+	}
 
 	// 3. Initialize Logger if requested via CLI (--log) or config
 	if cfg.LogFile != "" {
@@ -397,7 +415,7 @@ func main() {
 			defer logger.Close()
 			logger.Infof("Engine: %s %s by %s", uci.EngineName, uci.EngineVersion, uci.EngineAuthor)
 			logger.Infof("System: OS=%s Arch=%s CPUs=%d Go=%s PID=%d", runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), runtime.Version(), os.Getpid())
-			logger.Infof("Configuration: Threads=%d, Hash=%dMB, MultiPV=%d, Ponder=%t, UseNNUE=%t, EvalFile=%s, OwnBook=%t, BookFile=%s", cfg.Threads, cfg.Hash, cfg.MultiPV, cfg.Ponder, cfg.UseNNUE, cfg.EvalFile, cfg.OwnBook, cfg.BookFile)
+			logger.Infof("Configuration: Threads=%d, Hash=%dMB, MultiPV=%d, Ponder=%t, ShareCores=%t, UseNNUE=%t, EvalFile=%s, OwnBook=%t, BookFile=%s", cfg.Threads, cfg.Hash, cfg.MultiPV, cfg.Ponder, cfg.ShareCores, cfg.UseNNUE, cfg.EvalFile, cfg.OwnBook, cfg.BookFile)
 			logger.Infof("Syzygy Settings: ConfiguredPath=%q, ProbeDepth=%d, 50MoveRule=%t, ProbeLimit=%d", cfg.SyzygyPath, cfg.SyzygyProbeDepth, cfg.Syzygy50MoveRule, cfg.SyzygyProbeLimit)
 		}
 	}

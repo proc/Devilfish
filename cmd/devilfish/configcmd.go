@@ -62,6 +62,7 @@ var standardSettings = []setting{
 	{"move_overhead", kindInt, 0, 5000},
 	{"multipv", kindInt, 1, 256},
 	{"show_wdl", kindBool, 0, 0},
+	{"share_cores", kindBool, 0, 0},
 	{"own_book", kindBool, 0, 0},
 	{"book_file", kindString, 0, 0},
 }

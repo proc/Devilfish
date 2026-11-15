@@ -73,6 +73,10 @@ type SearchWorker struct {
 	RootMoveNodes     [64][64]uint64
 	ExcludedRootMoves []types.Move
 	Stats             SearchStats
+
+	// lowPrio: the worker's thread is running at low priority (see
+	// enterPriority).
+	lowPrio bool
 }
 
 func (w *SearchWorker) isRootExcluded(m types.Move) bool {
@@ -305,6 +309,9 @@ func (w *SearchWorker) pushAccumulator(ply int, m types.Move) {
 // just check Stopped.Load(), avoiding cross-core clock syscalls and reducing
 // shared atomic node-counter contention.
 func (w *SearchWorker) checkNodeLimits() bool {
+	if w.TimeMan.LowPriority {
+		w.syncPriority()
+	}
 	if w.TimeMan.MaxNodes > 0 {
 		w.Nodes.Add(1024)
 		return w.TimeMan.CheckLimits()

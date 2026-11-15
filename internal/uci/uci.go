@@ -15,6 +15,7 @@ import (
 	"devilfish/internal/board"
 	"devilfish/internal/book"
 	"devilfish/internal/config"
+	"devilfish/internal/coreshare"
 	"devilfish/internal/eval"
 	"devilfish/internal/logger"
 	"devilfish/internal/movegen"
@@ -43,7 +44,11 @@ type UCI struct {
 	abortSearch      atomic.Bool
 	bestMoveSent     atomic.Bool
 	ponderEnabled    bool
-	showWDL          bool // UCI_ShowWDL: print win/draw/loss chances with each score
+	threads          int             // the Threads option: the most threads a search may use
+	shareCores       bool            // the ShareCores option
+	cores            *coreshare.Pool // the cores shared with other engine processes
+	sharedThreads    int             // thread count of the last shared search, for reporting changes
+	showWDL          bool            // UCI_ShowWDL: print win/draw/loss chances with each score
 	moveOverhead     int
 	evalFile         string
 	bookFile         string
@@ -100,6 +105,9 @@ func New(in io.Reader, out io.Writer, cfg config.Config) *UCI {
 		board:         b,
 		engine:        eng,
 		ponderEnabled: cfg.Ponder,
+		threads:       threads,
+		shareCores:    cfg.ShareCores,
+		cores:         coreshare.Open(coreshare.DefaultDir(), config.DefaultThreads()),
 		showWDL:       cfg.ShowWDL,
 		moveOverhead:  moveOverhead,
 		evalFile:      evalFile,
@@ -210,7 +218,8 @@ func (u *UCI) cmdUCI() {
 	u.sendLine(fmt.Sprintf("id name %s %s", EngineName, EngineVersion))
 	u.sendLine(fmt.Sprintf("id author %s", EngineAuthor))
 	u.sendLine(fmt.Sprintf("option name Hash type spin default %d min 1 max 65536", u.engine.TT.SizeMB()))
-	u.sendLine(fmt.Sprintf("option name Threads type spin default %d min 1 max 512", u.engine.NumThreads))
+	u.sendLine(fmt.Sprintf("option name Threads type spin default %d min 1 max 512", u.threads))
+	u.sendLine(fmt.Sprintf("option name ShareCores type check default %t", u.shareCores))
 	u.sendLine(fmt.Sprintf("option name Ponder type check default %t", u.ponderEnabled))
 	u.sendLine(fmt.Sprintf("option name UseNNUE type check default %t", nnue.Enabled))
 	evalFile := u.evalFile
@@ -289,8 +298,20 @@ func (u *UCI) cmdSetOption(args []string) {
 	case "threads":
 		threads, err := strconv.Atoi(strings.TrimSpace(valStr))
 		if err == nil && threads > 0 {
+			u.threads = threads
 			u.engine.SetThreads(threads)
 		}
+	case "sharecores":
+		valLower := strings.ToLower(strings.TrimSpace(valStr))
+		if valLower == "true" || valLower == "1" {
+			u.shareCores = true
+		} else if valLower == "false" || valLower == "0" {
+			// A search that is running keeps its claim until it ends; the
+			// next one uses the full thread count again (claimCores).
+			u.shareCores = false
+			u.sharedThreads = 0
+		}
+		logger.Infof("UCI Option Set: ShareCores=%t", u.shareCores)
 	case "ponder", "autoponder":
 		valLower := strings.ToLower(strings.TrimSpace(valStr))
 		if valLower == "true" || valLower == "1" {
@@ -640,6 +661,13 @@ func (u *UCI) cmdGo(args []string) {
 		limits.Infinite = true
 	}
 
+	mode := coreshare.Search
+	if limits.Ponder {
+		mode = coreshare.Ponder
+	}
+	claim := u.claimCores(mode)
+	limits.LowPriority = u.shareCores
+
 	u.searching.Store(true)
 	u.isPonder.Store(limits.Ponder)
 	u.isAutoPonder.Store(false)
@@ -664,6 +692,9 @@ func (u *UCI) cmdGo(args []string) {
 		}
 
 		bestMove, ponderMove := u.engine.Search(currentBoard, limits, infoCallback)
+		// The cores are free again before the move goes out, so an opponent
+		// that starts searching on it finds them.
+		u.cores.Release(claim)
 
 		// If aborted internally before emitting move, do not output bestmove
 		if u.abortSearch.Load() && !u.guiStop.Load() {
@@ -761,12 +792,42 @@ func (u *UCI) startAutoPonder(currentBoard *board.Board, bestMove, ponderMove ty
 		return
 	}
 
-	autoLimits := search.SearchLimits{Infinite: true, Ponder: true}
+	// With shared cores, this search uses only the cores no other engine
+	// has claimed, at low priority.
+	claim := u.claimCores(coreshare.Idle)
+	defer u.cores.Release(claim)
+	autoLimits := search.SearchLimits{Infinite: true, Ponder: true, LowPriority: u.shareCores}
 	// Silent background search: pre-warms Transposition Table
 	u.engine.Search(hypoBoard, autoLimits, nil)
 }
 
+// claimCores sets the thread count for the search about to start. Without
+// ShareCores that is the Threads option. With it, the cores are divided with
+// the other engine processes that share (see coreshare.Mode), and Threads is
+// the upper limit. The value returned releases the claim (cores.Release)
+// when the search is over.
+func (u *UCI) claimCores(mode coreshare.Mode) uint64 {
+	if !u.shareCores {
+		u.engine.SetThreads(u.threads)
+		return 0
+	}
+	n, claim := u.cores.Acquire(u.threads, mode)
+	u.engine.SetThreads(n)
+	logger.Infof("ShareCores: %d of %d threads (%s)", n, u.threads, [...]string{"search", "ponder", "auto-ponder"}[mode])
+	if u.sharedThreads == 0 {
+		u.sharedThreads = u.threads
+	}
+	if mode != coreshare.Idle && n != u.sharedThreads {
+		u.sharedThreads = n
+		u.sendLine(fmt.Sprintf("info string ShareCores: searching with %d of %d threads", n, u.threads))
+	}
+	return claim
+}
+
 func (u *UCI) cmdPonderHit() {
+	if u.shareCores {
+		u.cores.Promote() // the search now counts as searching for the other engines
+	}
 	u.isPonder.Store(false)
 	u.engine.PonderHit()
 }

@@ -22,6 +22,10 @@ type SearchLimits struct {
 	MaxNodes     uint64
 	Infinite     bool
 	Ponder       bool
+	// LowPriority runs the search threads at a low scheduling priority for
+	// as long as the search is pondering, so it gives way to other engines'
+	// searches; a ponderhit brings the threads back to normal priority.
+	LowPriority bool
 }
 
 type TimeManager struct {
@@ -60,6 +64,9 @@ type TimeManager struct {
 	// rootFailLow: the current iteration failed low at the root, so the move
 	// we were going to play is in doubt and the iteration may run to MaxTime.
 	rootFailLow atomic.Bool
+	// LowPriority: see SearchLimits.LowPriority. Set before the search
+	// threads start and not changed afterwards.
+	LowPriority bool
 }
 
 // Tuning for the clock-lead adjustment. Each side's budget is its clock plus

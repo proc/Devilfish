@@ -343,3 +343,34 @@ func TestSearchParamsInConfig(t *testing.T) {
 		t.Errorf("threads %d, move_overhead %d", cfg.Threads, cfg.MoveOverhead)
 	}
 }
+
+func TestShareCoresInConfig(t *testing.T) {
+	if DefaultConfig().ShareCores {
+		t.Fatal("share_cores must be off by default")
+	}
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		json string
+		want bool
+	}{
+		{`{"threads": 4}`, false},
+		{`{"share_cores": true}`, true},
+		{`{"ShareCores": true}`, true},
+		{`{"share_cores": false}`, false},
+	} {
+		path := filepath.Join(dir, "config.json")
+		if err := os.WriteFile(path, []byte(tc.json), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.json, err)
+		}
+		if cfg.ShareCores != tc.want {
+			t.Errorf("%s: ShareCores = %t, want %t", tc.json, cfg.ShareCores, tc.want)
+		}
+		if len(cfg.SearchParams) != 0 {
+			t.Errorf("%s: share_cores was taken for a search tunable: %v", tc.json, cfg.SearchParams)
+		}
+	}
+}

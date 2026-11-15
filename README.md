@@ -164,6 +164,7 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
 2. **Command-Line Arguments** (override config file):
    - `-t`, `--threads <N>`: Set number of Lazy SMP search threads.
    - `-hash`, `--hash <MB>`: Set Transposition Table size in MB.
+   - `--share-cores`, `--no-share-cores`: Turn core sharing between running engines on or off (see below; default off).
    - `-c`, `--config <path>`: Specify custom config file path.
    - `--eval-file <path|<stockfish>|<8chess>>`: Select the network: a `.nnue` file, `<stockfish>` (default) or `<8chess>`.
    - `--no-nnue`: Disable NNUE evaluation and use classical HCE.
@@ -173,6 +174,7 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
    - `setoption name Threads value <N>`
    - `setoption name Hash value <MB>`
    - `setoption name Ponder value <true|false>`
+   - `setoption name ShareCores value <true|false>`
    - `setoption name UseNNUE value <true|false>`
    - `setoption name EvalFile value <path|<stockfish>|<8chess>>`
    - `setoption name SyzygyPath value <path>`
@@ -188,6 +190,12 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
 - **Thread-Safe Stdout**: All engine outputs are synchronized via write mutexes to prevent interleaved or corrupted responses.
 - **Airtight Ping Timer Compliance**: Guaranteed immediate `readyok` and `bestmove` responses to satisfy GUI ping timeouts under all race conditions.
 - **UCI Pondering**: Full compliance with GUI `go ponder` instructions, cleanly waiting for `ponderhit` or `stop` without premature exits.
+- **Core Sharing Between Engines (`ShareCores`, off by default)**: Several Devilfish processes on one machine (a GUI analysis next to a match, both sides of a game with pondering on) each start `Threads` search threads and slow each other down. With `"share_cores": true` in `config.json`, `--share-cores`, or the `ShareCores` UCI option, the engines that have it on divide the cores between them:
+  - A search gets the performance cores divided by the number of engines searching at that moment, and never more than `Threads`. An engine searching alone keeps everything; its thread count changes only when its next search starts.
+  - A `go ponder` search gets the same thread count but runs at low priority until the `ponderhit`, so it uses only what the searching engine leaves free.
+  - Auto-pondering takes only the cores no engine has claimed (one thread if there are none), also at low priority.
+  - The engines find each other through lock files in `~/.devilfish/cores` (or the directory named by `DEVILFISH_CORES_DIR`). The operating system drops a crashed engine's locks, so nothing needs cleaning up. Low priority is implemented on macOS; elsewhere only the thread counts apply.
+  - Thread counts that change from move to move make results less repeatable: leave it off for strength testing and use `Threads=1` with the match concurrency at or below the core count.
 - **Continuous Background Auto-Pondering**: When not explicitly commanded by a GUI, the engine calculates the predicted opponent continuation silently in the background, pre-warming the transposition table for instant tactical responses.
 - Diagnostic commands: `d` / `display`, `eval`, `perft <depth>`, `bench [depth]`, `bench time|threads|perft|eval|all` (see Performance & Benchmarks), `wac [ms]`, `testsuite <wac|file.epd> [ms]`.
 
