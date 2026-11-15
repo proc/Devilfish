@@ -134,6 +134,37 @@ func (mp *MovePicker) pickCapture(currentIndex int) types.Move {
 	return mp.captures.Moves[currentIndex]
 }
 
+// reset readies a picker that has been used before for a new node, without
+// clearing its move lists and score arrays (4.8 KB): every entry of those
+// is written before it is read, so only the counters need to start again.
+func (mp *MovePicker) reset(b *board.Board, ttMove, excludedMove types.Move, ply int, prevMove, prevMove2, prevMove4 types.Move, history *SearchHistory) {
+	mp.board, mp.history = b, history
+	mp.ttMove, mp.excludedMove = ttMove, excludedMove
+	mp.killer1, mp.killer2, mp.counterMove = types.MoveNone, types.MoveNone, types.MoveNone
+	mp.prevMove, mp.prevMove2, mp.prevMove4 = prevMove, prevMove2, prevMove4
+	mp.ply = ply
+	mp.stage = StageTTMove
+	mp.captures.Count, mp.capIndex = 0, 0
+	mp.quiets.Count, mp.quietIndex = 0, 0
+	mp.badCapCount, mp.badCapIndex = 0, 0
+	mp.sf = P.MoveOrder != 0
+	mp.sfStage = sfInit
+	mp.depth = 0
+	mp.badQuietCount, mp.badQuietIndex = 0, 0
+	mp.lastSEE, mp.lastSEEKnown = 0, false
+	mp.haveNodeInfo = false
+	mp.threats, mp.enemyKingRing = 0, 0
+	mp.kingInDanger, mp.hasActiveAttack = false, false
+	mp.hc = nil
+	if ply < MaxPly {
+		mp.killer1 = history.Killers[ply][0]
+		mp.killer2 = history.Killers[ply][1]
+	}
+	if prevMove != types.MoveNone {
+		mp.counterMove = history.CounterMoves[prevMove.From()][prevMove.To()]
+	}
+}
+
 func NewMovePicker(
 	b *board.Board,
 	ttMove types.Move,

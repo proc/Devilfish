@@ -99,6 +99,10 @@ func sfSecondLayer(act *[128]uint8, st *sfStack, out *[32]int32) {
 	}
 }
 
+func sfActivateFT(out *uint8, acc *int16) {
+	activateEightFTNEON(out, acc, &eightZeroAcc[0])
+}
+
 // sfActivate writes the two activations of v = x[i] + bias[i] to out:
 // out[i] = min(127, v*v >> (2*bits+7)) and out[32+i] = clamp(v >> bits, 0, 127),
 // for bits 7 (after the first layer) or 6 (after the second).

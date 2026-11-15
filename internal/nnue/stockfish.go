@@ -547,7 +547,7 @@ func sfForward(net *EightNetwork, scratch *sfScratch, acc *[2][EightL1Size]int16
 	ftOut := &scratch.ft
 	for flip := 0; flip < 2; flip++ {
 		pov := stm ^ flip
-		activateEightFTNEON(&ftOut[flip*(EightL1Size/2)], &acc[pov][0], &eightZeroAcc[0])
+		sfActivateFT(&ftOut[flip*(EightL1Size/2)], &acc[pov][0])
 	}
 
 	// First layer: 32 outputs from the (mostly zero) 1024 inputs.

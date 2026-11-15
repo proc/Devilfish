@@ -45,6 +45,12 @@ type Board struct {
 	FullmoveNumber uint16
 	Hash           uint64
 	PawnHash       uint64
+	// Hashes of parts of the position, kept up to date with every piece
+	// move like PawnHash (the correction history is keyed on them): each
+	// colour's pieces other than pawns, kings included, and the knights,
+	// bishops and kings of both colours.
+	NonPawnHash [2]uint64
+	MinorHash   uint64
 
 	UndoStack []UndoState
 }
@@ -250,9 +256,7 @@ func (b *Board) PutPiece(p types.Piece, sq types.Square) {
 	b.PieceBB[p] |= bb
 	b.ColorBB[p.Color()] |= bb
 	b.Hash ^= ZobristPiece[p][sq]
-	if p.Type() == types.Pawn {
-		b.PawnHash ^= ZobristPiece[p][sq]
-	}
+	b.xorPieceKeys(p, ZobristPiece[p][sq])
 }
 
 func (b *Board) RemovePiece(sq types.Square) types.Piece {
@@ -268,9 +272,7 @@ func (b *Board) RemovePiece(sq types.Square) types.Piece {
 	b.PieceBB[p] &= ^bb
 	b.ColorBB[p.Color()] &= ^bb
 	b.Hash ^= ZobristPiece[p][sq]
-	if p.Type() == types.Pawn {
-		b.PawnHash ^= ZobristPiece[p][sq]
-	}
+	b.xorPieceKeys(p, ZobristPiece[p][sq])
 	return p
 }
 
@@ -289,9 +291,40 @@ func (b *Board) MovePiece(p types.Piece, from, to types.Square) {
 	b.ColorBB[p.Color()] ^= fromToBB
 
 	b.Hash ^= ZobristPiece[p][from] ^ ZobristPiece[p][to]
-	if p.Type() == types.Pawn {
-		b.PawnHash ^= ZobristPiece[p][from] ^ ZobristPiece[p][to]
+	b.xorPieceKeys(p, ZobristPiece[p][from]^ZobristPiece[p][to])
+}
+
+// xorPieceKeys applies a change z of piece p's placement to the partial
+// hashes: the pawn hash, or the mover's non-pawn hash and, for knights,
+// bishops and kings, the minor-piece hash.
+func (b *Board) xorPieceKeys(p types.Piece, z uint64) {
+	switch p.Type() {
+	case types.Pawn:
+		b.PawnHash ^= z
+	case types.Knight, types.Bishop, types.King:
+		b.NonPawnHash[p.Color()] ^= z
+		b.MinorHash ^= z
+	default:
+		b.NonPawnHash[p.Color()] ^= z
 	}
+}
+
+// CalculatePartialHashes returns the non-pawn hash of each colour and the
+// minor-piece hash from scratch.
+func (b *Board) CalculatePartialHashes() (nonPawn [2]uint64, minor uint64) {
+	for pt := types.Knight; pt <= types.King; pt++ {
+		for c := types.White; c <= types.Black; c++ {
+			p := types.MakePiece(c, pt)
+			for bb := b.PieceBB[p]; bb != 0; {
+				z := ZobristPiece[p][bitboard.PopLSB(&bb)]
+				nonPawn[c] ^= z
+				if pt == types.Knight || pt == types.Bishop || pt == types.King {
+					minor ^= z
+				}
+			}
+		}
+	}
+	return
 }
 
 func (b *Board) IsSquareAttacked(sq types.Square, byColor types.Color) bool {

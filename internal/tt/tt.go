@@ -173,6 +173,10 @@ func (tt *TT) Prefetch(hash uint64) {
 	prefetch(unsafe.Pointer(&tt.buckets[hash&tt.mask]))
 }
 
+// PrefetchAddr starts loading the cache line at p. It is the table's own
+// prefetch, offered to the search for its other large tables.
+func PrefetchAddr(p unsafe.Pointer) { prefetch(p) }
+
 // ProbeEval is Probe that also returns the entry's static evaluation, or
 // EvalNone if it has none. The node type it returns includes PVFlag.
 func (tt *TT) ProbeEval(hash uint64) (m types.Move, score, eval int32, depth int8, nodeType uint8, found bool) {

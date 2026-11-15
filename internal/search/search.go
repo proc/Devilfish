@@ -3,6 +3,7 @@ package search
 import (
 	"math"
 	"sync/atomic"
+	"unsafe"
 
 	"devilfish/internal/bitboard"
 	"devilfish/internal/board"
@@ -52,11 +53,13 @@ type SearchWorker struct {
 	PVArray           [MaxPly][MaxPly]types.Move
 	PVLength          [MaxPly]int
 	StaticEvalHistory [MaxPly]int32
-	rootDepth         int             // depth of the root search in progress
-	lastCorr          int32           // the correction-history value adjustEval last applied
-	done              threadResult    // helper threads: the last finished iteration (see pickThread)
-	nmpMinPly         int             // P.NMPGuard 3: no null move above this ply (inside a verification search), 0 otherwise
-	plies             [MaxPly]plyInfo // P.HistUpdate 1: what each node on the path knows about itself and the move it is searching
+	rootDepth         int                // depth of the root search in progress
+	pickers           [MaxPly]MovePicker // the main search's move picker at each ply
+	pickerHC          [MaxPly]histCtx    // and the history rows it reads
+	lastCorr          int32              // the correction-history value adjustEval last applied
+	done              threadResult       // helper threads: the last finished iteration (see pickThread)
+	nmpMinPly         int                // P.NMPGuard 3: no null move above this ply (inside a verification search), 0 otherwise
+	plies             [MaxPly]plyInfo    // P.HistUpdate 1: what each node on the path knows about itself and the move it is searching
 	Accumulators      [MaxPly]nnue.Accumulator
 	EvalCache         [evalCacheSize]struct {
 		key  uint32
@@ -234,6 +237,8 @@ func (w *SearchWorker) resetFor(b *board.Board, ttTable *tt.TT, tm *TimeManager,
 	w.nmpMinPly = 0
 	w.done = threadResult{}
 	w.lastCorr = 0
+	clear(w.pickers[:])
+	clear(w.pickerHC[:])
 	clear(w.Accumulators[:])
 	w.RootBestMove = types.MoveNone
 	w.RootScore = 0
@@ -766,6 +771,10 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	// certainly fail high too. Tried before the hash move's full-depth
 	// search, so that a cutoff saves it. Skipped when the hash table already
 	// says the position is unlikely to reach the raised bound.
+	// Check and pin information for this position, computed once for all of
+	// its moves (see makeMove and board.CheckInfo).
+	ci := w.Board.NewCheckInfo()
+
 	probMinDepth, probBeta, probDepth := int8(5), beta+P.ProbCutMargin, depth-4
 	probTTDepth := depth - 3 // a hash score below probBeta at this depth or more rules ProbCut out
 	if P.ProbCut == 2 {
@@ -794,10 +803,11 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				if eval.SEE(w.Board, m) < probBeta-staticEval {
 					continue
 				}
+				w.prefetchNext(w.Board.HashAfter(m)) // before the move is made: see HashAfter
 				w.pushAccumulator(ply, m)
 				w.History.PushMove(ply, w.Board.Pieces[m.From()], m.To())
 				w.pushMoveInfo(ply, &hc, m, 0)
-				if !w.Board.MakeMove(m) {
+				if !w.makeMove(m, &ci, inCheck) {
 					continue
 				}
 				w.TT.Prefetch(w.Board.Hash)
@@ -860,14 +870,15 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	if ttMove != types.MoveNone && ttMove != excludedMove && (ply > 0 || !w.isRootExcluded(ttMove)) && movegen.IsPseudoLegal(w.Board, ttMove) {
 		// Check extension (parent side): only for checks that don't lose
 		// material, and never stacked on top of a singular extension.
-		if extension == 0 && (P.CheckExt == 2 || (P.CheckExt == 1 && isPVNode)) && w.Board.GivesCheck(ttMove) && eval.SEE(w.Board, ttMove) >= -P.CheckExtSEE {
+		if extension == 0 && (P.CheckExt == 2 || (P.CheckExt == 1 && isPVNode)) && w.Board.GivesCheckWith(ttMove, &ci) && eval.SEE(w.Board, ttMove) >= -P.CheckExtSEE {
 			st.CheckExts++
 			extension = 1
 		}
+		w.prefetchNext(w.Board.HashAfter(ttMove)) // before the move is made: see HashAfter
 		w.pushAccumulator(ply, ttMove)
 		w.History.PushMove(ply, w.Board.Pieces[ttMove.From()], ttMove.To())
 		w.pushMoveInfo(ply, &hc, ttMove, 1)
-		if w.Board.MakeMove(ttMove) {
+		if w.makeMove(ttMove, &ci, inCheck) {
 			w.TT.Prefetch(w.Board.Hash)
 			legalMoves++
 			st.MovesSearched++
@@ -955,10 +966,17 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	}
 
 	// 8. Staged Move Generation & Search Loop
-	mp := NewMovePicker(w.Board, ttMove, excludedMove, ply, prevMove, prevMove2, prevMove4, w.History)
+	// One picker per ply, reused: nothing below this point searches at this
+	// ply again before the move loop is done (the singular and null-move
+	// verification searches come earlier).
+	mp := &w.pickers[ply]
+	mp.reset(w.Board, ttMove, excludedMove, ply, prevMove, prevMove2, prevMove4, w.History)
 	mp.stage = StageGenCaptures
 	mp.SetNodeInfo(threatenedPieces, kingInDanger, hasActiveAttack, themKingRing)
-	mp.hc = &hc
+	// The picker gets its own copy, kept with it in the worker: pointing it
+	// at the local would move that local to the heap at every node.
+	w.pickerHC[ply] = hc
+	mp.hc = &w.pickerHC[ply]
 	mp.depth = int(depth)
 
 	for {
@@ -989,7 +1007,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		moveSEE, seeKnown := mp.LastSEE()
 		// givesCheck is read by the pruning rules, LMR and the check
 		// extension, so it is computed for every move.
-		givesCheck := w.Board.GivesCheck(m)
+		givesCheck := w.Board.GivesCheckWith(m, &ci)
 
 		// The depth this move would be searched at after its late-move
 		// reduction; the futility, history and quiet SEE rules judge it there.
@@ -1110,10 +1128,11 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			}
 		}
 
+		w.prefetchNext(w.Board.HashAfter(m)) // before the move is made: see HashAfter
 		w.pushAccumulator(ply, m)
 		w.History.PushMove(ply, movedPiece, toSq)
 		w.pushMoveInfo(ply, &hc, m, movesSearched+1)
-		if !w.Board.MakeMove(m) {
+		if !w.makeMove(m, &ci, inCheck) {
 			continue
 		}
 		w.TT.Prefetch(w.Board.Hash)
@@ -1708,6 +1727,7 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 		}
 	}
 
+	ci := w.Board.NewCheckInfo()
 	var ml movegen.MoveList
 	qsChecks := !inCheck && qply == 0 && P.QSChecks != 0
 	movegen.GenerateMoves(w.Board, !inCheck && !qsChecks, &ml)
@@ -1760,7 +1780,7 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 
 		// Quiet moves are only generated for the first-ply checks.
 		if qsChecks && !m.IsCapture() && !m.IsPromotion() {
-			if !w.Board.GivesCheck(m) || eval.SEE(w.Board, m) < 0 {
+			if !w.Board.GivesCheckWith(m, &ci) || eval.SEE(w.Board, m) < 0 {
 				continue
 			}
 		}
@@ -1773,7 +1793,7 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 			if m.IsEnPassant() {
 				victim = types.Pawn
 			}
-			if futValue := futBase + eval.SEEPieceValues[victim]; futValue <= alpha && !w.Board.GivesCheck(m) {
+			if futValue := futBase + eval.SEEPieceValues[victim]; futValue <= alpha && !w.Board.GivesCheckWith(m, &ci) {
 				st.QFutPruned++
 				if bestScore < futValue {
 					bestScore = futValue
@@ -1784,7 +1804,7 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 
 		if !inCheck && m.IsCapture() && !m.IsPromotion() {
 			// Far below alpha, a capture has to win material to matter.
-			if P.QSEvenPrune != 0 && futBase <= alpha && eval.SEE(w.Board, m) <= 0 && !w.Board.GivesCheck(m) {
+			if P.QSEvenPrune != 0 && futBase <= alpha && eval.SEE(w.Board, m) <= 0 && !w.Board.GivesCheckWith(m, &ci) {
 				st.QFutPruned++
 				if bestScore < futBase {
 					bestScore = futBase
@@ -1793,7 +1813,7 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 			}
 			// The captures are ordered by victim: after the first few, the
 			// rest rarely change the result.
-			if P.QSMaxMoves != 0 && legalMoves >= int(P.QSMaxMoves) && !w.Board.GivesCheck(m) {
+			if P.QSMaxMoves != 0 && legalMoves >= int(P.QSMaxMoves) && !w.Board.GivesCheckWith(m, &ci) {
 				st.QFutPruned++
 				continue
 			}
@@ -1813,7 +1833,7 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 
 		// SEE pruning in quiescence: skip losing captures if not in check and move does not give check
 		// SEE first: GivesCheck then only runs for the losing captures.
-		if !inCheck && eval.SEE(w.Board, m) < 0 && !w.Board.GivesCheck(m) {
+		if !inCheck && eval.SEE(w.Board, m) < 0 && !w.Board.GivesCheckWith(m, &ci) {
 			st.QSEEPruned++
 			continue
 		}
@@ -1822,8 +1842,9 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 			// For the continuation history of the evasions below.
 			w.History.PushMove(ply, w.Board.Pieces[m.From()], m.To())
 		}
+		w.prefetchNext(w.Board.HashAfter(m)) // before the move is made: see HashAfter
 		w.pushAccumulator(ply, m)
-		if !w.Board.MakeMove(m) {
+		if !w.makeMove(m, &ci, inCheck) {
 			continue
 		}
 		w.TT.Prefetch(w.Board.Hash)
@@ -1960,6 +1981,26 @@ func (w *SearchWorker) drawScore() int32 {
 		return 0
 	}
 	return int32(w.LocalNodes&2) - 1
+}
+
+// prefetchNext starts loading what the node with this hash will read first:
+// its hash-table bucket and its entry in the evaluation cache. Both tables
+// are far larger than the CPU caches, so without this each read waits on
+// main memory.
+func (w *SearchWorker) prefetchNext(hash uint64) {
+	w.TT.Prefetch(hash)
+	tt.PrefetchAddr(unsafe.Pointer(&w.EvalCache[hash&(evalCacheSize-1)]))
+}
+
+// makeMove plays m, skipping the test for the mover's own king being left in
+// check when the position's check information shows it cannot be (the mover
+// is not in check, and the piece is neither the king nor pinned). It returns
+// false if the move turned out illegal.
+func (w *SearchWorker) makeMove(m types.Move, ci *board.CheckInfo, inCheck bool) bool {
+	if ci.SkipsKingTest(w.Board, m, inCheck) {
+		return w.Board.MakeMoveUnchecked(m)
+	}
+	return w.Board.MakeMove(m)
 }
 
 // plyInfo is what a main-search node records for the nodes below it

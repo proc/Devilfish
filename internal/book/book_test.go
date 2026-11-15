@@ -57,12 +57,19 @@ func TestCastlingBookMove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := bk.Probe(bCastle)
-	if m == types.MoveNone {
-		t.Fatal("expected book move in Ruy Lopez, got MoveNone")
+	// The book picks among its moves at random, weighted, and has more than
+	// one here (5. d3 as well): castling must come up, correctly encoded,
+	// within a few hundred probes.
+	seen := map[string]bool{}
+	for i := 0; i < 400 && !seen["e1g1"]; i++ {
+		m := bk.Probe(bCastle)
+		if m == types.MoveNone {
+			t.Fatal("expected book move in Ruy Lopez, got MoveNone")
+		}
+		seen[m.String()] = true
 	}
-	t.Logf("Probed move in Ruy Lopez: %s", m)
-	if m.String() != "e1g1" {
-		t.Errorf("expected 5. O-O (e1g1), got %s", m.String())
+	t.Logf("Probed moves in Ruy Lopez: %v", seen)
+	if !seen["e1g1"] {
+		t.Errorf("5. O-O (e1g1) never probed; got %v", seen)
 	}
 }

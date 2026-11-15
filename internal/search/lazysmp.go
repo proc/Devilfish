@@ -40,6 +40,7 @@ type Engine struct {
 	MultiPV    int
 	Book       *book.Book
 	UseBook    bool
+	mainDepth  atomic.Int32 // the main thread's last finished depth, for the helpers
 	Stopped    atomic.Bool
 	Nodes      atomic.Uint64
 	TBHits     atomic.Uint64
@@ -378,11 +379,36 @@ func (e *Engine) Search(
 			defer wg.Done()
 			// Helper searches with depth variation
 			w.done = threadResult{}
+			prev := int32(0)
+			last := int8(0) // this helper's last finished depth
 			for d := int8(1 + (workerID % 2)); d <= maxDepth; d++ {
 				if e.Stopped.Load() {
 					break
 				}
-				score := w.Search(d, -Infinity, Infinity, 0, true, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+				// P.SMPMode: threads that search the same depth at the same
+				// time mostly repeat each other, because none has stored its
+				// results yet when the others need them. So the helpers are
+				// spread over the depth the main thread is working on and
+				// the ones after it (1: every other helper one depth ahead;
+				// 2: a third of them two ahead as well), and never search a
+				// depth the main thread has already finished. What they
+				// store is waiting in the hash table when the main thread
+				// gets there.
+				if P.SMPMode != 0 {
+					ahead := int8(workerID & 1)
+					if P.SMPMode == 2 {
+						ahead = int8(workerID % 3)
+					}
+					d = min(max(int8(e.mainDepth.Load())+1+ahead, last+1), maxDepth)
+					if d <= last {
+						break // everything up to the depth limit is done
+					}
+				}
+				score := w.helperIteration(d, prev)
+				prev = score
+				if !e.Stopped.Load() {
+					last = d
+				}
 				// Only a finished iteration counts in the vote for the
 				// move to play (pickThread).
 				if !e.Stopped.Load() && w.PVLength[0] > 0 {
@@ -400,6 +426,7 @@ func (e *Engine) Search(
 	var prevIterationBestMove types.Move
 	var bestMoveStability int
 	var masterDepth int8 // the main thread's last finished iteration
+	e.mainDepth.Store(0)
 	var rootPV []types.Move
 
 	multiPVCount := e.MultiPV
@@ -609,6 +636,7 @@ func (e *Engine) Search(
 				rootBestMove = bestMoveCandidate
 				rootScore = score
 				masterDepth = depth
+				e.mainDepth.Store(int32(depth))
 			}
 
 			// Construct PV line from TT / PVArray
@@ -1043,4 +1071,35 @@ func pickThread(results []threadResult) int {
 		}
 	}
 	return best
+}
+
+// helperIteration is one iteration of a helper thread at depth d. Under
+// P.SMPMode 1 it searches a window round the helper's previous score, as the
+// main thread does, widening it on a failure; a full-window search costs
+// several times as much and kept the helpers from ever getting ahead.
+func (w *SearchWorker) helperIteration(d int8, prev int32) int32 {
+	full := func() int32 {
+		return w.Search(d, -Infinity, Infinity, 0, true, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+	}
+	if P.SMPMode == 0 || d < 4 {
+		return full()
+	}
+	delta := P.AspDelta
+	alpha, beta := max(prev-delta, -Infinity), min(prev+delta, Infinity)
+	for tries := 0; ; tries++ {
+		score := w.Search(d, alpha, beta, 0, true, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+		if w.TimeMan.Stopped.Load() || (score > alpha && score < beta) {
+			return score
+		}
+		if score <= alpha {
+			beta = (alpha + beta) / 2
+			alpha = max(score-delta, -Infinity)
+		} else {
+			beta = min(score+delta, Infinity)
+		}
+		delta += delta / 2
+		if (P.AspTries != 0 && tries+1 >= int(P.AspTries)) || delta >= P.AspOpen {
+			alpha, beta = -Infinity, Infinity
+		}
+	}
 }

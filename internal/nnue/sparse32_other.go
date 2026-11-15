@@ -34,3 +34,7 @@ func sfDot128(a *[128]uint8, w *[128]int8) int32 { return refDot128(a, w) }
 func sfSecondLayer(act *[128]uint8, st *sfStack, out *[32]int32) {
 	refSFSecondLayer(act, st, out)
 }
+
+func sfActivateFT(out *uint8, acc *int16) {
+	activateEightFTNEON(out, acc, &eightZeroAcc[0])
+}

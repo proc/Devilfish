@@ -279,7 +279,25 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 			thrInc[pov] = s.hybrid[pov]
 		}
 	}
-	if base != nil {
+	// The stored position is one move back and numbered the same way from
+	// both sides: take the threat changes from the move (move_delta.go).
+	fromMove := false
+	if n := len(b.UndoStack); moveDelta && net.sf != nil && base != nil && base != cur && n > 0 &&
+		base.hash == b.UndoStack[n-1].Hash && pieceInc[0] && pieceInc[1] {
+		fromMove = true
+		earlier := cs
+		stepBack(tables, &earlier, &b.UndoStack[n-1], &views, &s.thrAdd, &s.thrRem)
+		if moveDeltaVerify && earlier != base.snap {
+			panic("nnue: taking the move back did not give the stored position: " + b.ToFEN())
+		}
+		d := changedSquares(&earlier, &cs)
+		for pov := 0; pov < 2; pov++ {
+			pieceDelta(&earlier, &cs, d, &views[pov], pov, &s.pieceAdd[pov], &s.pieceRem[pov])
+		}
+		pawnPairs(&earlier, d, &views, bothViews, &s.thrRem)
+		pawnPairs(&cs, d, &views, bothViews, &s.thrAdd)
+	}
+	if base != nil && !fromMove {
 		d := changedSquares(&base.snap, &cs)
 		for pov := 0; pov < 2; pov++ {
 			if pieceInc[pov] {
@@ -537,6 +555,89 @@ func emitThreat(tt *threatTables, ac, a, tc, t int, views *[2]eightView, want [2
 // threatsOf lists the threat pairs of position x that can differ from the
 // other position: attackers on d, targets on d, and the targets gained or
 // lost by the sliders in sl. otherOcc is the other position's occupancy.
+// emitFrom is emitThreat for one attacker (piece code ac on sq) and all of
+// targets at once: everything that depends only on the attacker and the
+// perspective is looked up once, not once per target.
+func emitFrom(tt *threatTables, x *eightSnap, ac, sq int, targets uint64, views *[2]eightView, want [2]bool, out *[2]rowList) {
+	if targets == 0 {
+		return
+	}
+	for pov := 0; pov < 2; pov++ {
+		if !want[pov] {
+			continue
+		}
+		flip := 0
+		if pov == 1 {
+			flip = 56
+		}
+		if views[pov].mirror {
+			flip ^= 7
+		}
+		from := sq ^ flip
+		attacking := ac ^ pov
+		pair := &tt.pair[attacking]
+		base := int(tt.offset[attacking][from])
+		atk := &tt.attack[attacking][from]
+		l := &out[pov]
+		for t := targets; t != 0; t &= t - 1 {
+			sq2 := bits.TrailingZeros64(t)
+			to := sq2 ^ flip
+			inner := pair[pieceCode(x.pieces[sq2])^pov]
+			var below uint32
+			if from < to {
+				below = 1
+			}
+			pairBase := int32((inner + (below << 30)) & 0x80FFFFFF)
+			if pairBase < 0 {
+				continue
+			}
+			if idx := int(pairBase) + base + int(atk[to]); idx < tt.features {
+				l.push(int32(idx))
+			}
+		}
+	}
+}
+
+// emitTo is emitThreat for one target (piece code tc on sq) and all of
+// attackers at once.
+func emitTo(tt *threatTables, x *eightSnap, tc, sq int, attackers uint64, views *[2]eightView, want [2]bool, out *[2]rowList) {
+	if attackers == 0 {
+		return
+	}
+	for pov := 0; pov < 2; pov++ {
+		if !want[pov] {
+			continue
+		}
+		flip := 0
+		if pov == 1 {
+			flip = 56
+		}
+		if views[pov].mirror {
+			flip ^= 7
+		}
+		to := sq ^ flip
+		attacked := tc ^ pov
+		l := &out[pov]
+		for a := attackers; a != 0; a &= a - 1 {
+			sq2 := bits.TrailingZeros64(a)
+			from := sq2 ^ flip
+			attacking := pieceCode(x.pieces[sq2]) ^ pov
+			inner := tt.pair[attacking][attacked]
+			var below uint32
+			if from < to {
+				below = 1
+			}
+			pairBase := int32((inner + (below << 30)) & 0x80FFFFFF)
+			if pairBase < 0 {
+				continue
+			}
+			if idx := int(pairBase) + int(tt.offset[attacking][from]) + int(tt.attack[attacking][from][to]); idx < tt.features {
+				l.push(int32(idx))
+			}
+		}
+	}
+}
+
 func threatsOf(tt *threatTables, x *eightSnap, otherOcc, d, sl bitboard.Bitboard, views *[2]eightView, want [2]bool, out *[2]rowList) {
 	occ := uint64(x.occ)
 
@@ -544,10 +645,7 @@ func threatsOf(tt *threatTables, x *eightSnap, otherOcc, d, sl bitboard.Bitboard
 	for a := d & x.occ; a != 0; {
 		sq := int(bitboard.PopLSB(&a))
 		ac := pieceCode(x.pieces[sq])
-		for t := attacksWithOcc(ac, sq, occ) & occ; t != 0; t &= t - 1 {
-			to := bits.TrailingZeros64(t)
-			emitThreat(tt, ac, sq, pieceCode(x.pieces[to]), to, views, want, out)
-		}
+		emitFrom(tt, x, ac, sq, attacksWithOcc(ac, sq, occ)&occ, views, want, out)
 	}
 
 	// Sliders whose attacks changed: the targets they gained or lost, and any
@@ -557,21 +655,14 @@ func threatsOf(tt *threatTables, x *eightSnap, otherOcc, d, sl bitboard.Bitboard
 		ac := pieceCode(x.pieces[sq])
 		atk := attacksWithOcc(ac, sq, occ)
 		changed := atk ^ attacksWithOcc(ac, sq, uint64(otherOcc))
-		for t := atk & (changed | uint64(d)) & occ; t != 0; t &= t - 1 {
-			to := bits.TrailingZeros64(t)
-			emitThreat(tt, ac, sq, pieceCode(x.pieces[to]), to, views, want, out)
-		}
+		emitFrom(tt, x, ac, sq, atk&(changed|uint64(d))&occ, views, want, out)
 	}
 
 	// Other attackers of pieces on d.
 	skip := d | sl
 	for t := d & x.occ; t != 0; {
 		to := types.Square(bitboard.PopLSB(&t))
-		tc := pieceCode(x.pieces[to])
-		for a := attackersTo(x, to) &^ skip; a != 0; {
-			sq := int(bitboard.PopLSB(&a))
-			emitThreat(tt, pieceCode(x.pieces[sq]), sq, tc, int(to), views, want, out)
-		}
+		emitTo(tt, x, pieceCode(x.pieces[to]), int(to), uint64(attackersTo(x, to)&^skip), views, want, out)
 	}
 }
 

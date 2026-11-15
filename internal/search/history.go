@@ -440,23 +440,9 @@ type corrKeys struct {
 
 func newCorrKeys(b *board.Board) corrKeys {
 	k := corrKeys{stm: b.SideToMove, pawn: uint32(b.PawnHash % corrSize)}
-	var np [2]uint64
-	var minor uint64
-	for pt := types.Knight; pt <= types.King; pt++ {
-		for c := types.White; c <= types.Black; c++ {
-			p := types.MakePiece(c, pt)
-			for bb := b.PieceBB[p]; bb != 0; {
-				z := board.ZobristPiece[p][bitboard.PopLSB(&bb)]
-				np[c] ^= z
-				if pt == types.Knight || pt == types.Bishop || pt == types.King {
-					minor ^= z
-				}
-			}
-		}
-	}
-	k.nonPawn[0] = uint32(np[0] % corrSize)
-	k.nonPawn[1] = uint32(np[1] % corrSize)
-	k.minor = uint32(minor % corrSize)
+	k.nonPawn[0] = uint32(b.NonPawnHash[0] % corrSize)
+	k.nonPawn[1] = uint32(b.NonPawnHash[1] % corrSize)
+	k.minor = uint32(b.MinorHash % corrSize)
 	// The last two moves (theirs, then ours), when neither was a null move
 	if n := len(b.UndoStack); n >= 2 {
 		last, prev := b.UndoStack[n-1].Move, b.UndoStack[n-2].Move

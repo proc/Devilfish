@@ -4,7 +4,15 @@ import (
 	"devilfish/internal/types"
 )
 
-func (b *Board) MakeMove(m types.Move) bool {
+// MakeMove plays a pseudo-legal move. It returns false, leaving the board as
+// it was, if the move is malformed or leaves the mover's king in check.
+func (b *Board) MakeMove(m types.Move) bool { return b.makeMove(m, true) }
+
+// MakeMoveUnchecked is MakeMove without the test for the king being left in
+// check, for moves the caller knows are legal (see CheckInfo.SkipsKingTest).
+func (b *Board) MakeMoveUnchecked(m types.Move) bool { return b.makeMove(m, false) }
+
+func (b *Board) makeMove(m types.Move, verify bool) bool {
 	if m == types.MoveNone {
 		return false
 	}
@@ -148,7 +156,7 @@ func (b *Board) MakeMove(m types.Move) bool {
 	}
 
 	// Legality check: ensure king is not left in check
-	if b.IsSquareAttacked(b.KingSquare(us), them) {
+	if verify && b.IsSquareAttacked(b.KingSquare(us), them) {
 		b.UnmakeMove(m)
 		return false
 	}
@@ -251,4 +259,36 @@ func (b *Board) UnmakeNullMove() {
 	b.HalfmoveClock = undo.HalfmoveClock
 	b.Hash = undo.Hash
 	b.PawnHash = undo.PawnHash
+}
+
+// HashAfter returns the hash the position will have after m, without making
+// the move, so that the search can start fetching the hash-table bucket of
+// the next position while it is still making the move. It is exact for
+// every move except castling (the rook's move is left out); a wrong value
+// only costs a wasted prefetch.
+func (b *Board) HashAfter(m types.Move) uint64 {
+	from, to := m.From(), m.To()
+	piece := b.Pieces[from]
+	h := b.Hash ^ ZobristSide ^ ZobristPiece[piece][from]
+	if b.EPSquare < types.SquareNone {
+		h ^= ZobristEP[b.EPSquare.File()]
+	}
+	if m.IsEnPassant() {
+		victim := types.Square(int(to)&7 | int(from)&^7) // the capturing pawn's rank, the target's file
+		h ^= ZobristPiece[b.Pieces[victim]][victim]
+	} else if captured := b.Pieces[to]; captured != types.PieceNone {
+		h ^= ZobristPiece[captured][to]
+	}
+	if m.IsPromotion() {
+		h ^= ZobristPiece[types.MakePiece(piece.Color(), m.PromotionType())][to]
+	} else {
+		h ^= ZobristPiece[piece][to]
+	}
+	if m.Flags() == types.FlagDoublePawnPush {
+		h ^= ZobristEP[to.File()]
+	}
+	if c := b.Castling & CastlingMask[from] & CastlingMask[to]; c != b.Castling {
+		h ^= ZobristCastling[b.Castling] ^ ZobristCastling[c]
+	}
+	return h
 }

@@ -152,6 +152,21 @@ type Params struct {
 	// 0 292, 1 289, 3 286 of 300, which is within the suite's noise.
 	PruneKing int32
 
+	// SMPMode 1: helper threads search an aspiration window like the main
+	// thread, never a depth the main thread has already finished, and every
+	// other helper works one depth ahead of it. 2: a third of the helpers
+	// two depths ahead as well. 0: every helper searches every depth with a
+	// full window.
+	//
+	// With 8 threads, time to depth 22 on 12 positions against one thread
+	// (Apple M1 Max): 0 1.12x and 1.31x in two runs, 1 1.37x, 2 1.42x.
+	// Stockfish itself measures 1.00x on the same positions at depth 26:
+	// extra threads mostly widen the search, they do not deepen it. WAC
+	// with 9 threads, one second a position: 293 with 1, 291 with 0, and
+	// 295 in an earlier run with 0, so that suite cannot tell them apart.
+	// Not match-tested.
+	SMPMode int32
+
 	// ThreadVote 1: with several threads, the move played is chosen by a
 	// vote among them (pickThread in lazysmp.go) instead of always being
 	// the main thread's. Not used at a fixed depth or with MultiPV.
@@ -325,6 +340,7 @@ var P = Params{
 	SETripleMargin: 75,
 	DrawJitter:     1,
 	ThreadVote:     1,
+	SMPMode:        1,
 	PruneKing:      1,
 	HistExtra:      15,
 	Cycle:          1,
@@ -415,6 +431,7 @@ func TunableParams() []ParamSpec {
 		{"SETripleMargin", &P.SETripleMargin, 0, 400},
 		{"DrawJitter", &P.DrawJitter, 0, 1},
 		{"ThreadVote", &P.ThreadVote, 0, 1},
+		{"SMPMode", &P.SMPMode, 0, 2},
 		{"PruneKing", &P.PruneKing, 0, 3},
 		{"HistExtra", &P.HistExtra, 0, 15},
 		{"Cycle", &P.Cycle, 0, 1},

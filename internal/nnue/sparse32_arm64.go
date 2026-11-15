@@ -23,6 +23,15 @@ func dot128NEON(a *[128]uint8, w *[128]int8, out *[4]int32)
 //go:noescape
 func chunkDot32NEON(idx *uint16, n int, in *uint8, wt *int8, out *[32]int32)
 
+//go:noescape
+func nonzeroChunksNEON(ft *[EightL1Size]uint8, out *uint16) int
+
+//go:noescape
+func activateSFNEON(out *uint8, acc *int16)
+
+//go:noescape
+func sfSecondLayerNEON(act *uint8, wt *int8, out *[32]int32)
+
 // hasDotProd reports whether the CPU has the dot-product instructions
 // (SDOT). Every Apple Silicon CPU does; elsewhere the kernel says.
 var hasDotProd = func() bool {
@@ -63,7 +72,7 @@ func sparse32(idx *uint16, n int, in *uint8, wt *int8, out *[32]int32) {
 // row. idx is scratch space.
 func sfFirstLayer(ft *[EightL1Size]uint8, st *sfStack, out *[32]int32, idx *[EightL1Size + 8]uint16) {
 	if hasDotProd {
-		n := l1NonzeroChunks(ft, idx)
+		n := nonzeroChunksNEON(ft, &idx[0])
 		chunkDot32NEON(&idx[0], n, &ft[0], &st.fc0Chunk[0][0][0], out)
 		return
 	}
@@ -95,7 +104,15 @@ func sfDot128(a *[128]uint8, w *[128]int8) int32 {
 // sfSecondLayer computes the 32 second-layer sums (without bias) from the
 // 64 activations in act[:64], many of which are zero.
 func sfSecondLayer(act *[128]uint8, st *sfStack, out *[32]int32) {
+	if hasDotProd {
+		sfSecondLayerNEON(&act[0], &st.fc1Chunk[0][0][0], out)
+		return
+	}
 	var nz [2*sfL2 + 8]uint16
 	n := nonzero64((*[64]uint8)(act[:64]), &nz)
 	sparse32NEON(&nz[0], n, &act[0], &st.fc1[0][0], out)
+}
+
+func sfActivateFT(out *uint8, acc *int16) {
+	activateSFNEON(out, acc)
 }

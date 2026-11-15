@@ -29,7 +29,15 @@ func TestEightIncrementalMatchesScratch(t *testing.T) {
 	if ActiveEightNetwork == nil {
 		t.Fatal("no default network")
 	}
+	// With the check that taking each move back on a copy of the board
+	// reproduces the stored position (move_delta.go).
+	moveDeltaVerify = true
+	defer func() { moveDeltaVerify = false }()
 	t.Run("default", func(t *testing.T) { testIncrementalMatchesScratch(t, ActiveEightNetwork) })
+	// And with the threat changes taken from board snapshots instead.
+	moveDelta = false
+	t.Run("default, snapshot diff", func(t *testing.T) { testIncrementalMatchesScratch(t, ActiveEightNetwork) })
+	moveDelta = true
 	eight, err := EmbeddedEight()
 	if err != nil {
 		t.Fatal(err)
