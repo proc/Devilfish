@@ -229,6 +229,11 @@ func (tt *TT) StoreEval(hash uint64, m types.Move, score, eval int32, depth int8
 			eval = int32(cur.eval)
 		}
 
+		// Skip redundant writes to avoid dirtying shared cache lines across threads.
+		if cur.age() == tt.age && cur.searched() == depth && cur.nodeType() == nodeType &&
+			int32(cur.score) == score && int32(cur.eval) == eval && types.Move(cur.move) == m {
+			return
+		}
 		// Don't overwrite deeper entries from the current generation unless this is an exact score
 		if cur.age() == tt.age && cur.searched() > depth && nodeType&BoundMask != Exact {
 			if (m != types.MoveNone && cur.move == 0) || (eval != EvalNone && int32(cur.eval) == EvalNone) || nodeType&PVFlag > cur.info&PVFlag {

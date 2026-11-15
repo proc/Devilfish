@@ -299,6 +299,24 @@ func (w *SearchWorker) pushAccumulator(ply int, m types.Move) {
 	}
 }
 
+// checkNodeLimits flushes node counts and checks time/node/stop limits.
+// Only the main thread (ID == 0) polls time.Since when MaxNodes == 0; helpers
+// just check Stopped.Load(), avoiding cross-core clock syscalls and reducing
+// shared atomic node-counter contention.
+func (w *SearchWorker) checkNodeLimits() bool {
+	if w.TimeMan.MaxNodes > 0 {
+		w.Nodes.Add(1024)
+		return w.TimeMan.CheckLimits()
+	}
+	if w.LocalNodes&8191 == 0 {
+		w.Nodes.Add(8192)
+	}
+	if w.ID == 0 {
+		return w.TimeMan.CheckLimits()
+	}
+	return w.TimeMan.Stopped.Load()
+}
+
 func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode bool, cutNode bool, excludedMove types.Move, prevMove types.Move, prevMove2 types.Move, prevMove4 types.Move) int32 {
 	if w.TimeMan.Stopped.Load() {
 		return 0
@@ -314,11 +332,8 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	// itself; counting it here as well reported every horizon node twice.
 	if depth > 0 {
 		w.LocalNodes++
-		if w.LocalNodes%1024 == 0 {
-			w.Nodes.Add(1024)
-			if w.TimeMan.CheckLimits() {
-				return 0
-			}
+		if w.LocalNodes&1023 == 0 && w.checkNodeLimits() {
+			return 0
 		}
 	}
 
@@ -1649,11 +1664,8 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 	}
 
 	w.LocalNodes++
-	if w.LocalNodes%1024 == 0 {
-		w.Nodes.Add(1024)
-		if w.TimeMan.CheckLimits() {
-			return 0
-		}
+	if w.LocalNodes&1023 == 0 && w.checkNodeLimits() {
+		return 0
 	}
 
 	if int8(ply) > w.SelDepth {

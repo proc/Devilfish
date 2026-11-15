@@ -41,9 +41,13 @@ type Engine struct {
 	Book       *book.Book
 	UseBook    bool
 	mainDepth  atomic.Int32 // the main thread's last finished depth, for the helpers
+	_pad0      [60]byte
 	Stopped    atomic.Bool
+	_pad1      [63]byte
 	Nodes      atomic.Uint64
+	_pad2      [56]byte
 	TBHits     atomic.Uint64
+	_pad3      [56]byte
 	currentTM  atomic.Pointer[TimeManager]
 	// ponderHit records a ponderhit, so that one arriving before the search
 	// has set up its clock (currentTM still nil) is not lost.
@@ -395,9 +399,16 @@ func (e *Engine) Search(
 				// store is waiting in the hash table when the main thread
 				// gets there.
 				if P.SMPMode != 0 {
-					ahead := int8(workerID & 1)
+					var ahead int8
 					if P.SMPMode == 2 {
 						ahead = int8(workerID % 3)
+					} else if e.NumThreads <= 3 {
+						ahead = int8(workerID & 1)
+					} else {
+						// Spread helpers across +1..+4 depths so threads don't
+						// pile onto the exact same depth and duplicate work.
+						aheadTable := [8]int8{1, 0, 2, 1, 0, 3, 1, 2}
+						ahead = aheadTable[(workerID-1)&7]
 					}
 					d = min(max(int8(e.mainDepth.Load())+1+ahead, last+1), maxDepth)
 					if d <= last {
@@ -1084,7 +1095,7 @@ func (w *SearchWorker) helperIteration(d int8, prev int32) int32 {
 	if P.SMPMode == 0 || d < 4 {
 		return full()
 	}
-	delta := P.AspDelta
+	delta := P.AspDelta + int32((w.ID&3)*3)
 	alpha, beta := max(prev-delta, -Infinity), min(prev+delta, Infinity)
 	for tries := 0; ; tries++ {
 		score := w.Search(d, alpha, beta, 0, true, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
