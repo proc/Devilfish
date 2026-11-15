@@ -579,6 +579,7 @@ type sfMaterial struct {
 	simple   int64   // material balance for the side to move (pawn 208)
 	total    int64   // 521 per pawn plus the pieces' values, both sides
 	unitsPer float64 // internal units to the pawn (the win-rate model's a)
+	spread   float64 // how gradually the win rate rises with the score (the model's b)
 }
 
 func sfMaterialOf(b *board.Board) (m sfMaterial) {
@@ -599,6 +600,7 @@ func sfMaterialOf(b *board.Board) (m sfMaterial) {
 	}
 	x := float64(min(max(count, 17), 78)) / 58.0
 	m.unitsPer = ((-142.72052667*x+372.35176398)*x-340.71073572)*x + 415.23490212
+	m.spread = ((5.93832785*x+15.61267078)*x-30.57816876)*x + 69.63866711
 	return m
 }
 
@@ -621,6 +623,24 @@ func sfToCP(nnue int32, b *board.Board) int32 {
 	base := n + n*sfAlignment(m.simple, n)/65536
 	v := base * (90649 + m.total) / 90649
 	return int32(math.Round(100 * float64(v) / m.unitsPer))
+}
+
+// WDL gives the chances, in thousandths, that the side to move wins, draws
+// or loses from a position whose search score is cp centipawns. b is the
+// position the search started from: the model depends on the material on
+// the board. It is Stockfish's win-rate model, fitted to its long time
+// control games: the win rate is 1/(1+exp((a-v)/b)) with v in internal
+// units and a, b polynomials in the material count. The scores of the other
+// evaluations (the 8Chess network, the classical evaluation) are not on that
+// scale, so for them the figures are only indicative.
+func WDL(b *board.Board, cp int32) (win, draw, loss int) {
+	m := sfMaterialOf(b)
+	v := float64(cp) * m.unitsPer / 100
+	rate := func(v float64) int {
+		return int(0.5 + 1000/(1+math.Exp((m.unitsPer-v)/m.spread)))
+	}
+	win, loss = rate(v), rate(-v)
+	return win, 1000 - win - loss, loss
 }
 
 // SFOptimismCP is Stockfish's optimism term for a position whose evaluation

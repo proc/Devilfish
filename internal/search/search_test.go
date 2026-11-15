@@ -965,3 +965,25 @@ func TestPickThread(t *testing.T) {
 		}
 	}
 }
+
+func TestRootAverage(t *testing.T) {
+	w := &SearchWorker{}
+	w.PVLength[0] = 1
+	w.PVArray[0][0] = types.MakeMove(types.E2, types.E4, 0)
+	var a rootAverage
+	a.add(w, 40)
+	if a.score != 40 {
+		t.Fatalf("first score: got %d, want 40", a.score)
+	}
+	a.add(w, 80)
+	a.add(w, 20)
+	if a.score != 40 { // (40+80)/2 = 60, (60+20)/2 = 40
+		t.Errorf("after 40, 80, 20: got %d, want 40", a.score)
+	}
+	// A new best move starts the average over.
+	w.PVArray[0][0] = types.MakeMove(types.D2, types.D4, 0)
+	a.add(w, -10)
+	if a.score != -10 {
+		t.Errorf("after a change of best move: got %d, want -10", a.score)
+	}
+}

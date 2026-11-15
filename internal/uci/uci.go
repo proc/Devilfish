@@ -43,6 +43,7 @@ type UCI struct {
 	abortSearch      atomic.Bool
 	bestMoveSent     atomic.Bool
 	ponderEnabled    bool
+	showWDL          bool // UCI_ShowWDL: print win/draw/loss chances with each score
 	moveOverhead     int
 	evalFile         string
 	bookFile         string
@@ -99,6 +100,7 @@ func New(in io.Reader, out io.Writer, cfg config.Config) *UCI {
 		board:         b,
 		engine:        eng,
 		ponderEnabled: cfg.Ponder,
+		showWDL:       cfg.ShowWDL,
 		moveOverhead:  moveOverhead,
 		evalFile:      evalFile,
 		bookFile:      bookFile,
@@ -223,6 +225,7 @@ func (u *UCI) cmdUCI() {
 	u.sendLine(fmt.Sprintf("option name LogFile type string default %s", logger.Path()))
 	u.sendLine(fmt.Sprintf("option name Move Overhead type spin default %d min 0 max 5000", u.moveOverhead))
 	u.sendLine(fmt.Sprintf("option name MultiPV type spin default %d min 1 max 256", u.engine.MultiPV))
+	u.sendLine(fmt.Sprintf("option name UCI_ShowWDL type check default %t", u.showWDL))
 	u.sendLine(fmt.Sprintf("option name OwnBook type check default %t", u.engine.UseBook))
 	bookFile := u.bookFile
 	if bookFile == "" {
@@ -380,6 +383,14 @@ func (u *UCI) cmdSetOption(args []string) {
 			u.engine.SetMultiPV(val)
 			logger.Infof("UCI Option Set: MultiPV=%d", val)
 		}
+	case "ucishowwdl", "showwdl":
+		switch strings.ToLower(strings.TrimSpace(valStr)) {
+		case "true", "1", "on", "yes":
+			u.showWDL = true
+		case "false", "0", "off", "no":
+			u.showWDL = false
+		}
+		logger.Infof("UCI Option Set: UCI_ShowWDL=%t", u.showWDL)
 	case "ownbook", "usebook", "openingbook", "book":
 		trimmedVal := strings.TrimSpace(valStr)
 		valLower := strings.ToLower(trimmedVal)
@@ -642,8 +653,12 @@ func (u *UCI) cmdGo(args []string) {
 			u.isPonder.Store(false)
 		}()
 
+		showWDL := u.showWDL
 		infoCallback := func(info search.SearchInfo) {
 			if !u.isAutoPonder.Load() {
+				if showWDL && info.StringMsg == "" {
+					info.WDL, info.HasWDL = wdlOf(currentBoard, info), true
+				}
 				u.sendLine(search.FormatInfo(info))
 			}
 		}
@@ -838,4 +853,17 @@ func parseMove(b *board.Board, moveStr string) (types.Move, error) {
 func Run(cfg config.Config) {
 	u := New(os.Stdin, os.Stdout, cfg)
 	u.Loop()
+}
+
+// wdlOf is the win, draw and loss chances, in thousandths, that go with a
+// search score, for the side to move in root (the position searched).
+func wdlOf(root *board.Board, info search.SearchInfo) [3]int {
+	if info.IsMate {
+		if info.MateIn > 0 {
+			return [3]int{1000, 0, 0}
+		}
+		return [3]int{0, 0, 1000}
+	}
+	w, d, l := nnue.WDL(root, info.Score)
+	return [3]int{w, d, l}
 }

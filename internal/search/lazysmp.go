@@ -32,6 +32,10 @@ type SearchInfo struct {
 	PV        []types.Move
 	MultiPV   int
 	StringMsg string
+	// WDL is the win, draw and loss chances in thousandths for the side to
+	// move, printed after the score when HasWDL is set (UCI_ShowWDL).
+	WDL    [3]int
+	HasWDL bool
 }
 
 type Engine struct {
@@ -345,6 +349,7 @@ func (e *Engine) Search(
 	var rootBestMove types.Move
 	var rootPonderMove types.Move
 	var rootScore int32
+	var rootAvg rootAverage // drives the optimism term
 
 	// Initialize rootBestMove sensibly from TT or best tactical move
 	if ttM, _, _, _, found := e.TT.Probe(b.Hash); found && ttM != types.MoveNone && isLegalMove(b, ttM) {
@@ -552,11 +557,14 @@ func (e *Engine) Search(
 			iterStartNodes := master.LocalNodes
 			master.RootMoveNodes = [64][64]uint64{}
 			tm.SetRootFailLow(false)
-			setOptimism(tm, rootScore, b.SideToMove)
+			setOptimism(tm, rootAvg.score, b.SideToMove)
 
 			var score int32
 			if depth < 4 {
 				score = master.Search(depth, -Infinity, Infinity, 0, true, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+				if !e.Stopped.Load() {
+					rootAvg.add(master, score)
+				}
 			} else {
 				// Aspiration Windows
 				delta := P.AspDelta
@@ -583,6 +591,7 @@ func (e *Engine) Search(
 					if e.Stopped.Load() {
 						break
 					}
+					rootAvg.add(master, score)
 
 					if score <= alpha {
 						// The expected move is worse than thought: let this
@@ -1020,6 +1029,9 @@ func FormatInfo(info SearchInfo) string {
 	} else {
 		sb.WriteString(fmt.Sprintf("score cp %d ", info.Score))
 	}
+	if info.HasWDL {
+		sb.WriteString(fmt.Sprintf("wdl %d %d %d ", info.WDL[0], info.WDL[1], info.WDL[2]))
+	}
 
 	sb.WriteString(fmt.Sprintf("nodes %d nps %d time %d",
 		info.Nodes, info.NPS, info.TimeMs))
@@ -1113,4 +1125,27 @@ func (w *SearchWorker) helperIteration(d int8, prev int32) int32 {
 			alpha, beta = -Infinity, Infinity
 		}
 	}
+}
+
+// rootAverage is a running average of the scores the root searches gave the
+// best move: each new score counts for half, as Stockfish's averageScore
+// does, and every search counts, the aspiration re-searches included. It is
+// steadier than the last score alone. The average starts over when the best
+// move changes.
+type rootAverage struct {
+	score int32
+	move  types.Move
+}
+
+// add takes in the score of a root search the worker just finished.
+func (a *rootAverage) add(w *SearchWorker, score int32) {
+	m := types.MoveNone
+	if w.PVLength[0] > 0 {
+		m = w.PVArray[0][0]
+	}
+	if m != types.MoveNone && m == a.move {
+		a.score = (a.score + score) / 2
+		return
+	}
+	a.score, a.move = score, m
 }

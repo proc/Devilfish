@@ -140,7 +140,8 @@ func (w *SearchWorker) adjustEval(raw int32) int32 {
 }
 
 // setOptimism records how far ahead the side to move at the root was found
-// to be (rootScore, centipawns). It is Stockfish's 114*s/(|s|+85), with s in
+// to be (rootScore, centipawns: the running average of the best move's
+// scores, see rootAverage). It is Stockfish's 114*s/(|s|+85), with s in
 // the network's internal units: about three to the centipawn.
 func setOptimism(tm *TimeManager, rootScore int32, rootSide types.Color) {
 	if P.Optimism == 0 {
@@ -712,7 +713,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	// Singular Extension (SE)
 	// If the TT move is significantly better than all other alternative moves,
 	// extend the search depth for the TT move.
-	if ply > 0 && excludedMove == types.MoveNone && depth >= 6 && ttMove != types.MoveNone &&
+	if ply > 0 && excludedMove == types.MoveNone && depth >= 5 && ttMove != types.MoveNone &&
 		!inCheck && ttFound && ttDepth >= depth-3 && ttType != tt.UpperBound &&
 		ttScore > -MateThreshold && ttScore < MateThreshold {
 

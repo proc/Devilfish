@@ -222,9 +222,10 @@ type Params struct {
 	// 18 and 269 WAC positions.
 	HistUpdate int32
 
-	// Optimism 1: the evaluation leans toward the side the last iteration
-	// found ahead at the root, by a few centipawns where material is
-	// unbalanced (Stockfish's optimism term; see optimismCP).
+	// Optimism 1: the evaluation leans toward the side found ahead at the
+	// root (by the running average of the best move's scores), by a few
+	// centipawns where material is unbalanced (Stockfish's optimism term;
+	// see optimismCP). Not match-tested.
 	Optimism int32
 
 	// Aspiration windows at the root.
@@ -287,7 +288,7 @@ var P = Params{
 	// NMPGuard 3 (no guard, Stockfish's verification search instead): 93%
 	// of the nodes to depth 18, but WAC 253 / 274 against 266 / 281.
 	RFPGuard: 0,
-	NMPGuard: 2,
+	NMPGuard: 3,
 	// Every check extended and never reduced. Extending at PV nodes only and
 	// reducing checks also won in self-play, but misses more tactics.
 	CheckExt:  2,
@@ -344,7 +345,7 @@ var P = Params{
 	PruneKing:      1,
 	HistExtra:      15,
 	Cycle:          1,
-	TTPV:           0,
+	TTPV:           1,
 
 	Optimism: 0, // not match-tested
 

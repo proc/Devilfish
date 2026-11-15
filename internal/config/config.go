@@ -21,6 +21,7 @@ type Config struct {
 	LogFile          string `json:"log_file"`
 	MoveOverhead     int    `json:"move_overhead"`
 	MultiPV          int    `json:"multipv"`
+	ShowWDL          bool   `json:"show_wdl"`
 	OwnBook          bool   `json:"own_book"`
 	BookFile         string `json:"book_file"`
 
@@ -38,7 +39,7 @@ var knownKeys = map[string]bool{
 	"syzygypath": true, "syzygy": true, "tbpath": true, "tablebases": true, "tablebasepath": true,
 	"syzygyprobedepth": true, "syzygy50moverule": true, "syzygyprobelimit": true,
 	"logfile": true, "log": true, "logpath": true, "logfilepath": true, "logfilelocation": true,
-	"moveoverhead": true, "overhead": true, "multipv": true,
+	"moveoverhead": true, "overhead": true, "multipv": true, "showwdl": true, "ucishowwdl": true,
 	"ownbook": true, "usebook": true, "openingbook": true, "book": true, "bookfile": true, "bookpath": true,
 	"searchparams": true,
 }
@@ -277,6 +278,10 @@ func Load(path string) (Config, error) {
 			case "multipv", "multi_pv":
 				if n, ok := v.(float64); ok && int(n) >= 1 {
 					cfg.MultiPV = int(n)
+				}
+			case "showwdl", "ucishowwdl":
+				if n, ok := paramValue(v); ok {
+					cfg.ShowWDL = n != 0
 				}
 			case "ownbook", "usebook", "openingbook":
 				if b, ok := v.(bool); ok {

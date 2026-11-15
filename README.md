@@ -152,7 +152,7 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
    ```
    `-c <path>` selects another file. Without it the file is the one the engine loads: `./config.json` if present, else one next to the executable, else `~/.devilfish/config.json`.
 
-   Every UCI option can be set in `config.json`. The settings above cover the standard ones (`Hash`, `Threads`, `Ponder`, `UseNNUE`, `EvalFile`, the `Syzygy*` options, `LogFile`, `Move Overhead`, `MultiPV`, `OwnBook`, `BookFile`). The search tunables (`LMRBase`, `LMRDivisor`, `LMRHistDiv`, `RFPMargin`, `RFPNonImpr`, `RazorMargin`, `NMPEvalDiv`, `LMPMultImpr`, `LMPMultNonImp`, `FutMargin`, `HistPrImpr`, `HistPrNonImp`, `SEEQuietMul`, `SEENoisyMul`, `QSFutMargin`, `CheckExtSEE`, `QSChecks`, `RFPDepth`, `LMPDepth`, `FutDepth`, `HistDepth`, `SEEDepth`, `RFPGuard`, `NMPGuard`, `CheckExt`, `LMRChecks`) go in a `search_params` object or directly at the top level, by their UCI name (case, spaces, `_` and `-` are ignored):
+   Every UCI option can be set in `config.json`. The settings above cover the standard ones (`Hash`, `Threads`, `Ponder`, `UseNNUE`, `EvalFile`, the `Syzygy*` options, `LogFile`, `Move Overhead`, `MultiPV`, `UCI_ShowWDL` as `show_wdl`, `OwnBook`, `BookFile`). The search tunables (`LMRBase`, `LMRDivisor`, `LMRHistDiv`, `RFPMargin`, `RFPNonImpr`, `RazorMargin`, `NMPEvalDiv`, `LMPMultImpr`, `LMPMultNonImp`, `FutMargin`, `HistPrImpr`, `HistPrNonImp`, `SEEQuietMul`, `SEENoisyMul`, `QSFutMargin`, `CheckExtSEE`, `QSChecks`, `RFPDepth`, `LMPDepth`, `FutDepth`, `HistDepth`, `SEEDepth`, `RFPGuard`, `NMPGuard`, `CheckExt`, `LMRChecks`) go in a `search_params` object or directly at the top level, by their UCI name (case, spaces, `_` and `-` are ignored):
    ```json
    {
      "hash": 256,
@@ -179,6 +179,7 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
    - `setoption name SyzygyProbeDepth value <depth>`
    - `setoption name Syzygy50MoveRule value <true|false>`
    - `setoption name SyzygyProbeLimit value <limit>`
+   - `setoption name UCI_ShowWDL value <true|false>`: print win, draw and loss chances (in thousandths, for the side to move) after each score, as `wdl <w> <d> <l>`
    - `setoption name OwnBook value <true|false>`
    - `setoption name BookFile value <path|<embedded>|<pohl>|<drawkiller>>`
 
