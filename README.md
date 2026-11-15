@@ -25,12 +25,12 @@
       - 7,680 piece features ($10$ king input buckets $\times 768$ features) + 66,864 occupancy-aware threat features ($1024$-wide FT).
       - Clipped-pair squaring activation, 8 output buckets (by occupied square count), $1024 \to 16 \to 32 \to 1$ affine layers.
       - ARM64 NEON vectorization (`addVector1024NEON`) and 16k-entry thread-local evaluation cache.
-      - Automatically detected and preferred when `eightchess_1024_tuned768.nnue` is present in the workspace or `~/Downloads/`.
+      - Built into the binary and selected with the name `<8chess>` (it was the default network before the Stockfish network).
     - **Native 768->256 Direct Architecture** (`default.nnue`, 410 KB):
       - Perspective architecture $768 \to 256 \times 2 \to 32 \to 1$ with embedded default weights.
       - Incremental accumulator updates during search with 128-bit ARM64 NEON vectorization.
-  - **Runtime Model Switching**: Switch dynamically between networks via `--eval-file <path>` or UCI `setoption name EvalFile value <path>`.
-  - **Stockfish network**: The Stockfish network `nn-68752b755c93.nnue` (architecture SFNNv20: threat, pawn-pair and king-relative piece-square inputs in three material blocks, 1024-wide, layer stacks chosen by material) is built into the binary and selected with the name `<stockfish>`: `./devilfish --eval-file "<stockfish>"`, `"eval_file": "<stockfish>"` in `config.json`, or `setoption name EvalFile value <stockfish>`. `<embedded>` returns to the default network. Other Stockfish network files of the same architecture load by path; other Stockfish formats, older ones included, are refused with a message. The network is evaluated incrementally with the same kernels as the default one, gives the same outputs as Stockfish for the same file, and is converted to centipawns with Stockfish's own scaling.
+  - **Runtime Model Switching**: Switch dynamically between networks via `--eval-file <path|<stockfish>|<8chess>>` or UCI `setoption name EvalFile value <path|<stockfish>|<8chess>>`.
+  - **Stockfish network**: The Stockfish network `nn-68752b755c93.nnue` (architecture SFNNv20: threat, pawn-pair and king-relative piece-square inputs in three material blocks, 1024-wide, layer stacks chosen by material) is built into the binary and is the default network, named `<stockfish>`. The 8Chess network is selected with the name `<8chess>`: `./devilfish --eval-file "<8chess>"`, `"eval_file": "<8chess>"` in `config.json`, or `setoption name EvalFile value <8chess>`; `<stockfish>` returns to the default. The old name `<embedded>` is still accepted and now also means the default (Stockfish) network. Other Stockfish network files of the same architecture load by path; other Stockfish formats, older ones included, are refused with a message. The network is evaluated incrementally with the same kernels as the 8Chess one, gives the same outputs as Stockfish for the same file, and is converted to centipawns with Stockfish's own scaling.
   - **Classical Fallback**: Toggle NNUE on/off via `--no-nnue` or UCI `setoption name UseNNUE value false`.
 - **Classical Tapered Evaluation (HCE)**:
   - Smoothly blends Midgame (MG) and Endgame (EG) scores based on non-pawn material phase.
@@ -124,7 +124,7 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
      "hash": 2000,
      "ponder": true,
      "use_nnue": true,
-     "eval_file": "<embedded>",
+     "eval_file": "<stockfish>",
      "syzygy_path": "/path/to/syzygy",
      "syzygy_probe_depth": 1,
      "syzygy_50_move_rule": true,
@@ -154,7 +154,7 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
    - `-t`, `--threads <N>`: Set number of Lazy SMP search threads.
    - `-hash`, `--hash <MB>`: Set Transposition Table size in MB.
    - `-c`, `--config <path>`: Specify custom config file path.
-   - `--eval-file <path>`: Specify external `.nnue` network file.
+   - `--eval-file <path|<stockfish>|<8chess>>`: Select the network: a `.nnue` file, `<stockfish>` (default) or `<8chess>`.
    - `--no-nnue`: Disable NNUE evaluation and use classical HCE.
    - `--syzygy-path <path>`: Specify directory containing Syzygy `.rtbw` and `.rtbz` files.
    - `--book <path|<embedded>|<pohl>|<drawkiller>>`: Select the opening book; `--no-book` disables it.
@@ -163,7 +163,7 @@ Fully compliant with modern chess GUIs and tournament runners (Cutechess, Arena,
    - `setoption name Hash value <MB>`
    - `setoption name Ponder value <true|false>`
    - `setoption name UseNNUE value <true|false>`
-   - `setoption name EvalFile value <path>`
+   - `setoption name EvalFile value <path|<stockfish>|<8chess>>`
    - `setoption name SyzygyPath value <path>`
    - `setoption name SyzygyProbeDepth value <depth>`
    - `setoption name Syzygy50MoveRule value <true|false>`

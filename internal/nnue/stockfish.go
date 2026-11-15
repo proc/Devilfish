@@ -146,8 +146,37 @@ func sfStackHash() uint32 {
 }
 
 // StockfishName is the EvalFile value that selects the Stockfish network
-// built into the binary.
+// built into the binary. It is the default network (DefaultName).
 const StockfishName = "<stockfish>"
+
+// DefaultName is the EvalFile value of the network the engine starts with.
+const DefaultName = StockfishName
+
+// EightChessName is the EvalFile value that selects the 8Chess network built
+// into the binary (the default before the Stockfish network was).
+const EightChessName = "<8chess>"
+
+// LegacyDefaultName is the old EvalFile name for the default network.
+const LegacyDefaultName = "<embedded>"
+
+var (
+	embeddedEightOnce sync.Once
+	embeddedEightNet  *EightNetwork
+	embeddedEightErr  error
+)
+
+// EmbeddedEight returns the 8Chess network built into the binary, parsed on
+// first use and kept.
+func EmbeddedEight() (*EightNetwork, error) {
+	embeddedEightOnce.Do(func() {
+		if len(embeddedEightNNUE) != EightNetworkSize {
+			embeddedEightErr = fmt.Errorf("%d bytes, expected %d", len(embeddedEightNNUE), EightNetworkSize)
+			return
+		}
+		embeddedEightNet, embeddedEightErr = LoadEightBytes(embeddedEightNNUE)
+	})
+	return embeddedEightNet, embeddedEightErr
+}
 
 // EmbeddedSFName is the file name of that network.
 const EmbeddedSFName = "nn-68752b755c93.nnue"

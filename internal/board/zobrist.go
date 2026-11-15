@@ -30,4 +30,5 @@ func init() {
 		ZobristEP[f] = rand64()
 	}
 	ZobristSide = rand64()
+	initCuckoo()
 }

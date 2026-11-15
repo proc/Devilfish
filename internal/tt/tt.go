@@ -14,6 +14,13 @@ const (
 	LowerBound uint8 = 1
 	UpperBound uint8 = 2
 
+	// PVFlag may be added to the bound a position is stored with: the
+	// position has been on a principal variation. ProbeEval returns it with
+	// the bound; Probe strips it. Once set it stays while the entry is only
+	// refreshed, not replaced.
+	PVFlag    uint8 = 4
+	BoundMask uint8 = 3
+
 	MateScore     int32 = 30000
 	MateThreshold int32 = 29000
 )
@@ -181,7 +188,7 @@ func (tt *TT) Probe(hash uint64) (m types.Move, score int32, depth int8, nodeTyp
 		// thread fails this check instead of returning a mixed entry.
 		if key == hash^data && data != 0 {
 			m, score, depth, nodeType, _ = unpackData(data)
-			return m, score, depth, nodeType, true
+			return m, score, depth, nodeType & BoundMask, true
 		}
 	}
 	return types.MoveNone, 0, 0, 0, false
@@ -225,8 +232,9 @@ func (tt *TT) StoreEval(hash uint64, m types.Move, score, eval int32, depth int8
 		}
 
 		// Don't overwrite deeper entries from the current generation unless this is an exact score
-		if currAge == tt.age && currDepth > depth && nodeType != Exact {
-			if (m != types.MoveNone && existingMove == types.MoveNone) || (eval != EvalNone && existingEval == EvalNone) {
+		if currAge == tt.age && currDepth > depth && nodeType&BoundMask != Exact {
+			if (m != types.MoveNone && existingMove == types.MoveNone) || (eval != EvalNone && existingEval == EvalNone) || nodeType&PVFlag > existingType&PVFlag {
+				existingType |= nodeType & PVFlag
 				newData := packDataEval(m, existingScore, eval, currDepth, existingType, currAge)
 				entry.Data = newData
 				entry.Key = hash ^ newData

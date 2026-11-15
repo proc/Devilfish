@@ -70,7 +70,7 @@ func DefaultConfig() Config {
 		Hash:             128,
 		Ponder:           false,
 		UseNNUE:          true,
-		EvalFile:         "<embedded>",
+		EvalFile:         "<stockfish>",
 		SyzygyPath:       "",
 		SyzygyProbeDepth: 1,
 		Syzygy50MoveRule: true,

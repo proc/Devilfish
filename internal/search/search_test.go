@@ -9,6 +9,7 @@ import (
 	"devilfish/internal/bitboard"
 	"devilfish/internal/board"
 	"devilfish/internal/movegen"
+	"devilfish/internal/nnue"
 	"devilfish/internal/types"
 )
 
@@ -425,11 +426,10 @@ func TestWAC055(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A quiet mating threat behind a queen sacrifice. Found at depth 11 (about
-	// 60k nodes) with Stockfish's history updates, which reduce late quiet
-	// moves a little more; at depth 9 with P.HistUpdate 0.
+	// A quiet mating threat behind a queen sacrifice. Found at depth 4 and
+	// seen as mate at depth 6 with the default network.
 	engine := NewEngine(64, 1)
-	bm, _ := engine.Search(b, SearchLimits{MaxDepth: 12}, func(si SearchInfo) {
+	bm, _ := engine.Search(b, SearchLimits{MaxDepth: 10}, func(si SearchInfo) {
 		var pvStrs []string
 		for _, m := range si.PV {
 			pvStrs = append(pvStrs, m.String())
@@ -909,5 +909,12 @@ func TestMovePickerYieldsEveryMoveOnce(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// The search tests evaluate with the engine's default network.
+func TestSearchTestsUseDefaultNetwork(t *testing.T) {
+	if !nnue.Enabled || !nnue.ActiveEightNetwork.IsSF() {
+		t.Fatalf("active network %s (enabled %v), want the default %s", nnue.CurrentFilePath, nnue.Enabled, nnue.DefaultName)
 	}
 }

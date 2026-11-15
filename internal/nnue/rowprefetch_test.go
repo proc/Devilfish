@@ -8,9 +8,11 @@ import (
 // prefetchRows must tolerate an empty list and rows at both ends of the
 // weight tables, and change nothing.
 func TestPrefetchRows(t *testing.T) {
-	net := ActiveEightNetwork
-	if net == nil || net.IsSF() {
-		t.Skip("8Chess network not active")
+	// The 8Chess network has both weight tables (the default network keeps
+	// every row in the threat table).
+	net, err := EmbeddedEight()
+	if err != nil {
+		t.Fatal(err)
 	}
 	lastPiece := int32(len(net.FTPieceWeights)/EightL1Size - 1)
 	lastThreat := int32(len(net.FTThreatWeights)/EightL1Size - 1)

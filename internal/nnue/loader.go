@@ -11,10 +11,29 @@ import (
 
 // LoadFile loads an NNUE network file from disk and sets it as the ActiveNetwork.
 //
-// The name "<stockfish>" (StockfishName) selects the Stockfish network built
-// into the binary instead of a file.
+// Three names select a network built into the binary instead of a file:
+// "<stockfish>" (StockfishName), the default; "<8chess>" (EightChessName),
+// the 8Chess network that used to be the default; and "<embedded>", the old
+// name for "the default network", kept so that existing configuration files
+// still load.
 func LoadFile(path string) error {
-	if strings.EqualFold(strings.TrimSpace(path), StockfishName) {
+	name := strings.ToLower(strings.TrimSpace(path))
+	if name == "" || name == LegacyDefaultName {
+		ResetToDefault()
+		return nil
+	}
+	if name == EightChessName {
+		net, err := EmbeddedEight()
+		if err != nil {
+			return fmt.Errorf("embedded 8Chess network: %w", err)
+		}
+		ActiveEightNetwork = net
+		ActiveNetwork = nil
+		Enabled = true
+		CurrentFilePath = EightChessName
+		return nil
+	}
+	if name == StockfishName {
 		net, err := EmbeddedSF()
 		if err != nil {
 			return fmt.Errorf("embedded Stockfish network: %w", err)

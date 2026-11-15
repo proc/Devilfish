@@ -22,11 +22,22 @@ var eightTestFENs = []string{
 // search does (down a line, back up, across to siblings, with gaps where no
 // evaluation happens) and checks every incremental evaluation against the
 // from-scratch one.
+//
+// It runs on the default network and on the built-in 8Chess network, whose
+// accumulators are kept differently (separate piece and threat halves).
 func TestEightIncrementalMatchesScratch(t *testing.T) {
-	net := ActiveEightNetwork
-	if net == nil {
-		t.Skip("8Chess network not embedded")
+	if ActiveEightNetwork == nil {
+		t.Fatal("no default network")
 	}
+	t.Run("default", func(t *testing.T) { testIncrementalMatchesScratch(t, ActiveEightNetwork) })
+	eight, err := EmbeddedEight()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("8chess", func(t *testing.T) { testIncrementalMatchesScratch(t, eight) })
+}
+
+func testIncrementalMatchesScratch(t *testing.T, net *EightNetwork) {
 	rng := rand.New(rand.NewSource(1))
 	st := NewEightState(128)
 	checked := 0
@@ -93,7 +104,7 @@ func TestEightIncrementalMatchesScratch(t *testing.T) {
 func BenchmarkEightScratch(b *testing.B) {
 	net := ActiveEightNetwork
 	if net == nil {
-		b.Skip("8Chess network not embedded")
+		b.Skip("no network active")
 	}
 	pos, _ := board.ParseFEN(eightTestFENs[5])
 	for i := 0; i < b.N; i++ {
@@ -106,7 +117,7 @@ func BenchmarkEightScratch(b *testing.B) {
 func BenchmarkEightIncremental(b *testing.B) {
 	net := ActiveEightNetwork
 	if net == nil {
-		b.Skip("8Chess network not embedded")
+		b.Skip("no network active")
 	}
 	pos, _ := board.ParseFEN(eightTestFENs[5])
 	moves := movegen.GenerateLegalMoves(pos)
@@ -162,7 +173,7 @@ func eightTestInputs(t testing.TB) (ins [][EightL1Size]uint8, buckets []int) {
 func TestEightL1MatchesReference(t *testing.T) {
 	net := ActiveEightNetwork
 	if net == nil {
-		t.Skip("8Chess network not embedded")
+		t.Skip("no network active")
 	}
 	ins, buckets := eightTestInputs(t)
 	nz, nzq := 0, 0
@@ -191,7 +202,7 @@ func TestEightL1MatchesReference(t *testing.T) {
 func BenchmarkEightL1Ref(b *testing.B) {
 	net := ActiveEightNetwork
 	if net == nil {
-		b.Skip("8Chess network not embedded")
+		b.Skip("no network active")
 	}
 	ins, buckets := eightTestInputs(b)
 	b.ResetTimer()
@@ -205,7 +216,7 @@ func BenchmarkEightL1Ref(b *testing.B) {
 func BenchmarkEightL1Layer(b *testing.B) {
 	net := ActiveEightNetwork
 	if net == nil {
-		b.Skip("8Chess network not embedded")
+		b.Skip("no network active")
 	}
 	ins, buckets := eightTestInputs(b)
 	b.ResetTimer()
@@ -219,7 +230,7 @@ func BenchmarkEightL1Layer(b *testing.B) {
 func BenchmarkEightL1(b *testing.B) {
 	net := ActiveEightNetwork
 	if net == nil {
-		b.Skip("8Chess network not embedded")
+		b.Skip("no network active")
 	}
 	ins, buckets := eightTestInputs(b)
 	b.ResetTimer()
@@ -251,7 +262,7 @@ var eightDeltaFENs = []string{
 func TestEightDeltaEveryMove(t *testing.T) {
 	net := ActiveEightNetwork
 	if net == nil {
-		t.Skip("8Chess network not embedded")
+		t.Skip("no network active")
 	}
 	st := NewEightState(8)
 	checked := 0

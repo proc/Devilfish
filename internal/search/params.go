@@ -37,7 +37,7 @@ type Params struct {
 
 	// Switches for rules that hold the pruning back.
 	RFPGuard  int32 // no reverse futility pruning: 2 with the king under pressure, 1 also with a piece under threat, 0 no guard
-	NMPGuard  int32 // no null move: 2 with the king under pressure, 1 also with the queen under threat, 0 no guard
+	NMPGuard  int32 // no null move: 2 with the king under pressure, 1 also with the queen under threat, 0 no guard; 3: no guard, but a cutoff with the king under pressure or at depth >= 16 needs a verification search
 	CheckExt  int32 // check extension: 2 at every node, 1 at PV nodes only, 0 never
 	LMRChecks int32 // 1: moves that give check take late-move reductions (one ply less)
 
@@ -71,6 +71,15 @@ type Params struct {
 	CheckLMR       int32 // 1: late evasions are reduced like other late moves (one ply less)
 	CheckSEEPrune  int32 // 1: SEE pruning also applies to evasions
 
+	// The options from here to HistUpdate were added together. The WAC
+	// figures in their comments were measured with the network the unit
+	// tests run on (8Chess), not the Stockfish network. With the Stockfish
+	// network, in 100k / 400k nodes: everything as set here 273 / 288;
+	// ProbCut, Cycle and HistExtra off 279 / 286; LMRMode 0 277 / 289;
+	// LMRMode 1 253 / 269; HistUpdate 0 281 / 287; MoveOrder 0 275 / 290;
+	// NMPGuard 3 270 / 283; TTPV 1 271 / 285. Differences of four or five
+	// positions are within the suite's noise.
+	//
 	// MoveOrder 1: Stockfish-style move ordering in the main search (see
 	// picker_sf.go); 2: in quiescence as well (scoreQuiescenceSF), which
 	// then also tries the hash move first (against 1, to depth 18 on 60
@@ -96,6 +105,49 @@ type Params struct {
 	// extension rules), and 238 and 257 WAC positions. Its history term
 	// assumes HistUpdate 1.
 	LMRMode int32
+
+	// TTPV 1: positions that have been on a principal variation (a flag kept
+	// in the hash table, as in Stockfish) are treated as PV nodes by two
+	// rules even when searched with a null window: no reverse futility
+	// pruning, and no extra ply of late-move reduction. The flag is stored
+	// either way. Measured worse: 112% of the nodes to depth 18, WAC 264 /
+	// 277 against 266 / 282. LMRMode 1 reads the flag too and is no better
+	// for it (156%, 239 / 259).
+	TTPV int32
+
+	// Cycle 1: a node where the side to move can repeat an earlier position
+	// with one move is worth at least a draw to it, before anything is
+	// searched (Stockfish's upcoming-repetition detection). No effect on
+	// the opening and tactical test sets (101% of the nodes, WAC 261 / 278
+	// against 266 / 282, within their noise); it is meant for drawn
+	// endgames, which those sets do not contain.
+	Cycle int32
+
+	// HistExtra: further Stockfish history rules, a sum of
+	//   1  after a quiet move, its history moves by how the static
+	//      evaluation changed across it;
+	//   2  the history update also runs when a move raised alpha without
+	//      a cutoff, not only on cutoffs;
+	//   4  a quiet move's history shifts the depth its futility, history
+	//      and exchange pruning are judged at;
+	//   8  a hash-table cutoff rewards its quiet move and penalizes an
+	//      early quiet previous move.
+	// All need HistUpdate 1. Nodes to depth 18 on 60 positions against 0:
+	// 93%, 90%, 98% and 95% one at a time, 85% together; WAC in 100k /
+	// 400k nodes 263 / 281 together against 261 / 278. Not match-tested.
+	HistExtra int32
+
+	// PruneKing: quiet moves that attack the squares round the enemy king
+	// are exempt from late-move, futility, history and exchange pruning
+	// (1: only when two pieces or more already attack the king, 2: always).
+	// Written for WAC 55 (a queen sacrifice whose point is a quiet rook
+	// move threatening mate): with 1 it is found at depth 4 instead of 9
+	// (Stockfish network; 11 instead of 16 on the test network). Over the
+	// whole suite it does not help: to depth 18 on 60 positions 96% of the
+	// nodes with 1 and 102% with 2; WAC with the Stockfish network in
+	// 100k / 400k nodes 271 / 283 and 265 / 280 against 273 / 288. 1 is
+	// on at the user's request; not match-tested.
+	PruneKing int32
 
 	// HistUpdate 1: the history tables are updated with Stockfish's bonuses,
 	// per-table bounds and weights (see sfGravity and updateStatsSF in
@@ -124,7 +176,13 @@ type Params struct {
 
 	IIRCut int32 // extra plies of internal iterative reduction at expected cut nodes of depth >= 8 with no hash move
 
-	ProbCut       int32 // 1: ProbCut before the hash move, at every non-PV node of depth >= 5; 0: off (no gain measured in self-play)
+	// ProbCut 1: before the hash move, at every non-PV node of depth >= 5.
+	// 2: Stockfish's depths and margins, plus its hash-entry shortcut.
+	// 0: off. An earlier self-play test of 1 showed no gain. With the
+	// Stockfish move ordering and history, to depth 18 on 60 positions and
+	// on WAC in 100k / 400k nodes: 0 100%, 267 / 276; 1 91%, 266 / 281;
+	// 2 93%, 255 / 277. 1 is on; not match-tested since.
+	ProbCut       int32
 	ProbCutMargin int32 // ProbCut searches against beta plus this
 }
 
@@ -166,6 +224,9 @@ var P = Params{
 	// both at 0 it is no smaller than this, but a quiet mating threat behind
 	// a sacrifice (WAC 55, mate in 4) goes unseen until depth 16: the null
 	// move hands the attacker the extra tempo the mate needs.
+	//
+	// NMPGuard 3 (no guard, Stockfish's verification search instead): 93%
+	// of the nodes to depth 18, but WAC 253 / 274 against 266 / 281.
 	RFPGuard: 0,
 	NMPGuard: 2,
 	// Every check extended and never reduced. Extending at PV nodes only and
@@ -214,6 +275,10 @@ var P = Params{
 	MoveOrder:      2,
 	HistUpdate:     1,
 	LMRMode:        2,
+	PruneKing:      1,
+	HistExtra:      15,
+	Cycle:          1,
+	TTPV:           0,
 
 	Optimism: 0, // not match-tested
 
@@ -228,7 +293,7 @@ var P = Params{
 
 	IIRCut: 0,
 
-	ProbCut:       0,
+	ProbCut:       1,
 	ProbCutMargin: 200,
 }
 
@@ -265,7 +330,7 @@ func TunableParams() []ParamSpec {
 		{"HistDepth", &P.HistDepth, 1, 14},
 		{"SEEDepth", &P.SEEDepth, 1, 14},
 		{"RFPGuard", &P.RFPGuard, 0, 2},
-		{"NMPGuard", &P.NMPGuard, 0, 2},
+		{"NMPGuard", &P.NMPGuard, 0, 3},
 		{"CheckExt", &P.CheckExt, 0, 2},
 		{"LMRChecks", &P.LMRChecks, 0, 1},
 		{"LMRMinMove", &P.LMRMinMove, 1, 6},
@@ -294,13 +359,17 @@ func TunableParams() []ParamSpec {
 		{"MoveOrder", &P.MoveOrder, 0, 2},
 		{"HistUpdate", &P.HistUpdate, 0, 1},
 		{"LMRMode", &P.LMRMode, 0, 2},
+		{"PruneKing", &P.PruneKing, 0, 2},
+		{"HistExtra", &P.HistExtra, 0, 15},
+		{"Cycle", &P.Cycle, 0, 1},
+		{"TTPV", &P.TTPV, 0, 1},
 		{"Optimism", &P.Optimism, 0, 1},
 		{"AspDelta", &P.AspDelta, 5, 100},
 		{"AspTries", &P.AspTries, 0, 10},
 		{"AspOpen", &P.AspOpen, 50, 5000},
 		{"AspReduce", &P.AspReduce, 0, 1},
 		{"IIRCut", &P.IIRCut, 0, 2},
-		{"ProbCut", &P.ProbCut, 0, 1},
+		{"ProbCut", &P.ProbCut, 0, 2},
 		{"ProbCutMargin", &P.ProbCutMargin, 50, 500},
 	}
 }

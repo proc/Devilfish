@@ -343,7 +343,7 @@ func benchKernels(b *testing.B, level simdLevel) {
 	withSIMD(level, func() {
 		net := ActiveEightNetwork
 		if net == nil {
-			b.Skip("8Chess network not embedded")
+			b.Skip("no network active")
 		}
 		pos, _ := board.ParseFEN(eightTestFENs[5])
 		b.ResetTimer()

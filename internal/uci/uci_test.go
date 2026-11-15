@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"devilfish/internal/config"
+	"devilfish/internal/nnue"
 	"devilfish/internal/syzygy"
 )
 
@@ -419,5 +420,23 @@ func TestStopRightAfterGo(t *testing.T) {
 		if u.searching.Load() {
 			t.Fatalf("run %d: search still running after stop", i)
 		}
+	}
+}
+
+// The network the engine starts with is the Stockfish one; "<embedded>", its
+// old name in configuration files, is reported under the new name.
+func TestEvalFileDefaultName(t *testing.T) {
+	for _, name := range []string{"", "<embedded>", "<stockfish>"} {
+		out := &bytes.Buffer{}
+		cfg := config.DefaultConfig()
+		cfg.EvalFile = name
+		u := New(bytes.NewBuffer(nil), out, cfg)
+		u.cmdUCI()
+		if !strings.Contains(out.String(), "option name EvalFile type string default <stockfish>") {
+			t.Errorf("eval_file %q: EvalFile default is not <stockfish>:\n%s", name, out.String())
+		}
+	}
+	if !nnue.ActiveEightNetwork.IsSF() {
+		t.Errorf("the tests run on %s, not the Stockfish network", nnue.CurrentFilePath)
 	}
 }

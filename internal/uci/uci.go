@@ -62,8 +62,8 @@ func New(in io.Reader, out io.Writer, cfg config.Config) *UCI {
 		hash = 128
 	}
 	evalFile := cfg.EvalFile
-	if evalFile == "" {
-		evalFile = "<embedded>"
+	if evalFile == "" || evalFile == nnue.LegacyDefaultName {
+		evalFile = nnue.DefaultName
 	}
 	bookFile := cfg.BookFile
 	if bookFile == "" {
@@ -213,7 +213,7 @@ func (u *UCI) cmdUCI() {
 	u.sendLine(fmt.Sprintf("option name UseNNUE type check default %t", nnue.Enabled))
 	evalFile := u.evalFile
 	if evalFile == "" {
-		evalFile = "<embedded>"
+		evalFile = nnue.DefaultName
 	}
 	u.sendLine(fmt.Sprintf("option name EvalFile type string default %s", evalFile))
 	u.sendLine(fmt.Sprintf("option name SyzygyPath type string default %s", syzygy.Path))
@@ -307,7 +307,8 @@ func (u *UCI) cmdSetOption(args []string) {
 		logger.Infof("UCI Option Set: UseNNUE=%t", nnue.Enabled)
 	case "evalfile":
 		trimmedVal := strings.TrimSpace(valStr)
-		if trimmedVal != "" && trimmedVal != "<embedded>" {
+		// "<embedded>" is the old name of the default network.
+		if trimmedVal != "" && !strings.EqualFold(trimmedVal, nnue.LegacyDefaultName) {
 			err := nnue.LoadFile(trimmedVal)
 			if err != nil {
 				logger.Warnf("UCI Option Failed: EvalFile=%s err=%v", trimmedVal, err)
@@ -318,12 +319,12 @@ func (u *UCI) cmdSetOption(args []string) {
 				logger.Infof("UCI Option Set: EvalFile=%s (successfully loaded)", trimmedVal)
 				u.sendLine(fmt.Sprintf("info string loaded nnue file %s", trimmedVal))
 			}
-		} else if trimmedVal == "<embedded>" {
-			u.evalFile = "<embedded>"
+		} else if trimmedVal != "" {
+			u.evalFile = nnue.DefaultName
 			nnue.ResetToDefault()
 			u.engine.TT.Clear()
-			logger.Infof("UCI Option Set: EvalFile=<embedded> (reset to embedded network)")
-			u.sendLine("info string reset to embedded nnue network")
+			logger.Infof("UCI Option Set: EvalFile=%s (reset to the default network)", nnue.DefaultName)
+			u.sendLine("info string reset to the default nnue network " + nnue.DefaultName)
 		}
 	case "syzygypath":
 		valPath := strings.TrimSpace(valStr)

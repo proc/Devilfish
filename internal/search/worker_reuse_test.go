@@ -72,7 +72,7 @@ func TestReusedWorkerMatchesFresh(t *testing.T) {
 // The eval cache is cleared when the network changes, and kept otherwise.
 func TestEvalCacheFollowsNetwork(t *testing.T) {
 	if nnue.ActiveEightNetwork == nil {
-		t.Skip("8Chess network not embedded")
+		t.Skip("no network active")
 	}
 	e := NewEngine(16, 1)
 	b, _ := board.ParseFEN(board.StartFEN)

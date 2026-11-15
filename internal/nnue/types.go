@@ -32,7 +32,7 @@ type Network struct {
 
 var ActiveNetwork *Network
 var Enabled = true
-var CurrentFilePath = "<embedded>"
+var CurrentFilePath = DefaultName
 
 // NetworkInfo contains metadata and statistics about the active neural network.
 type NetworkInfo struct {
@@ -51,7 +51,7 @@ type NetworkInfo struct {
 func GetNetworkInfo() NetworkInfo {
 	path := CurrentFilePath
 	if path == "" {
-		path = "<embedded>"
+		path = DefaultName
 	}
 	if ActiveEightNetwork.IsSF() {
 		features := sfPieceFeatures + sfThreatRows

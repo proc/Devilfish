@@ -34,7 +34,7 @@ func printHelp() {
 	fmt.Println("  -c, --config <path>         Path to JSON config file (default: ./config.json or ~/.devilfish/config.json)")
 	fmt.Println("  -l, --log <path>            Path to log file for engine internal details, profiling, and Syzygy status")
 	fmt.Println("  --multipv <N>               Number of principal variations to calculate (default: 1)")
-	fmt.Println("  --eval-file <path>          NNUE network: a file, <embedded> (default) or <stockfish> (the built-in Stockfish network)")
+	fmt.Println("  --eval-file <path>          NNUE network: a file, <stockfish> (default, the built-in Stockfish network) or <8chess> (the built-in 8Chess network)")
 	fmt.Println("  --no-nnue                   Disable NNUE evaluation (use classical HCE)")
 	fmt.Println("  --book <path>               Opening book: Polyglot .bin, EPD suite (.epd/.epd.gz), <embedded> (default), <pohl> or <drawkiller>")
 	fmt.Println("                              (<drawkiller_1.00> ... <drawkiller_1.50>: Drawkiller sets with a larger advantage for White)")
@@ -45,7 +45,7 @@ func printHelp() {
 	fmt.Println("  If present, configuration is automatically loaded from:")
 	fmt.Println("    1. ./config.json (current working directory)")
 	fmt.Printf("    2. %s (user home)\n", config.GetDefaultConfigPath())
-	fmt.Println("  Example format: {\"threads\": 10, \"hash\": 128, \"multipv\": 1, \"own_book\": true, \"book_file\": \"<embedded>\", \"ponder\": false, \"use_nnue\": true, \"eval_file\": \"<embedded>\", \"syzygy_path\": \"syzygy\"}")
+	fmt.Println("  Example format: {\"threads\": 10, \"hash\": 128, \"multipv\": 1, \"own_book\": true, \"book_file\": \"<embedded>\", \"ponder\": false, \"use_nnue\": true, \"eval_file\": \"<stockfish>\", \"syzygy_path\": \"syzygy\"}")
 }
 
 func main() {
@@ -391,7 +391,8 @@ func main() {
 
 	// Apply NNUE settings from config (and CLI overrides)
 	nnue.Enabled = cfg.UseNNUE
-	if cfg.EvalFile != "" && cfg.EvalFile != "<embedded>" {
+	// The default network is already active; "<embedded>" is its old name.
+	if cfg.EvalFile != "" && !strings.EqualFold(strings.TrimSpace(cfg.EvalFile), nnue.LegacyDefaultName) {
 		if err := nnue.LoadFile(cfg.EvalFile); err != nil {
 			logger.Warnf("NNUE Load Failed: file %q: %v", cfg.EvalFile, err)
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)

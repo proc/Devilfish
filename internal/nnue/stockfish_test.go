@@ -242,8 +242,9 @@ func TestSFDenseKernelsMatchReference(t *testing.T) {
 	}
 }
 
-// EvalFile "<stockfish>" selects the embedded network, and "<embedded>"
-// (ResetToDefault) goes back to the built-in one.
+// EvalFile "<stockfish>" selects the embedded Stockfish network, which is
+// also the default; "<8chess>" the embedded 8Chess network; and "<embedded>",
+// the old name of the default, the Stockfish network again.
 func TestLoadFileStockfishName(t *testing.T) {
 	savedEight, savedNet, savedPath, savedEnabled := ActiveEightNetwork, ActiveNetwork, CurrentFilePath, Enabled
 	defer func() {
@@ -265,8 +266,28 @@ func TestLoadFileStockfishName(t *testing.T) {
 	if v := EvaluateEight(ActiveEightNetwork, b); v < 1 || v > 60 {
 		t.Errorf("start position evaluates to %d cp", v)
 	}
+	if err := LoadFile(" <8Chess> "); err != nil {
+		t.Fatalf("LoadFile(<8chess>): %v", err)
+	}
+	if ActiveEightNetwork == nil || ActiveEightNetwork.IsSF() || CurrentFilePath != EightChessName {
+		t.Fatalf("LoadFile(<8chess>): active network %q is not the 8Chess one", CurrentFilePath)
+	}
+	if v := EvaluateEight(ActiveEightNetwork, b); v < 1 || v > 100 {
+		t.Errorf("8Chess: start position evaluates to %d cp", v)
+	}
+	for _, name := range []string{"<embedded>", ""} {
+		if err := LoadFile(name); err != nil {
+			t.Fatalf("LoadFile(%q): %v", name, err)
+		}
+		if ActiveEightNetwork != first {
+			t.Errorf("LoadFile(%q) did not go back to the default (Stockfish) network", name)
+		}
+		if err := LoadFile(EightChessName); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ResetToDefault()
-	if ActiveEightNetwork.IsSF() {
-		t.Error("ResetToDefault left the Stockfish network active")
+	if ActiveEightNetwork != first || !strings.Contains(CurrentFilePath, EmbeddedSFName) {
+		t.Error("ResetToDefault did not select the Stockfish network")
 	}
 }
