@@ -68,7 +68,21 @@ func (mp *MovePicker) scoreCapturesSF(evasion bool) {
 			continue
 		}
 		mp.capScores[i] = mp.history.CaptureHistory[attacker][m.To()][victim] + 7*sfPieceValue[victim]
+		if P.PromoOrder != 0 && m.IsPromotion() && m.PromotionType() == types.Queen {
+			// The queen gained counts like a piece taken; without it a
+			// quiet queen promotion ranks below every capture.
+			mp.capScores[i] += sfPromoBonus
+		}
 	}
+}
+
+// sfPromoBonus ranks a queen promotion as if it took a piece worth the
+// queen less the pawn.
+const sfPromoBonus = 7 * (2538 - 208)
+
+// isUnderPromotion reports whether m promotes to a piece other than a queen.
+func isUnderPromotion(m types.Move) bool {
+	return m.IsPromotion() && m.PromotionType() != types.Queen
 }
 
 // scoreQuietsSF generates the quiet moves and scores them.
@@ -130,7 +144,7 @@ func (mp *MovePicker) scoreQuietsSF(evasion bool) {
 		pt := piece.Type()
 		v := hc.OrderSF(piece, m, mp.ply)
 
-		if checkSq[pt]&bitboard.SquareBB[to] != 0 && eval.SEE(b, m) >= -75 {
+		if checkSq[pt]&bitboard.SquareBB[to] != 0 && eval.SEEGe(b, m, -75) {
 			v += sfCheckBonus
 		}
 		if t := byLesser[pt]; t != 0 {
@@ -187,7 +201,15 @@ func (mp *MovePicker) nextSF() types.Move {
 					continue
 				}
 				see := eval.SEE(b, m)
-				if see >= -score/18 {
+				if P.PromoOrder != 0 && m.IsPromotion() && m.PromotionType() == types.Queen {
+					// The margin is the capture's: a promotion that only
+					// loses the pawn is not a good capture.
+					score -= sfPromoBonus
+				}
+				// Underpromotions wait with the losing captures: they
+				// rarely beat the queen, which comes first.
+				good := see >= -score/18 && (P.PromoOrder == 0 || !isUnderPromotion(m))
+				if good {
 					mp.lastSEE, mp.lastSEEKnown = see, true
 					return m
 				}

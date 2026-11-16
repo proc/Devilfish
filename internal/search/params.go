@@ -59,6 +59,13 @@ type Params struct {
 	SEDoubleMargin int32 // a singular move is extended two plies when the alternatives fall this far below the singular bound (fail-soft only: a fail-hard search never reports how far)
 	SENegExt       int32 // 1: a hash move that is not singular is searched a ply shallower when the node is expected to fail high anyway
 	PawnPushExt    int32 // extension for pawn pushes to the 7th rank: 2 at every node, 1 at PV nodes only, 0 never
+	// PromoOrder 1: with MoveOrder 1 or 2, a queen promotion is ranked among
+	// the captures as if it took a piece worth a queen less a pawn (before,
+	// a quiet one came after every capture, even pawn takes pawn), and
+	// underpromotions wait with the losing captures instead of being tried
+	// as good captures before every quiet move; quiescence searches no
+	// underpromotions outside check. Not match-tested.
+	PromoOrder int32
 
 	// FailSoft selects where the search returns the score it found rather
 	// than the bound it was searching against (a sum of the soft* bits).
@@ -335,6 +342,7 @@ var P = Params{
 	SEDoubleMargin: 25,
 	SENegExt:       1,
 	PawnPushExt:    1,
+	PromoOrder:     1,
 
 	// Fail hard. Fail-soft has not shown a gain in self-play. With razoring
 	// also returning its quiescence score it lost (everything on -35 Elo
@@ -439,6 +447,7 @@ func TunableParams() []ParamSpec {
 		{"SEDoubleMargin", &P.SEDoubleMargin, 0, 10000},
 		{"SENegExt", &P.SENegExt, 0, 1},
 		{"PawnPushExt", &P.PawnPushExt, 0, 2},
+		{"PromoOrder", &P.PromoOrder, 0, 1},
 		{"FailSoft", &P.FailSoft, 0, 31},
 		{"QSEvenPrune", &P.QSEvenPrune, 0, 1},
 		{"QSMaxMoves", &P.QSMaxMoves, 0, 16},

@@ -74,6 +74,63 @@ func SEE(b *board.Board, m types.Move) int32 {
 	return gain[0]
 }
 
+// SEEGe reports whether SEE(b, m) >= threshold, exiting early before computing
+// attack bitboards whenever the initial capture balance already decides it.
+func SEEGe(b *board.Board, m types.Move, threshold int32) bool {
+	from := m.From()
+	to := m.To()
+	piece := b.Pieces[from]
+	target := b.Pieces[to]
+	if m.IsEnPassant() {
+		target = types.MakePiece(b.SideToMove.Other(), types.Pawn)
+	}
+
+	swap := SEEPieceValues[target.Type()] - threshold
+	if m.IsPromotion() {
+		swap += SEEPieceValues[m.PromotionType()] - SEEPieceValues[types.Pawn]
+	}
+	if swap < 0 {
+		return false
+	}
+
+	currType := piece.Type()
+	if m.IsPromotion() {
+		currType = m.PromotionType()
+	}
+	swap = SEEPieceValues[currType] - swap
+	if swap <= 0 {
+		return true
+	}
+
+	occ := b.Occupied() ^ bitboard.SquareBB[from]
+	side := b.SideToMove.Other()
+	attadef := getAttackersTo(b, to, occ)
+	res := int32(1)
+
+	for {
+		attadef &= occ
+		myAttackers := attadef & b.OccupiedBy(side)
+		if myAttackers == 0 {
+			break
+		}
+		res ^= 1
+		nextSq, nextType := findLVA(b, myAttackers, side)
+		if nextSq >= types.SquareNone {
+			break
+		}
+		occ ^= bitboard.SquareBB[nextSq]
+		swap = SEEPieceValues[nextType] - swap
+		if swap < res {
+			break
+		}
+		if nextType == types.Pawn || nextType == types.Bishop || nextType == types.Rook || nextType == types.Queen {
+			attadef |= getXRayAttackers(b, to, occ)
+		}
+		side = side.Other()
+	}
+	return res != 0
+}
+
 func getAttackersTo(b *board.Board, sq types.Square, occ bitboard.Bitboard) bitboard.Bitboard {
 	return (bitboard.PawnAttacks(types.White, sq) & b.PieceBB[types.BlackPawn]) |
 		(bitboard.PawnAttacks(types.Black, sq) & b.PieceBB[types.WhitePawn]) |

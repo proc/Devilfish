@@ -842,7 +842,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			for i := 0; i < probList.Count; i++ {
 				m := PickNextMove(&probList, probScores[:probList.Count], i)
 				// Only captures that can plausibly lift the score to probBeta
-				if eval.SEE(w.Board, m) < probBeta-staticEval {
+				if !eval.SEEGe(w.Board, m, probBeta-staticEval) {
 					continue
 				}
 				w.prefetchNext(w.Board.HashAfter(m)) // before the move is made: see HashAfter
@@ -914,7 +914,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	if !deferTTAtRoot && ttMove != types.MoveNone && ttMove != excludedMove && (ply > 0 || !w.isRootExcluded(ttMove)) && movegen.IsPseudoLegal(w.Board, ttMove) {
 		// Check extension (parent side): only for checks that don't lose
 		// material, and never stacked on top of a singular extension.
-		if extension == 0 && (P.CheckExt == 2 || (P.CheckExt == 1 && isPVNode)) && w.Board.GivesCheckWith(ttMove, &ci) && eval.SEE(w.Board, ttMove) >= -P.CheckExtSEE {
+		if extension == 0 && (P.CheckExt == 2 || (P.CheckExt == 1 && isPVNode)) && w.Board.GivesCheckWith(ttMove, &ci) && eval.SEEGe(w.Board, ttMove, -P.CheckExtSEE) {
 			st.CheckExts++
 			extension = 1
 		}
@@ -1828,8 +1828,47 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 	}
 
 	ci := w.Board.NewCheckInfo()
-	ml := &w.qMoves[ply]
 	qsChecks := !inCheck && qply == 0 && P.QSChecks != 0
+	sfOrder := P.MoveOrder >= 2
+	legalMoves := 0
+	var bestMove types.Move
+
+	// Try the TT move before generating and scoring all quiescence moves.
+	var triedTTMove types.Move
+	if ttMove != types.MoveNone && (inCheck || ttMove.IsCapture() || ttMove.IsPromotion() || (qsChecks && w.Board.GivesCheckWith(ttMove, &ci))) && movegen.IsPseudoLegal(w.Board, ttMove) {
+		if sfOrder {
+			w.History.PushMove(ply, w.Board.Pieces[ttMove.From()], ttMove.To())
+		}
+		w.prefetchNext(w.Board.HashAfter(ttMove))
+		w.pushAccumulator(ply, ttMove)
+		if w.makeMove(ttMove, &ci, inCheck) {
+			triedTTMove = ttMove
+			legalMoves++
+			st.QMoves++
+			score := -w.quiescence(-beta, -alpha, ply+1, qply+1)
+			w.Board.UnmakeMove(ttMove)
+			if w.TimeMan.Stopped.Load() {
+				return 0
+			}
+			if score >= beta {
+				st.QBetaCuts++
+				st.QBetaFirst++
+				if P.FailSoft&softQS == 0 {
+					return beta
+				}
+				return score
+			}
+			if score > bestScore {
+				bestScore = score
+				if score > alpha {
+					alpha = score
+					bestMove = ttMove
+				}
+			}
+		}
+	}
+
+	ml := &w.qMoves[ply]
 	movegen.GenerateMoves(w.Board, !inCheck && !qsChecks, ml)
 
 	var checkers bitboard.Bitboard
@@ -1843,7 +1882,6 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 	// other evasions by main and continuation history. (Queen promotions
 	// keep their place at the front when not in check, and the first-ply
 	// quiet checks theirs at the back.)
-	sfOrder := P.MoveOrder >= 2
 	scores := &w.qScores[ply]
 	if sfOrder {
 		w.scoreQuiescenceSF(ml, scores, ttMove, ply, inCheck)
@@ -1876,13 +1914,19 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 		}
 	}
 
-	legalMoves := 0
 	for i := 0; i < ml.Count; i++ {
 		m := PickNextMove(ml, scores[:ml.Count], i)
+		if m == triedTTMove {
+			continue
+		}
+		// An underpromotion is rarely better than the queen (P.PromoOrder).
+		if !inCheck && P.PromoOrder != 0 && isUnderPromotion(m) {
+			continue
+		}
 
 		// Quiet moves are only generated for the first-ply checks.
 		if qsChecks && !m.IsCapture() && !m.IsPromotion() {
-			if !w.Board.GivesCheckWith(m, &ci) || eval.SEE(w.Board, m) < 0 {
+			if !w.Board.GivesCheckWith(m, &ci) || !eval.SEEGe(w.Board, m, 0) {
 				continue
 			}
 		}
@@ -1906,7 +1950,7 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 
 		if !inCheck && m.IsCapture() && !m.IsPromotion() {
 			// Far below alpha, a capture has to win material to matter.
-			if P.QSEvenPrune != 0 && futBase <= alpha && eval.SEE(w.Board, m) <= 0 && !w.Board.GivesCheckWith(m, &ci) {
+			if P.QSEvenPrune != 0 && futBase <= alpha && !eval.SEEGe(w.Board, m, 1) && !w.Board.GivesCheckWith(m, &ci) {
 				st.QFutPruned++
 				if bestScore < futBase {
 					bestScore = futBase
@@ -1928,14 +1972,14 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 				if legalMoves >= 2 {
 					continue
 				}
-			} else if eval.SEE(w.Board, m) < 0 {
+			} else if !eval.SEEGe(w.Board, m, 0) {
 				continue
 			}
 		}
 
 		// SEE pruning in quiescence: skip losing captures if not in check and move does not give check
 		// SEE first: GivesCheck then only runs for the losing captures.
-		if !inCheck && eval.SEE(w.Board, m) < 0 && !w.Board.GivesCheckWith(m, &ci) {
+		if !inCheck && !eval.SEEGe(w.Board, m, 0) && !w.Board.GivesCheckWith(m, &ci) {
 			st.QSEEPruned++
 			continue
 		}
@@ -1977,6 +2021,7 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 		}
 		if score > alpha {
 			alpha = score
+			bestMove = m
 		}
 	}
 
@@ -1992,7 +2037,7 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 		if bestScore > origAlpha {
 			bound = tt.Exact
 		}
-		w.TT.StoreEval(w.Board.Hash, types.MoveNone, tt.ScoreToTT(bestScore, ply), netEval, 0, bound|pvBit)
+		w.TT.StoreEval(w.Board.Hash, bestMove, tt.ScoreToTT(bestScore, ply), netEval, 0, bound|pvBit)
 	}
 	return bestScore
 }

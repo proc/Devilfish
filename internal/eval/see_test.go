@@ -59,6 +59,13 @@ func TestSEE(t *testing.T) {
 			if actual != tc.expected {
 				t.Errorf("SEE(%s) = %d, expected %d", tc.moveStr, actual, tc.expected)
 			}
+			for _, thr := range []int32{-900, -500, -201, -200, -199, -1, 0, 1, 299, 300, 301, 500} {
+				got := SEEGe(b, m, thr)
+				want := actual >= thr
+				if got != want {
+					t.Errorf("SEEGe(%s, %d) = %v, want %v (SEE=%d)", tc.moveStr, thr, got, want, actual)
+				}
+			}
 		})
 	}
 }
