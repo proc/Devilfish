@@ -26,7 +26,7 @@ const (
 // costs far more than a probe, and the search asks for the same positions
 // again and again: with 2 MB of cache 27% of the requests were answered from
 // it; 16 MB made the search 6 to 8% faster and 64 MB only 9%.
-const evalCacheSize = 1 << 20
+const evalCacheSize = 1 << 21
 
 const wdlCacheSize = 4096
 
@@ -47,6 +47,7 @@ type SearchWorker struct {
 	Nodes             *atomic.Uint64
 	TBHits            *atomic.Uint64
 	LocalNodes        uint64
+	sharedNodes       atomic.Uint64
 	NnueEvals         uint64
 	NnueUpdates       uint64
 	NnueRefreshes     uint64
@@ -70,10 +71,7 @@ type SearchWorker struct {
 	qMoves       [MaxPly]movegen.MoveList
 	qScores      [MaxPly][256]int32
 	Accumulators [MaxPly]nnue.Accumulator
-	EvalCache         [evalCacheSize]struct {
-		key  uint32
-		eval int32
-	}
+	EvalCache    []atomic.Uint64 // shared across Engine workers (or worker-local in standalone NewWorker)
 	wdlCache          [wdlCacheSize]struct {
 		key uint64
 		wdl int8
@@ -118,15 +116,15 @@ func (w *SearchWorker) rawEval(ply int) int32 {
 			w.NnueEvals++
 			e := &w.EvalCache[w.Board.Hash&(evalCacheSize-1)]
 			key := evalCacheKey(w.Board.Hash)
-			if e.key == key {
-				staticEval = e.eval
+			if v := e.Load(); uint32(v>>32) == key {
+				staticEval = int32(uint32(v))
 			} else {
 				if w.Eight != nil {
 					staticEval = w.evaluateEight(ply)
 				} else {
 					staticEval = nnue.EvaluateEight(nnue.ActiveEightNetwork, w.Board)
 				}
-				e.key, e.eval = key, staticEval
+				e.Store(uint64(key)<<32 | uint64(uint32(staticEval)))
 			}
 		} else if nnue.ActiveNetwork != nil && ply < MaxPly {
 			w.NnueEvals++
@@ -211,9 +209,12 @@ func eightNet() *nnue.EightNetwork {
 // setupEval prepares the evaluation state for a search of w.Board.
 func (w *SearchWorker) setupEval() {
 	net := eightNet()
+	if len(w.EvalCache) == 0 {
+		w.EvalCache = make([]atomic.Uint64, evalCacheSize)
+	}
 	if net != w.cacheNet {
 		// The cached values came from another network (or none).
-		clear(w.EvalCache[:])
+		clear(w.EvalCache)
 		w.cacheNet = net
 	}
 	if net == nil {
@@ -243,6 +244,7 @@ func (w *SearchWorker) resetFor(b *board.Board, ttTable *tt.TT, tm *TimeManager,
 	w.TBHits = tbHits
 	w.History.NewSearch()
 	w.LocalNodes = 0
+	w.sharedNodes.Store(0)
 	w.NnueEvals = 0
 	w.NnueUpdates = 0
 	w.NnueRefreshes = 0
@@ -334,7 +336,7 @@ func (w *SearchWorker) checkNodeLimits() bool {
 		return w.TimeMan.CheckLimits()
 	}
 	if w.LocalNodes&8191 == 0 {
-		w.Nodes.Add(8192)
+		w.sharedNodes.Store(w.LocalNodes)
 	}
 	if w.ID == 0 {
 		return w.TimeMan.CheckLimits()

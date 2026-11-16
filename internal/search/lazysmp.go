@@ -14,6 +14,7 @@ import (
 	"devilfish/internal/eval"
 	"devilfish/internal/logger"
 	"devilfish/internal/movegen"
+	"devilfish/internal/nnue"
 	"devilfish/internal/syzygy"
 	"devilfish/internal/threadprio"
 	"devilfish/internal/tt"
@@ -63,7 +64,9 @@ type Engine struct {
 	// workers are kept between searches so their large tables are allocated
 	// once. Only Search uses them, under searchMu, and it waits for every
 	// helper before returning.
-	workers []*SearchWorker
+	workers      []*SearchWorker
+	evalCache    []atomic.Uint64
+	evalCacheNet *nnue.EightNetwork
 }
 
 // worker returns the worker for thread id, ready for a new search of b.
@@ -73,21 +76,47 @@ type Engine struct {
 var stabilityScale = [...]float64{1.30, 1.15, 1.00, 0.92, 0.85, 0.80}
 
 func (e *Engine) worker(id int, b *board.Board, tm *TimeManager) *SearchWorker {
-	if id == 0 && len(e.workers) > e.NumThreads {
-		// The thread count went down: let the surplus workers go.
-		clear(e.workers[e.NumThreads:])
-		e.workers = e.workers[:e.NumThreads]
+	if id == 0 {
+		if e.evalCache == nil {
+			e.evalCache = make([]atomic.Uint64, evalCacheSize)
+		}
+		if net := eightNet(); net != e.evalCacheNet {
+			clear(e.evalCache)
+			e.evalCacheNet = net
+		}
+		if len(e.workers) > e.NumThreads {
+			// The thread count went down: let the surplus workers go.
+			clear(e.workers[e.NumThreads:])
+			e.workers = e.workers[:e.NumThreads]
+		}
 	}
 	for len(e.workers) <= id {
 		e.workers = append(e.workers, nil)
 	}
 	if w := e.workers[id]; w != nil {
+		w.EvalCache = e.evalCache
+		w.cacheNet = e.evalCacheNet
 		w.resetFor(b, e.TT, tm, &e.Nodes, &e.TBHits)
 		return w
 	}
 	w := NewWorker(id, b, e.TT, tm, &e.Nodes, &e.TBHits)
+	w.EvalCache = e.evalCache
+	w.cacheNet = e.evalCacheNet
 	e.workers[id] = w
 	return w
+}
+
+func (e *Engine) searchNodes(maxNodes uint64, master *SearchWorker) uint64 {
+	if maxNodes > 0 {
+		return e.Nodes.Load() + (master.LocalNodes % 1024)
+	}
+	total := master.LocalNodes
+	for i := 1; i < e.NumThreads && i < len(e.workers); i++ {
+		if w := e.workers[i]; w != nil {
+			total += w.sharedNodes.Load()
+		}
+	}
+	return total
 }
 
 func NewEngine(ttSizeMB int, numThreads int) *Engine {
@@ -392,7 +421,10 @@ func (e *Engine) Search(
 		helper := e.worker(id, b, tm)
 		helpers = append(helpers, helper)
 		go func(workerID int, w *SearchWorker) {
-			defer wg.Done()
+			defer func() {
+				w.sharedNodes.Store(w.LocalNodes)
+				wg.Done()
+			}()
 			if tm.LowPriority {
 				w.enterPriority()
 				defer w.leavePriority()
@@ -421,10 +453,10 @@ func (e *Engine) Search(
 					} else if e.NumThreads <= 3 {
 						ahead = int8(workerID & 1)
 					} else {
-						// Spread helpers across +1..+4 depths so threads don't
+						// Spread helpers across +1..+5 depths so threads don't
 						// pile onto the exact same depth and duplicate work.
-						aheadTable := [8]int8{1, 0, 2, 1, 0, 3, 1, 2}
-						ahead = aheadTable[(workerID-1)&7]
+						aheadTable := [16]int8{1, 0, 2, 1, 0, 3, 1, 2, 0, 1, 2, 3, 1, 0, 2, 4}
+						ahead = aheadTable[(workerID-1)&15]
 					}
 					d = min(max(int8(e.mainDepth.Load())+1+ahead, last+1), maxDepth)
 					if d <= last {
@@ -518,7 +550,7 @@ func (e *Engine) Search(
 				}
 
 				elapsed := time.Since(startTime)
-				totalNodes := e.Nodes.Load() + (master.LocalNodes % 2048)
+				totalNodes := e.searchNodes(limits.MaxNodes, master)
 				var nps uint64
 				if elapsed.Seconds() > 0 {
 					nps = uint64(float64(totalNodes) / elapsed.Seconds())
@@ -694,7 +726,7 @@ func (e *Engine) Search(
 
 			elapsed := time.Since(startTime)
 			elapsedMs := elapsed.Milliseconds()
-			totalNodes := e.Nodes.Load() + (master.LocalNodes % 2048)
+			totalNodes := e.searchNodes(limits.MaxNodes, master)
 
 			var nps uint64
 			if elapsed.Seconds() > 0 {
@@ -838,7 +870,7 @@ func (e *Engine) Search(
 					pv = append(pv, r.ponder)
 				}
 				elapsed := time.Since(startTime)
-				nodes := e.Nodes.Load()
+				nodes := e.searchNodes(limits.MaxNodes, master)
 				var nps uint64
 				if elapsed.Seconds() > 0 {
 					nps = uint64(float64(nodes) / elapsed.Seconds())
@@ -889,7 +921,8 @@ func (e *Engine) Search(
 		}
 	}
 
-	totalNodes := e.Nodes.Load() + (master.LocalNodes % 2048)
+	totalNodes := e.searchNodes(limits.MaxNodes, master)
+	e.Nodes.Store(totalNodes)
 	totalElapsed := time.Since(startTime)
 	var finalNps uint64
 	if totalElapsed.Seconds() > 0 {
