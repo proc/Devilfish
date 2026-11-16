@@ -907,8 +907,11 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	legalMoves := 0
 	bestType := tt.UpperBound
 
-	// Staged Move Generation: Search TT move first before generating all moves
-	if ttMove != types.MoveNone && ttMove != excludedMove && (ply > 0 || !w.isRootExcluded(ttMove)) && movegen.IsPseudoLegal(w.Board, ttMove) {
+	// Staged Move Generation: Search TT move first before generating all moves.
+	// Odd helpers at the root defer ttMove if another thread is already on it
+	// so helpers spread across different root subtrees.
+	deferTTAtRoot := ply == 0 && (w.ID&1) == 1 && depth >= 5 && w.busy != nil && ttMove != types.MoveNone && w.busy.busy(busyKey(w.Board.Hash, ttMove))
+	if !deferTTAtRoot && ttMove != types.MoveNone && ttMove != excludedMove && (ply > 0 || !w.isRootExcluded(ttMove)) && movegen.IsPseudoLegal(w.Board, ttMove) {
 		// Check extension (parent side): only for checks that don't lose
 		// material, and never stacked on top of a singular extension.
 		if extension == 0 && (P.CheckExt == 2 || (P.CheckExt == 1 && isPVNode)) && w.Board.GivesCheckWith(ttMove, &ci) && eval.SEE(w.Board, ttMove) >= -P.CheckExtSEE {
@@ -929,7 +932,15 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				startNodes = w.LocalNodes
 			}
 
+			var ttBusyK uint64
+			if ply == 0 && w.busy != nil {
+				ttBusyK = busyKey(w.Board.Hash, ttMove)
+				w.busy.mark(ttBusyK)
+			}
 			score := -w.Search(depth-1+extension, -beta, -alpha, ply+1, isPVNode, !isPVNode && !cutNode, types.MoveNone, ttMove, prevMove, prevMove2)
+			if ttBusyK != 0 {
+				w.busy.unmark(ttBusyK)
+			}
 			w.Board.UnmakeMove(ttMove)
 			movesSearched++
 
@@ -1059,7 +1070,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			deferNext++
 			m, moveSEE, seeKnown = d.m, d.see, d.seeKnown
 		} else {
-			if m == ttMove || m == excludedMove {
+			if (m == ttMove && !deferTTAtRoot) || m == excludedMove {
 				continue
 			}
 			if ply == 0 && w.isRootExcluded(m) {

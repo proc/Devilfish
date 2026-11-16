@@ -471,9 +471,9 @@ func (e *Engine) Search(
 					} else if e.NumThreads <= 3 {
 						ahead = int8(workerID & 1)
 					} else {
-						// Spread helpers across +1..+5 depths so threads don't
-						// pile onto the exact same depth and duplicate work.
-						aheadTable := [16]int8{1, 0, 2, 1, 0, 3, 1, 2, 0, 1, 2, 3, 1, 0, 2, 4}
+						// Spread helpers across +1..+3 depths so threads diversify
+						// without jumping too far ahead with cold TT/history.
+						aheadTable := [16]int8{1, 0, 2, 1, 0, 2, 1, 3, 0, 1, 2, 1, 0, 2, 1, 3}
 						ahead = aheadTable[(workerID-1)&15]
 					}
 					d = min(max(int8(e.mainDepth.Load())+1+ahead, last+1), maxDepth)
@@ -627,6 +627,7 @@ func (e *Engine) Search(
 							logger.Profilef("Depth %d: a helper finished depth %d (score %d), going on at %d", depth, hd, hs, next)
 							depth = next
 							rootScore = hs
+							e.mainDepth.Store(int32(hd))
 						}
 					}
 				}
@@ -895,11 +896,19 @@ func (e *Engine) Search(
 				results = append(results, h.done)
 			}
 		}
-		if i := pickThread(results); i > 0 && results[i].move != rootBestMove {
+		if i := pickThread(results); i > 0 && (results[i].move != rootBestMove || results[i].depth > masterDepth) {
 			r := results[i]
-			logger.Profilef("Thread vote: %s (depth %d, score %d) from a helper over the main thread's %s (depth %d, score %d)",
-				r.move, r.depth, r.score, rootBestMove, masterDepth, rootScore)
-			rootBestMove, rootPonderMove, rootScore = r.move, r.ponder, r.score
+			changedMove := r.move != rootBestMove
+			if changedMove {
+				logger.Profilef("Thread vote: %s (depth %d, score %d) from a helper over the main thread's %s (depth %d, score %d)",
+					r.move, r.depth, r.score, rootBestMove, masterDepth, rootScore)
+			}
+			rootBestMove, rootScore = r.move, r.score
+			if r.ponder != types.MoveNone {
+				rootPonderMove = r.ponder
+			} else if changedMove {
+				rootPonderMove = types.MoveNone
+			}
 			if infoCallback != nil {
 				pv := []types.Move{r.move}
 				if r.ponder != types.MoveNone {
