@@ -374,6 +374,9 @@ func (u *UCI) benchStats(depth int8) {
 		line("  growth per ply       %12.2f  (nodes ratio between iterations, last four)", math.Exp(growth/float64(growthN)))
 	}
 	line("  moves per node       %12.2f  (main-search nodes that searched a move)", float64(st.MovesSearched)/float64(max(st.NodesWithMoves, 1)))
+	if st.SMPDeferred > 0 {
+		line("  moves deferred       %12d  %5.1f%% of moves searched (another thread was on them; SMPDefer)", st.SMPDeferred, pct(st.SMPDeferred, st.MovesSearched))
+	}
 	line("")
 	line("Move ordering (main search)")
 	line("  cutoffs on 1st move  %11.1f%%  of %d cutoffs", pct(st.BetaCutsFirst, st.BetaCuts), st.BetaCuts)

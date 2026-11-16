@@ -70,9 +70,11 @@ type SearchWorker struct {
 	searched     [MaxPly][256]types.Move // the main search's moves searched so far
 	qMoves       [MaxPly]movegen.MoveList
 	qScores      [MaxPly][256]int32
+	deferred     [MaxPly][maxDeferred]deferredMove // P.SMPDefer: moves put off at each ply
+	busy         *busyTable                        // P.SMPDefer: the search's shared table, nil with one thread
 	Accumulators [MaxPly]nnue.Accumulator
 	EvalCache    []atomic.Uint64 // shared across Engine workers (or worker-local in standalone NewWorker)
-	wdlCache          [wdlCacheSize]struct {
+	wdlCache     [wdlCacheSize]struct {
 		key uint64
 		wdl int8
 		ok  bool
@@ -263,6 +265,8 @@ func (w *SearchWorker) resetFor(b *board.Board, ttTable *tt.TT, tm *TimeManager,
 	clear(w.searched[:])
 	clear(w.qMoves[:])
 	clear(w.qScores[:])
+	clear(w.deferred[:])
+	w.busy = nil // Engine.Search hands out the search's table
 	clear(w.Accumulators[:])
 	w.RootBestMove = types.MoveNone
 	w.RootScore = 0
@@ -1031,16 +1035,46 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	mp.hc = &w.pickerHC[ply]
 	mp.depth = int(depth)
 
+	// P.SMPDefer: a move another thread is searching here right now is put
+	// off until the picker has nothing else, then searched as usual (by
+	// then the other thread's result is often in the hash table). Moves this
+	// node searches are marked for the other threads to see.
+	deferOK := w.busy != nil && int32(depth) >= P.SMPDeferDepth && excludedMove == types.MoveNone && (ply > 0 || w.ID != 0)
+	deferN, deferNext := 0, 0
+	pickerDone := false
+
 	for {
-		m := mp.Next()
-		if m == types.MoveNone {
-			break
+		var m types.Move
+		var moveSEE int32
+		var seeKnown bool
+		if !pickerDone {
+			m = mp.Next()
+			pickerDone = m == types.MoveNone
 		}
-		if m == ttMove || m == excludedMove {
-			continue
-		}
-		if ply == 0 && w.isRootExcluded(m) {
-			continue
+		if pickerDone {
+			if deferNext >= deferN {
+				break
+			}
+			d := &w.deferred[ply][deferNext]
+			deferNext++
+			m, moveSEE, seeKnown = d.m, d.see, d.seeKnown
+		} else {
+			if m == ttMove || m == excludedMove {
+				continue
+			}
+			if ply == 0 && w.isRootExcluded(m) {
+				continue
+			}
+			// SEE: captures and promotions carry the value the picker
+			// already computed; quiet moves get one only if a rule below
+			// asks for it.
+			moveSEE, seeKnown = mp.LastSEE()
+			if deferOK && movesSearched > 0 && deferN < maxDeferred && w.busy.busy(busyKey(w.Board.Hash, m)) {
+				w.deferred[ply][deferN] = deferredMove{m: m, see: moveSEE, seeKnown: seeKnown}
+				deferN++
+				st.SMPDeferred++
+				continue
+			}
 		}
 		fromSq := m.From()
 		toSq := m.To()
@@ -1054,9 +1088,6 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		if m.IsEnPassant() {
 			victim = types.Pawn
 		}
-		// SEE: captures and promotions carry the value the picker already
-		// computed; quiet moves get one only if a rule below asks for it.
-		moveSEE, seeKnown := mp.LastSEE()
 		// givesCheck is read by the pruning rules, LMR and the check
 		// extension, so it is computed for every move.
 		givesCheck := w.Board.GivesCheckWith(m, &ci)
@@ -1184,8 +1215,15 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		w.pushAccumulator(ply, m)
 		w.History.PushMove(ply, movedPiece, toSq)
 		w.pushMoveInfo(ply, &hc, m, movesSearched+1)
+		var busyK uint64 // P.SMPDefer: this move's mark, taken before the move changes the hash
+		if deferOK {
+			busyK = busyKey(w.Board.Hash, m)
+		}
 		if !w.makeMove(m, &ci, inCheck) {
 			continue
+		}
+		if busyK != 0 {
+			w.busy.mark(busyK)
 		}
 
 		legalMoves++
@@ -1509,6 +1547,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 
 		w.Board.UnmakeMove(m)
+		if busyK != 0 {
+			w.busy.unmark(busyK)
+		}
 		movesSearched++
 
 		if ply == 0 {

@@ -174,6 +174,25 @@ type Params struct {
 	// (one run each, which is within run-to-run variation).
 	ThreadVote int32
 
+	// SMPDefer 1: with several threads, a move another thread is searching
+	// at the same node right now is put off until this node's other moves
+	// are done ("ABDADA" lite), so threads that meet at a node spread over
+	// its moves instead of repeating each other's subtree. Applied at nodes
+	// of at least SMPDeferDepth plies, never to a node's first move, and
+	// never at the main thread's root. Helpers spreading over the root moves
+	// this way also start their iterations in different subtrees.
+	// It fires rarely: bench stats 16 with 4 threads put off 654 moves in
+	// about 5M nodes at depth 6, and 1,000 to 1,600 at depths 2 to 4.
+	// Not match-tested.
+	SMPDefer      int32
+	SMPDeferDepth int32
+
+	// SMPAdopt 1: when a helper has finished a deeper iteration than the
+	// main thread's next one, the main thread skips to the depth after it
+	// (never past the depth limit), starting its aspiration window at the
+	// helper's score. Not match-tested.
+	SMPAdopt int32
+
 	// CorrSearch 1: the size of the correction-history adjustment at a node
 	// is read as a sign that the evaluation is unreliable there, as in
 	// Stockfish: reverse futility pruning needs a wider margin, late moves
@@ -342,6 +361,9 @@ var P = Params{
 	DrawJitter:     1,
 	ThreadVote:     1,
 	SMPMode:        1,
+	SMPDefer:       1,
+	SMPDeferDepth:  6,
+	SMPAdopt:       1,
 	PruneKing:      1,
 	HistExtra:      15,
 	Cycle:          1,
@@ -433,6 +455,9 @@ func TunableParams() []ParamSpec {
 		{"DrawJitter", &P.DrawJitter, 0, 1},
 		{"ThreadVote", &P.ThreadVote, 0, 1},
 		{"SMPMode", &P.SMPMode, 0, 2},
+		{"SMPDefer", &P.SMPDefer, 0, 1},
+		{"SMPDeferDepth", &P.SMPDeferDepth, 1, 30},
+		{"SMPAdopt", &P.SMPAdopt, 0, 1},
 		{"PruneKing", &P.PruneKing, 0, 3},
 		{"HistExtra", &P.HistExtra, 0, 15},
 		{"Cycle", &P.Cycle, 0, 1},

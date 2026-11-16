@@ -44,6 +44,7 @@ type SearchStats struct {
 	LMRNoCapture  uint64 // not reduced: capture or promotion
 	LMRNoAdjust   uint64 // reduction cancelled by the history/killer/improving adjustments
 	PVSReSearches uint64 // null-window searches repeated with the full window
+	SMPDeferred   uint64 // moves put off because another thread was searching them (P.SMPDefer)
 
 	NodesWithMoves uint64 // nodes that searched at least one move
 	BetaCuts       uint64
@@ -98,6 +99,7 @@ func (s *SearchStats) Add(o *SearchStats) {
 	s.LMRNoCapture += o.LMRNoCapture
 	s.LMRNoAdjust += o.LMRNoAdjust
 	s.PVSReSearches += o.PVSReSearches
+	s.SMPDeferred += o.SMPDeferred
 	s.NodesWithMoves += o.NodesWithMoves
 	s.BetaCuts += o.BetaCuts
 	s.BetaCutsFirst += o.BetaCutsFirst

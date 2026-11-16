@@ -67,6 +67,9 @@ type Engine struct {
 	workers      []*SearchWorker
 	evalCache    []atomic.Uint64
 	evalCacheNet *nnue.EightNetwork
+
+	busy       *busyTable    // P.SMPDefer: moves being searched, shared by the threads (see smp.go)
+	helperBest atomic.Uint64 // P.SMPAdopt: the deepest iteration a helper finished (packHelperResult)
 }
 
 // worker returns the worker for thread id, ready for a new search of b.
@@ -411,6 +414,20 @@ func (e *Engine) Search(
 		defer master.leavePriority()
 	}
 
+	// Thread coordination (smp.go). Marks left by an earlier search, cut
+	// off between marking a move and unmarking it, are cleared.
+	e.helperBest.Store(0)
+	var busy *busyTable
+	if e.NumThreads > 1 && P.SMPDefer != 0 {
+		if e.busy == nil {
+			e.busy = newBusyTable()
+		} else {
+			e.busy.clear()
+		}
+		busy = e.busy
+	}
+	master.busy = busy
+
 	// WaitGroup for helper threads
 	var wg sync.WaitGroup
 	var helpers []*SearchWorker
@@ -419,6 +436,7 @@ func (e *Engine) Search(
 	for id := 1; id < e.NumThreads; id++ {
 		wg.Add(1)
 		helper := e.worker(id, b, tm)
+		helper.busy = busy
 		helpers = append(helpers, helper)
 		go func(workerID int, w *SearchWorker) {
 			defer func() {
@@ -474,6 +492,9 @@ func (e *Engine) Search(
 					w.done = threadResult{depth: d, score: score, move: w.PVArray[0][0]}
 					if w.PVLength[0] > 1 {
 						w.done.ponder = w.PVArray[0][1]
+					}
+					if P.SMPAdopt != 0 {
+						e.publishHelperResult(d, score)
 					}
 				}
 			}
@@ -594,6 +615,21 @@ func (e *Engine) Search(
 		for depth := int8(1); depth <= maxDepth; depth++ {
 			if e.Stopped.Load() {
 				break
+			}
+			// P.SMPAdopt: a depth a helper has already finished is not
+			// searched again; its result is in the hash table, and its
+			// score centres the aspiration window. The main thread still
+			// searches the depth limit itself.
+			if P.SMPAdopt != 0 && depth >= 5 {
+				if v := e.helperBest.Load(); v != 0 {
+					if hd, hs := unpackHelperResult(v); hd >= depth {
+						if next := min(hd+1, maxDepth); next > depth {
+							logger.Profilef("Depth %d: a helper finished depth %d (score %d), going on at %d", depth, hd, hs, next)
+							depth = next
+							rootScore = hs
+						}
+					}
+				}
 			}
 
 			iterStartTime := time.Now()
