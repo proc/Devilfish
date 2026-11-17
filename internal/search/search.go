@@ -733,6 +733,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			}
 			return nullScore
 		}
+		if nullScore <= -MateThreshold && ply < 2*w.rootDepth {
+			depth++
+		}
 	} else if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && prevMove != types.MoveNone && depth >= 3 && staticEval >= beta && hasNonPawns && pieceCount > 6 {
 		st.NMPGuarded++
 	}
