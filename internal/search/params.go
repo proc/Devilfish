@@ -252,7 +252,9 @@ type Params struct {
 	// root (by the running average of the best move's scores), by a few
 	// centipawns where material is unbalanced (Stockfish's optimism term;
 	// see optimismCP). Not match-tested.
-	Optimism int32
+	Optimism      int32
+	OptimismScale int32 // max optimism in internal units (default 114)
+	OptimismDiv   int32 // denominator offset in optimism curve (default 85)
 
 	// Aspiration windows at the root.
 	AspDelta  int32 // half-width of the first window
@@ -377,7 +379,9 @@ var P = Params{
 	Cycle:          1,
 	TTPV:           1,
 
-	Optimism: 0, // not match-tested
+	Optimism:      1,
+	OptimismScale: 114,
+	OptimismDiv:   85,
 
 	// A narrower window that widens gradually and searches a ply shallower
 	// after a fail high (10, 0, 1000, 1) cut the tree to depth 19 by 14% but
@@ -472,6 +476,8 @@ func TunableParams() []ParamSpec {
 		{"Cycle", &P.Cycle, 0, 1},
 		{"TTPV", &P.TTPV, 0, 1},
 		{"Optimism", &P.Optimism, 0, 1},
+		{"OptimismScale", &P.OptimismScale, 0, 300},
+		{"OptimismDiv", &P.OptimismDiv, 10, 500},
 		{"AspDelta", &P.AspDelta, 5, 100},
 		{"AspTries", &P.AspTries, 0, 10},
 		{"AspOpen", &P.AspOpen, 50, 5000},

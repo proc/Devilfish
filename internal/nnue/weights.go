@@ -15,7 +15,7 @@ var embeddedEightNNUE []byte
 // The default network, EvalFile "<stockfish>" (see LoadFile). The 8Chess
 // network above is EvalFile "<8chess>".
 //
-//go:embed nn-68752b755c93.nnue
+//go:embed nn-bddd9d57eb87.nnue
 var embeddedSFNNUE []byte
 
 var defaultPST = [7][64]int32{

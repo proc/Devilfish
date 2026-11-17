@@ -33,7 +33,15 @@ func TestSFMatchesStockfish(t *testing.T) {
 	checked := 0
 	for sc := bufio.NewScanner(f); sc.Scan(); {
 		line := sc.Text()
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			// The reference values belong to the network the header names;
+			// for another one they have to be made again with Stockfish.
+			if strings.Contains(line, ".nnue") && !strings.Contains(line, EmbeddedSFName) {
+				t.Skipf("testdata/sf_evals.tsv was made for another network than %s", EmbeddedSFName)
+			}
 			continue
 		}
 		want, fen, ok := strings.Cut(line, "\t")

@@ -179,7 +179,7 @@ func EmbeddedEight() (*EightNetwork, error) {
 }
 
 // EmbeddedSFName is the file name of that network.
-const EmbeddedSFName = "nn-68752b755c93.nnue"
+const EmbeddedSFName = "nn-bddd9d57eb87.nnue"
 
 var (
 	embeddedSFOnce sync.Once
@@ -667,12 +667,13 @@ func WDL(b *board.Board, cp int32) (win, draw, loss int) {
 // alignment of evaluation and material, so it favours straightforward
 // positions for the side that is ahead and complicated ones for the other.
 func SFOptimismCP(b *board.Board, cp int32, optimism int32) int32 {
-	m := sfMaterialOf(b)
+	simple, total, count := sfMaterialFast(b)
+	invUnits := sfInvUnitsPer[count]
 	// The network output that cp came from, near enough (the alignment
 	// scaling changes it by at most 3%).
-	nnue := int64(float64(cp) * m.unitsPer / 100 * 90649 / float64(90649+m.total))
-	v := int64(optimism) * sfAlignment(m.simple, nnue) / 16384 * (90649 + m.total) / 90649
-	return int32(math.Round(100 * float64(v) / m.unitsPer))
+	nnue := int64(float64(cp) / invUnits * 90649 / float64(90649+total))
+	v := int64(optimism) * sfAlignment(simple, nnue) / 16384 * (90649 + total) / 90649
+	return int32(math.Round(float64(v) * invUnits))
 }
 
 func abs(x int64) int64 {

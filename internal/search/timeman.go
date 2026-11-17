@@ -379,7 +379,7 @@ func (tm *TimeManager) CanStartNewIteration(lastIterDuration time.Duration, isSt
 		if lastIterDuration > 0 && elapsed+lastIterDuration/2 > tm.MaxTime {
 			return false
 		}
-		return elapsed < tm.OptTime-10*time.Millisecond
+		return elapsed < tm.OptTime-min(10*time.Millisecond, tm.OptTime/10)
 	}
 
 	// A stable best move has already had its budget cut by ScaleOptTime, so

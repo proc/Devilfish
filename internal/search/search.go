@@ -167,7 +167,7 @@ func setOptimism(tm *TimeManager, rootScore int32, rootSide types.Color) {
 		return
 	}
 	x := max(min(rootScore, 2000), -2000) * 3
-	o := 114 * x / (abs(x) + 85)
+	o := P.OptimismScale * x / (abs(x) + P.OptimismDiv)
 	if rootSide == types.Black {
 		o = -o
 	}
