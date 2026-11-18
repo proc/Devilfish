@@ -388,7 +388,9 @@ func (w *SearchWorker) tryProbCut(
 			continue
 		}
 		w.prefetchNext(w.Board.HashAfter(m))
-		w.pushAccumulator(ply, m)
+		if w.useAcc {
+			w.pushAccumulator(ply, m)
+		}
 		w.History.PushMove(ply, w.Board.Pieces[m.From()], m.To())
 		w.pushMoveInfo(ply, hc, m, 0)
 		if !w.makeMove(m, ci, inCheck) {
@@ -423,6 +425,364 @@ func (w *SearchWorker) tryProbCut(
 		}
 	}
 	return 0, false
+}
+
+//go:noinline
+func (w *SearchWorker) probeSyzygyWDL(depth int8, alpha, beta int32, ply int) (int32, bool) {
+	key := w.Board.Hash | 1
+	ce := &w.wdlCache[w.Board.Hash&(wdlCacheSize-1)]
+	var wdl int
+	var ok bool
+	if ce.key == key {
+		wdl, ok = int(ce.wdl), ce.ok
+	} else {
+		wdl, ok = syzygy.ProbeWDL(w.Board)
+		ce.key, ce.wdl, ce.ok = key, int8(wdl), ok
+	}
+	if !ok {
+		return 0, false
+	}
+	if w.TBHits != nil {
+		w.TBHits.Add(1)
+	}
+
+	var tbScore int32
+	var boundType uint8
+	switch wdl {
+	case syzygy.Win:
+		tbScore = MateScore - 100 - int32(ply)
+		boundType = tt.LowerBound
+	case syzygy.CursedWin:
+		if syzygy.Use50MoveRule {
+			tbScore = 0
+			boundType = tt.Exact
+		} else {
+			tbScore = MateScore - 100 - int32(ply)
+			boundType = tt.LowerBound
+		}
+	case syzygy.Draw:
+		tbScore = 0
+		boundType = tt.Exact
+	case syzygy.BlessedLoss:
+		if syzygy.Use50MoveRule {
+			tbScore = 0
+			boundType = tt.Exact
+		} else {
+			tbScore = -MateScore + 100 + int32(ply)
+			boundType = tt.UpperBound
+		}
+	case syzygy.Loss:
+		tbScore = -MateScore + 100 + int32(ply)
+		boundType = tt.UpperBound
+	}
+
+	w.TT.Store(w.Board.Hash, types.MoveNone, tt.ScoreToTT(tbScore, ply), depth, boundType)
+	if boundType == tt.Exact || (boundType == tt.LowerBound && tbScore >= beta) || (boundType == tt.UpperBound && tbScore <= alpha) {
+		return tbScore, true
+	}
+	return 0, false
+}
+
+//go:noinline
+func (w *SearchWorker) singularExtension(
+	depth int8, beta int32, ply int, isPVNode, cutNode bool,
+	ttMove types.Move, ttScore, corr int32,
+	prevMove, prevMove2, prevMove4 types.Move,
+) (extension int8, cutoffScore int32, cutoff bool) {
+	singularMargin := int32(depth) * 2
+	singularBeta := ttScore - singularMargin
+	sDepth := (depth - 1) / 2
+	if sDepth < 1 {
+		sDepth = 1
+	}
+
+	st := &w.Stats
+	st.SETries++
+	sScore := w.Search(sDepth, singularBeta-1, singularBeta, ply, false, cutNode, ttMove, prevMove, prevMove2, prevMove4)
+	if w.TimeMan.Stopped.Load() {
+		return 0, 0, true
+	}
+
+	if sScore >= singularBeta && singularBeta >= beta {
+		st.SEMultiCut++
+		if P.SETriple != 0 {
+			sfGravity(&w.History.TTMoveHist, -421-110*int32(depth), sfPawnLimit)
+		}
+		if P.FailSoft&softPruning == 0 {
+			return 0, beta, true
+		}
+		return 0, singularBeta, true
+	}
+	if sScore < singularBeta {
+		st.SEExtends++
+		extension = 1
+		doubleMargin := P.SEDoubleMargin
+		if P.SETriple != 0 {
+			doubleMargin -= 1175*int32(w.History.TTMoveHist)/114178/3 + corr*2/3
+		}
+		if !isPVNode && sScore < singularBeta-doubleMargin {
+			extension = 2
+			if P.SETriple != 0 && sScore < singularBeta-doubleMargin-P.SETripleMargin && ply < 2*w.rootDepth {
+				extension = 3
+			}
+		}
+	} else if P.SENegExt != 0 && (ttScore >= beta || cutNode) {
+		st.SENegExts++
+		extension = -1
+	}
+	return extension, 0, false
+}
+
+//go:noinline
+func (w *SearchWorker) tryNullMove(
+	depth int8, beta int32, ply int, cutNode, improving, kingGuard bool,
+	staticEval int32, prevMove, prevMove2, prevMove4 types.Move,
+) (score int32, cutoff, mateThreat bool) {
+	st := &w.Stats
+	st.NMPTries++
+	r := int8(P.NMPBase) + depth/int8(P.NMPDepthDiv)
+	if !improving {
+		r += int8(P.NMPNonImpr)
+	}
+	if evalR := (staticEval - beta) / P.NMPEvalDiv; evalR > 0 {
+		if evalR > 3 {
+			evalR = 3
+		}
+		r += int8(evalR)
+	}
+	w.TT.Prefetch(w.Board.Hash ^ board.ZobristSide)
+	if w.useAcc && ply+1 < MaxPly {
+		w.Accumulators[ply+1] = w.Accumulators[ply]
+	}
+	w.History.PushNull(ply)
+	w.Board.MakeNullMove()
+	nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, !cutNode, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+	w.Board.UnmakeNullMove()
+
+	if w.TimeMan.Stopped.Load() {
+		return 0, true, false
+	}
+	if nullScore >= beta && P.NMPGuard == 3 && w.nmpMinPly == 0 && (depth >= 16 || kingGuard) {
+		vDepth := depth - 1 - r
+		w.nmpMinPly = ply + 3*int(max(vDepth, 0))/4 + 1
+		v := w.Search(vDepth, beta-1, beta, ply, false, false, types.MoveNone, prevMove, prevMove2, prevMove4)
+		w.nmpMinPly = 0
+		if w.TimeMan.Stopped.Load() {
+			return 0, true, false
+		}
+		if v < beta {
+			nullScore = beta - 1
+		}
+	}
+	if nullScore >= beta {
+		st.NMPCuts++
+		if nullScore >= MateThreshold || P.FailSoft&softPruning == 0 {
+			return beta, true, false
+		}
+		return nullScore, true, false
+	}
+	return 0, false, nullScore <= -MateThreshold && ply < 2*w.rootDepth
+}
+
+//go:noinline
+func (w *SearchWorker) searchLMRMode1(
+	depth, moveExtension int8, alpha, beta, bestScore, staticEval, corr int32,
+	ply int, isPVNode, cutNode, inCheck, improving, ttFound, ttMoveNoisy bool,
+	ttMove types.Move, ttScore int32, ttDepth int8,
+	m, prevMove, prevMove2 types.Move, movedPiece types.Piece,
+	movesSearched int, hc *histCtx,
+) int32 {
+	st := &w.Stats
+	isQuiet := !m.IsCapture() && !m.IsPromotion()
+	toSq := m.To()
+	newDepth := int32(depth) - 1 + int32(moveExtension)
+	r := sfReduction(improving, int(depth), movesSearched+1)
+	if isPVNode {
+		r -= 512 + 1004
+	}
+	ttPv := isPVNode || (ply < MaxPly && w.plies[ply].ttPv)
+	if ttPv {
+		r += 929 - 3023
+		if ttFound && ttScore > alpha {
+			r -= 885
+		}
+		if ttFound && ttDepth >= depth {
+			r -= 816
+			if cutNode {
+				r -= 940
+			}
+		}
+	}
+	r += 697 - 65*int32(movesSearched+1) - corr*15
+	if cutNode {
+		r += 4026
+		if ttMove == types.MoveNone {
+			r += 933
+		}
+	}
+	if ttMoveNoisy {
+		r += 1079
+	}
+	if ply+1 < MaxPly {
+		if c := w.plies[ply+1].cutoffs; c > 1 {
+			r += 264
+			if c > 2 {
+				r += 1095
+			}
+			if !isPVNode && !cutNode {
+				r += 1138
+			}
+		}
+	}
+	if P.HistUpdate != 0 && ply < MaxPly {
+		r -= w.plies[ply].statScore * 439 / 4096
+	}
+	if isQuiet && !inCheck && abs(alpha) < MateThreshold {
+		r += 3 * max(-64, min(3*(alpha-staticEval), 96))
+	}
+	if !isPVNode && !cutNode {
+		r += r * 276 / (256*int32(depth) + 268)
+	}
+
+	var score int32
+	if depth >= 2 {
+		ext := int32(0)
+		if ply < 2*w.rootDepth {
+			ext = 2
+		}
+		d := max(1, newDepth+min(-r/1024, ext))
+		if isPVNode {
+			d++
+		}
+		if d < newDepth {
+			reduction := int8(newDepth - d)
+			st.LMRSearches++
+			st.LMRPlies += uint64(reduction)
+		}
+		st.LMREligible++
+		score = -w.Search(int8(d), -alpha-1, -alpha, ply+1, false, true, types.MoveNone, m, prevMove, prevMove2)
+
+		if score > alpha && !w.TimeMan.Stopped.Load() {
+			if d < newDepth && score > bestScore+18 {
+				newDepth++
+			}
+			if score < bestScore+3 {
+				newDepth--
+			}
+			if newDepth > d {
+				st.LMRReSearches++
+				score = -w.Search(int8(newDepth), -alpha-1, -alpha, ply+1, false, !cutNode, types.MoveNone, m, prevMove, prevMove2)
+			}
+			if P.HistUpdate != 0 && isQuiet {
+				hc.updateContSF(movedPiece, toSq, 1334, inCheck)
+			}
+		}
+	} else {
+		if ttMove == types.MoveNone {
+			r += 1127
+		}
+		if r > 5234 {
+			newDepth--
+		}
+		if r > 5487 && newDepth > 2 {
+			newDepth--
+		}
+		score = -w.Search(int8(newDepth), -alpha-1, -alpha, ply+1, false, !cutNode, types.MoveNone, m, prevMove, prevMove2)
+	}
+
+	if isPVNode && score > alpha && !w.TimeMan.Stopped.Load() {
+		st.PVSReSearches++
+		score = -w.Search(int8(newDepth), -beta, -alpha, ply+1, true, false, types.MoveNone, m, prevMove, prevMove2)
+	}
+	return score
+}
+
+//go:noinline
+func (w *SearchWorker) recordBetaCutoff(
+	hc *histCtx, m, prevMove, excludedMove types.Move,
+	searchedBefore []types.Move, movesSearched int,
+	depth int8, score, beta, rawEval, netEval int32,
+	pvBit uint8, isPVNode, inCheck, isTTMove bool, ply int,
+) int32 {
+	st := &w.Stats
+	st.NodesWithMoves++
+	st.BetaCuts++
+	w.plies[ply].cutoffs++
+	if isTTMove {
+		st.BetaCutsFirst++
+		st.BetaCutsTT++
+		if P.SETriple != 0 && !isPVNode {
+			sfGravity(&w.History.TTMoveHist, 918, sfPawnLimit)
+		}
+	} else {
+		if P.SETriple != 0 && !isPVNode {
+			sfGravity(&w.History.TTMoveHist, -747, sfPawnLimit)
+		}
+		if movesSearched == 1 {
+			st.BetaCutsFirst++
+		}
+		st.BetaCutIndex += uint64(movesSearched - 1)
+	}
+
+	if excludedMove == types.MoveNone && (ply > 0 || len(w.ExcludedRootMoves) == 0) {
+		w.TT.StoreEval(w.Board.Hash, m, tt.ScoreToTT(score, ply), netEval, depth, tt.LowerBound|pvBit)
+	}
+
+	if !inCheck && excludedMove == types.MoveNone && score > rawEval && score < MateThreshold {
+		diff := score - rawEval
+		if P.FailSoft&softCorr == 0 {
+			diff = min(score, beta) - rawEval
+		}
+		w.History.UpdateCorrHist(w.Board, diff, depth)
+	}
+
+	if ply == 0 {
+		w.PVArray[0][0] = m
+		w.PVLength[0] = 1
+	}
+
+	if P.HistUpdate != 0 {
+		w.updateStatsSF(hc, m, searchedBefore, depth, isTTMove, isPVNode, inCheck, ply, prevMove)
+		if P.FailSoft&softMoves == 0 {
+			return beta
+		}
+		return score
+	}
+
+	if !m.IsCapture() && !m.IsPromotion() {
+		w.History.UpdateKillers(ply, m)
+		bonus := quietStatBonus(depth)
+		hc.Update(w.Board.Pieces[m.From()], m, bonus)
+		w.History.UpdateCounterMove(prevMove, m)
+		for _, prevQuiet := range searchedBefore {
+			if !prevQuiet.IsCapture() && !prevQuiet.IsPromotion() {
+				hc.Update(w.Board.Pieces[prevQuiet.From()], prevQuiet, -bonus)
+			}
+		}
+	} else if m.IsCapture() {
+		attacker := w.Board.Pieces[m.From()].Type()
+		victim := w.Board.Pieces[m.To()].Type()
+		if m.IsEnPassant() {
+			victim = types.Pawn
+		}
+		w.History.UpdateCaptureHistory(attacker, victim, m.To(), depth)
+	}
+
+	for _, prevCap := range searchedBefore {
+		if prevCap.IsCapture() {
+			att := w.Board.Pieces[prevCap.From()].Type()
+			vic := w.Board.Pieces[prevCap.To()].Type()
+			if prevCap.IsEnPassant() {
+				vic = types.Pawn
+			}
+			w.History.PenalizeCaptureHistory(att, vic, prevCap.To(), depth)
+		}
+	}
+
+	if P.FailSoft&softMoves == 0 {
+		return beta
+	}
+	return score
 }
 
 func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode bool, cutNode bool, excludedMove types.Move, prevMove types.Move, prevMove2 types.Move, prevMove4 types.Move) int32 {
@@ -540,64 +900,8 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		syzygy.IsAvailable() &&
 		w.Board.Castling == 0 &&
 		bitboard.Count(w.Board.Occupied()) <= syzygy.MaxPieces() {
-
-		key := w.Board.Hash | 1
-		ce := &w.wdlCache[w.Board.Hash&(wdlCacheSize-1)]
-		var wdl int
-		var ok bool
-		if ce.key == key {
-			wdl, ok = int(ce.wdl), ce.ok
-		} else {
-			wdl, ok = syzygy.ProbeWDL(w.Board)
-			ce.key, ce.wdl, ce.ok = key, int8(wdl), ok
-		}
-		if ok {
-			if w.TBHits != nil {
-				w.TBHits.Add(1)
-			}
-
-			var tbScore int32
-			var boundType uint8
-
-			switch wdl {
-			case syzygy.Win:
-				tbScore = MateScore - 100 - int32(ply)
-				boundType = tt.LowerBound
-			case syzygy.CursedWin:
-				if syzygy.Use50MoveRule {
-					tbScore = 0
-					boundType = tt.Exact
-				} else {
-					tbScore = MateScore - 100 - int32(ply)
-					boundType = tt.LowerBound
-				}
-			case syzygy.Draw:
-				tbScore = 0
-				boundType = tt.Exact
-			case syzygy.BlessedLoss:
-				if syzygy.Use50MoveRule {
-					tbScore = 0
-					boundType = tt.Exact
-				} else {
-					tbScore = -MateScore + 100 + int32(ply)
-					boundType = tt.UpperBound
-				}
-			case syzygy.Loss:
-				tbScore = -MateScore + 100 + int32(ply)
-				boundType = tt.UpperBound
-			}
-
-			w.TT.Store(w.Board.Hash, types.MoveNone, tt.ScoreToTT(tbScore, ply), depth, boundType)
-
-			if boundType == tt.Exact {
-				return tbScore
-			}
-			if boundType == tt.LowerBound && tbScore >= beta {
-				return tbScore
-			}
-			if boundType == tt.UpperBound && tbScore <= alpha {
-				return tbScore
-			}
+		if tbScore, hit := w.probeSyzygyWDL(depth, alpha, beta, ply); hit {
+			return tbScore
 		}
 	}
 
@@ -764,54 +1068,11 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	// (prevMove is MoveNone below the root only directly after a null move).
 	pieceCount := bitboard.Count(w.Board.Occupied())
 	if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && prevMove != types.MoveNone && nmpAllowed && depth >= 3 && staticEval >= beta+max(P.NMPMargin-P.NMPMarginStep*int32(depth), 0) && hasNonPawns && pieceCount > 6 {
-		st.NMPTries++
-		r := int8(P.NMPBase) + depth/int8(P.NMPDepthDiv)
-		if !improving {
-			r += int8(P.NMPNonImpr)
+		nmpScore, cutoff, mateThreat := w.tryNullMove(depth, beta, ply, cutNode, improving, kingGuard, staticEval, prevMove, prevMove2, prevMove4)
+		if cutoff {
+			return nmpScore
 		}
-		// Reduce more the further static eval sits above beta
-		if evalR := (staticEval - beta) / P.NMPEvalDiv; evalR > 0 {
-			if evalR > 3 {
-				evalR = 3
-			}
-			r += int8(evalR)
-		}
-		w.TT.Prefetch(w.Board.Hash ^ board.ZobristSide)
-		if w.useAcc && ply+1 < MaxPly {
-			w.Accumulators[ply+1] = w.Accumulators[ply]
-		}
-		w.History.PushNull(ply)
-		w.Board.MakeNullMove()
-		nullScore := -w.Search(depth-1-r, -beta, -beta+1, ply+1, false, !cutNode, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
-		w.Board.UnmakeNullMove()
-
-		if w.TimeMan.Stopped.Load() {
-			return 0
-		}
-		// P.NMPGuard 3, as Stockfish: at high depth, or with the king under
-		// pressure (where the other settings forbid the null move), the
-		// cutoff counts only if a reduced search without null moves near
-		// this node agrees.
-		if nullScore >= beta && P.NMPGuard == 3 && w.nmpMinPly == 0 && (depth >= 16 || kingGuard) {
-			vDepth := depth - 1 - r
-			w.nmpMinPly = ply + 3*int(max(vDepth, 0))/4 + 1
-			v := w.Search(vDepth, beta-1, beta, ply, false, false, types.MoveNone, prevMove, prevMove2, prevMove4)
-			w.nmpMinPly = 0
-			if w.TimeMan.Stopped.Load() {
-				return 0
-			}
-			if v < beta {
-				nullScore = beta - 1
-			}
-		}
-		if nullScore >= beta {
-			st.NMPCuts++
-			if nullScore >= MateThreshold || P.FailSoft&softPruning == 0 {
-				return beta // a mate found with an extra move is not proven
-			}
-			return nullScore
-		}
-		if nullScore <= -MateThreshold && ply < 2*w.rootDepth {
+		if mateThreat {
 			depth++
 		}
 	} else if ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && prevMove != types.MoveNone && depth >= 3 && staticEval >= beta && hasNonPawns && pieceCount > 6 {
@@ -831,61 +1092,14 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	extension := int8(0)
 
 	// Singular Extension (SE)
-	// If the TT move is significantly better than all other alternative moves,
-	// extend the search depth for the TT move.
 	if ply > 0 && excludedMove == types.MoveNone && depth >= 5 && ttMove != types.MoveNone &&
 		!inCheck && ttFound && ttDepth >= depth-3 && ttType != tt.UpperBound &&
 		ttScore > -MateThreshold && ttScore < MateThreshold {
-
-		singularMargin := int32(depth) * 2
-		singularBeta := ttScore - singularMargin
-		sDepth := (depth - 1) / 2
-		if sDepth < 1 {
-			sDepth = 1
-		}
-
-		st.SETries++
-		sScore := w.Search(sDepth, singularBeta-1, singularBeta, ply, false, cutNode, ttMove, prevMove, prevMove2, prevMove4)
-
-		if w.TimeMan.Stopped.Load() {
-			return 0
-		}
-
-		if sScore >= singularBeta && singularBeta >= beta {
-			// Multi-cut: another move also beats beta, even searched shallower
-			// and with the TT move excluded, so this node fails high.
-			st.SEMultiCut++
-			if P.SETriple != 0 {
-				sfGravity(&w.History.TTMoveHist, -421-110*int32(depth), sfPawnLimit)
-			}
-			if P.FailSoft&softPruning == 0 {
-				return beta
-			}
-			return singularBeta
-		}
-		if sScore < singularBeta {
-			st.SEExtends++
-			extension = 1
-			doubleMargin := P.SEDoubleMargin
-			if P.SETriple != 0 {
-				// Stockfish: the margin narrows when hash moves have been
-				// proving best lately (in its units, three to the
-				// centipawn), and where the evaluation needed correcting.
-				doubleMargin -= 1175*int32(w.History.TTMoveHist)/114178/3 + corr*2/3
-			}
-			if !isPVNode && sScore < singularBeta-doubleMargin {
-				extension = 2
-				// A third ply when nothing else comes close, but not in
-				// lines already twice as long as the root search is deep.
-				if P.SETriple != 0 && sScore < singularBeta-doubleMargin-P.SETripleMargin && ply < 2*w.rootDepth {
-					extension = 3
-				}
-			}
-		} else if P.SENegExt != 0 && (ttScore >= beta || cutNode) {
-			// Not singular, and the node is expected to fail high whichever
-			// move is played: the hash move does not need its full depth.
-			st.SENegExts++
-			extension = -1
+		var cutoff bool
+		var cutoffScore int32
+		extension, cutoffScore, cutoff = w.singularExtension(depth, beta, ply, isPVNode, cutNode, ttMove, ttScore, corr, prevMove, prevMove2, prevMove4)
+		if cutoff {
+			return cutoffScore
 		}
 	}
 
@@ -939,7 +1153,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			extension = 1
 		}
 		w.prefetchNext(w.Board.HashAfter(ttMove)) // before the move is made: see HashAfter
-		w.pushAccumulator(ply, ttMove)
+		if w.useAcc {
+			w.pushAccumulator(ply, ttMove)
+		}
 		w.History.PushMove(ply, w.Board.Pieces[ttMove.From()], ttMove.To())
 		w.pushMoveInfo(ply, &hc, ttMove, 1)
 		if w.makeMove(ttMove, &ci, inCheck) {
@@ -976,50 +1192,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 			// Beta Cutoff (Fail-High)
 			if score >= beta {
-				st.NodesWithMoves++
-				st.BetaCuts++
-				st.BetaCutsFirst++
-				st.BetaCutsTT++
-				w.plies[ply].cutoffs++
-				if P.SETriple != 0 && !isPVNode {
-					sfGravity(&w.History.TTMoveHist, 918, sfPawnLimit)
-				}
-				if excludedMove == types.MoveNone && (ply > 0 || len(w.ExcludedRootMoves) == 0) {
-					w.TT.StoreEval(w.Board.Hash, ttMove, tt.ScoreToTT(score, ply), netEval, depth, tt.LowerBound|pvBit)
-				}
-
-				if !inCheck && excludedMove == types.MoveNone && score > rawEval && score < MateThreshold {
-					diff := score - rawEval
-					if P.FailSoft&softCorr == 0 {
-						diff = min(score, beta) - rawEval
-					}
-					w.History.UpdateCorrHist(w.Board, diff, depth)
-				}
-
-				if ply == 0 {
-					bestMove = ttMove
-					w.PVArray[0][0] = ttMove
-					w.PVLength[0] = 1
-				}
-
-				if P.HistUpdate != 0 {
-					w.updateStatsSF(&hc, ttMove, nil, depth, true, isPVNode, inCheck, ply, prevMove)
-				} else if !ttMove.IsCapture() && !ttMove.IsPromotion() {
-					w.History.UpdateKillers(ply, ttMove)
-					hc.Update(w.Board.Pieces[ttMove.From()], ttMove, quietStatBonus(depth))
-					w.History.UpdateCounterMove(prevMove, ttMove)
-				} else if ttMove.IsCapture() {
-					attacker := w.Board.Pieces[ttMove.From()].Type()
-					victim := w.Board.Pieces[ttMove.To()].Type()
-					if ttMove.IsEnPassant() {
-						victim = types.Pawn
-					}
-					w.History.UpdateCaptureHistory(attacker, victim, ttMove.To(), depth)
-				}
-				if P.FailSoft&softMoves == 0 {
-					return beta
-				}
-				return score
+				return w.recordBetaCutoff(&hc, ttMove, prevMove, excludedMove, nil, 1, depth, score, beta, rawEval, netEval, pvBit, isPVNode, inCheck, true, ply)
 			}
 
 			bestScore = score
@@ -1243,7 +1416,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 		}
 
 		w.prefetchNext(w.Board.HashAfter(m)) // before the move is made: see HashAfter
-		w.pushAccumulator(ply, m)
+		if w.useAcc {
+			w.pushAccumulator(ply, m)
+		}
 		w.History.PushMove(ply, movedPiece, toSq)
 		w.pushMoveInfo(ply, &hc, m, movesSearched+1)
 		var busyK uint64 // P.SMPDefer: this move's mark, taken before the move changes the hash
@@ -1288,110 +1463,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			// First move: full window (extended if 7th rank pawn push)
 			score = -w.Search(depth-1+moveExtension, -beta, -alpha, ply+1, isPVNode, !isPVNode && !cutNode, types.MoveNone, m, prevMove, prevMove2)
 		} else if P.LMRMode == 1 {
-			// Stockfish's late-move reductions: see sfReduction.
-			newDepth := int32(depth) - 1 + int32(moveExtension)
-			r := sfReduction(improving, int(depth), movesSearched+1)
-			if isPVNode {
-				r -= 512 + 1004
-			}
-			if ttPv {
-				r += 929 - 3023
-				if ttFound && ttScore > alpha {
-					r -= 885
-				}
-				if ttFound && ttDepth >= depth {
-					r -= 816
-					if cutNode {
-						r -= 940
-					}
-				}
-			}
-			r += 697 - 65*int32(movesSearched+1) - corr*15
-			if cutNode {
-				r += 4026
-				if ttMove == types.MoveNone {
-					r += 933
-				}
-			}
-			if ttMoveNoisy {
-				r += 1079
-			}
-			if ply+1 < MaxPly {
-				if c := w.plies[ply+1].cutoffs; c > 1 {
-					r += 264
-					if c > 2 {
-						r += 1095
-					}
-					if !isPVNode && !cutNode {
-						r += 1138
-					}
-				}
-			}
-			if P.HistUpdate != 0 && ply < MaxPly {
-				r -= w.plies[ply].statScore * 439 / 4096
-			}
-			if isQuiet && !inCheck && abs(alpha) < MateThreshold {
-				// In Stockfish's units, three to the centipawn.
-				r += 3 * max(-64, min(3*(alpha-staticEval), 96))
-			}
-			if !isPVNode && !cutNode {
-				r += r * 276 / (256*int32(depth) + 268)
-			}
-
-			if depth >= 2 {
-				// A negative reduction extends, by up to two plies, unless
-				// the line is already far deeper than the root search.
-				ext := int32(0)
-				if ply < 2*w.rootDepth {
-					ext = 2
-				}
-				d := max(1, newDepth+min(-r/1024, ext))
-				if isPVNode {
-					d++
-				}
-				if d < newDepth {
-					reduction = int8(newDepth - d)
-					st.LMRSearches++
-					st.LMRPlies += uint64(reduction)
-				}
-				st.LMREligible++
-				score = -w.Search(int8(d), -alpha-1, -alpha, ply+1, false, true, types.MoveNone, m, prevMove, prevMove2)
-
-				if score > alpha && !w.TimeMan.Stopped.Load() {
-					// The full-depth search goes a ply deeper if the reduced
-					// one did well and a ply shallower if it barely passed
-					// (53 and 8 in Stockfish's units).
-					if d < newDepth && score > bestScore+18 {
-						newDepth++
-					}
-					if score < bestScore+3 {
-						newDepth--
-					}
-					if newDepth > d {
-						st.LMRReSearches++
-						score = -w.Search(int8(newDepth), -alpha-1, -alpha, ply+1, false, !cutNode, types.MoveNone, m, prevMove, prevMove2)
-					}
-					if P.HistUpdate != 0 && isQuiet {
-						hc.updateContSF(movedPiece, toSq, 1334, inCheck)
-					}
-				}
-			} else {
-				if ttMove == types.MoveNone {
-					r += 1127
-				}
-				if r > 5234 {
-					newDepth--
-				}
-				if r > 5487 && newDepth > 2 {
-					newDepth--
-				}
-				score = -w.Search(int8(newDepth), -alpha-1, -alpha, ply+1, false, !cutNode, types.MoveNone, m, prevMove, prevMove2)
-			}
-
-			if isPVNode && score > alpha && !w.TimeMan.Stopped.Load() {
-				st.PVSReSearches++
-				score = -w.Search(int8(newDepth), -beta, -alpha, ply+1, true, false, types.MoveNone, m, prevMove, prevMove2)
-			}
+			score = w.searchLMRMode1(depth, moveExtension, alpha, beta, bestScore, staticEval, corr, ply, isPVNode, cutNode, inCheck, improving, ttFound, ttMoveNoisy, ttMove, ttScore, ttDepth, m, prevMove, prevMove2, movedPiece, movesSearched, &hc)
 		} else {
 			// Late Move Reductions (LMR)
 			if depth >= 3 && movesSearched >= int(P.LMRMinMove) && (!inCheck || P.CheckLMR != 0) {
@@ -1613,80 +1685,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 
 		// Beta Cutoff (Fail-High)
 		if score >= beta {
-			st.NodesWithMoves++
-			st.BetaCuts++
-			w.plies[ply].cutoffs++
-			if P.SETriple != 0 && !isPVNode {
-				sfGravity(&w.History.TTMoveHist, -747, sfPawnLimit)
-			}
-			if movesSearched == 1 {
-				st.BetaCutsFirst++
-			}
-			st.BetaCutIndex += uint64(movesSearched - 1)
-			if excludedMove == types.MoveNone && (ply > 0 || len(w.ExcludedRootMoves) == 0) {
-				w.TT.StoreEval(w.Board.Hash, m, tt.ScoreToTT(score, ply), netEval, depth, tt.LowerBound|pvBit)
-			}
-
-			if !inCheck && excludedMove == types.MoveNone && score > rawEval && score < MateThreshold {
-				diff := score - rawEval
-				if P.FailSoft&softCorr == 0 {
-					diff = min(score, beta) - rawEval
-				}
-				w.History.UpdateCorrHist(w.Board, diff, depth)
-			}
-
-			if ply == 0 {
-				bestMove = m
-				w.PVArray[0][0] = m
-				w.PVLength[0] = 1
-			}
-
-			if P.HistUpdate != 0 {
-				w.updateStatsSF(&hc, m, searchedMoves[:movesSearched-1], depth, m == ttMove, isPVNode, inCheck, ply, prevMove)
-				if P.FailSoft&softMoves == 0 {
-					return beta
-				}
-				return score
-			}
-			if isQuiet {
-				w.History.UpdateKillers(ply, m)
-				bonus := quietStatBonus(depth)
-				hc.Update(movedPiece, m, bonus)
-				w.History.UpdateCounterMove(prevMove, m)
-
-				// Penalize preceding quiet moves that failed to produce a cutoff
-				for j := 0; j < movesSearched-1; j++ {
-					prevQuiet := searchedMoves[j]
-					if !prevQuiet.IsCapture() && !prevQuiet.IsPromotion() {
-						hc.Update(w.Board.Pieces[prevQuiet.From()], prevQuiet, -bonus)
-					}
-				}
-			} else if m.IsCapture() {
-				attacker := w.Board.Pieces[m.From()].Type()
-				victim := w.Board.Pieces[m.To()].Type()
-				if m.IsEnPassant() {
-					victim = types.Pawn
-				}
-				w.History.UpdateCaptureHistory(attacker, victim, m.To(), depth)
-			}
-
-			// Penalize preceding captures that failed to produce a cutoff
-			for j := 0; j < movesSearched-1; j++ {
-				prevCap := searchedMoves[j]
-				if prevCap.IsCapture() {
-					att := w.Board.Pieces[prevCap.From()].Type()
-					vic := w.Board.Pieces[prevCap.To()].Type()
-					if prevCap.IsEnPassant() {
-						vic = types.Pawn
-					}
-					w.History.PenalizeCaptureHistory(att, vic, prevCap.To(), depth)
-				}
-			}
-
-			if P.FailSoft&softMoves == 0 {
-				return beta
-			}
-			return score
+			return w.recordBetaCutoff(&hc, m, prevMove, excludedMove, searchedMoves[:movesSearched-1], movesSearched, depth, score, beta, rawEval, netEval, pvBit, isPVNode, inCheck, m == ttMove, ply)
 		}
 
 		if score > bestScore {
@@ -1873,7 +1872,9 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 			w.History.PushMove(ply, w.Board.Pieces[ttMove.From()], ttMove.To())
 		}
 		w.prefetchNext(w.Board.HashAfter(ttMove))
-		w.pushAccumulator(ply, ttMove)
+		if w.useAcc {
+			w.pushAccumulator(ply, ttMove)
+		}
 		if w.makeMove(ttMove, &ci, inCheck) {
 			triedTTMove = ttMove
 			legalMoves++
@@ -2022,7 +2023,9 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 			w.History.PushMove(ply, w.Board.Pieces[m.From()], m.To())
 		}
 		w.prefetchNext(w.Board.HashAfter(m)) // before the move is made: see HashAfter
-		w.pushAccumulator(ply, m)
+		if w.useAcc {
+			w.pushAccumulator(ply, m)
+		}
 		if !w.makeMove(m, &ci, inCheck) {
 			continue
 		}
