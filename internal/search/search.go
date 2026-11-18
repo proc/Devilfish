@@ -1535,6 +1535,19 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 				}
 			}
 
+			// In-tree diversity for LazySMP helpers: vary late-move reductions
+			// slightly by worker ID so threads explore different subtrees.
+			if w.ID > 0 && depth >= 4 && movesSearched >= 3 && reduction > 0 {
+				switch w.ID & 3 {
+				case 1:
+					reduction--
+				case 3:
+					if reduction < depth-2 {
+						reduction++
+					}
+				}
+			}
+
 			// Null-window search with reduction
 			if reduction > 0 {
 				st.LMRSearches++

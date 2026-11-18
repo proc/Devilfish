@@ -69,8 +69,10 @@ type Engine struct {
 	evalCache    []atomic.Uint64
 	evalCacheNet *nnue.EightNetwork
 
-	busy       *busyTable    // P.SMPDefer: moves being searched, shared by the threads (see smp.go)
-	helperBest atomic.Uint64 // P.SMPAdopt: the deepest iteration a helper finished (packHelperResult)
+	busy        *busyTable                  // P.SMPDefer: moves being searched, shared by the threads (see smp.go)
+	helperBest  atomic.Uint64               // P.SMPAdopt: the deepest iteration a helper finished (packHelperResult)
+	depthCount  [MaxPly]atomic.Int32        // dynamic depth gating: helpers currently on each depth
+	multiPVExcl atomic.Pointer[[]types.Move] // MultiPV: snapshot of root moves already found for current depth
 }
 
 // worker returns the worker for thread id, ready for a new search of b.
@@ -457,6 +459,17 @@ func (e *Engine) Search(
 	// Thread coordination (smp.go). Marks left by an earlier search, cut
 	// off between marking a move and unmarking it, are cleared.
 	e.helperBest.Store(0)
+	e.multiPVExcl.Store(nil)
+	for i := 0; i <= int(maxDepth) && i < len(e.depthCount); i++ {
+		e.depthCount[i].Store(0)
+	}
+	multiPVCount := e.MultiPV
+	if multiPVCount > len(legalMoves) {
+		multiPVCount = len(legalMoves)
+	}
+	if multiPVCount < 1 {
+		multiPVCount = 1
+	}
 	var busy *busyTable
 	if e.NumThreads > 1 && P.SMPDefer != 0 {
 		if e.busy == nil {
@@ -506,23 +519,36 @@ func (e *Engine) Search(
 				// store is waiting in the hash table when the main thread
 				// gets there.
 				if P.SMPMode != 0 {
-					var ahead int8
 					if P.SMPMode == 2 {
-						ahead = int8(workerID % 3)
-					} else if e.NumThreads <= 3 {
-						ahead = int8(workerID & 1)
+						d = min(max(int8(e.mainDepth.Load())+1+int8(workerID%3), last+1), maxDepth)
 					} else {
-						// Spread helpers across +1..+3 depths so threads diversify
-						// without jumping too far ahead with cold TT/history.
-						aheadTable := [16]int8{1, 0, 2, 1, 0, 2, 1, 3, 0, 1, 2, 1, 0, 2, 1, 3}
-						ahead = aheadTable[(workerID-1)&15]
+						d = max(int8(e.mainDepth.Load())+1, last+1)
+						if e.NumThreads > 2 {
+							limit := int32(1 + (workerID & 1))
+							for d < maxDepth && e.depthCount[d].Load() >= limit {
+								d++
+							}
+						}
+						if d > maxDepth {
+							d = maxDepth
+						}
 					}
-					d = min(max(int8(e.mainDepth.Load())+1+ahead, last+1), maxDepth)
 					if d <= last {
 						break // everything up to the depth limit is done
 					}
 				}
+				if multiPVCount > 1 && (workerID&1) == 1 {
+					if excl := e.multiPVExcl.Load(); excl != nil {
+						w.ExcludedRootMoves = *excl
+					} else {
+						w.ExcludedRootMoves = nil
+					}
+				} else {
+					w.ExcludedRootMoves = nil
+				}
+				e.depthCount[d].Add(1)
 				score := w.helperIteration(d, prev)
+				e.depthCount[d].Add(-1)
 				prev = score
 				if !e.Stopped.Load() {
 					last = d
@@ -551,14 +577,6 @@ func (e *Engine) Search(
 	e.mainDepth.Store(0)
 	var rootPV []types.Move
 
-	multiPVCount := e.MultiPV
-	if multiPVCount > len(legalMoves) {
-		multiPVCount = len(legalMoves)
-	}
-	if multiPVCount < 1 {
-		multiPVCount = 1
-	}
-
 	if multiPVCount > 1 {
 		// MultiPV iterative deepening loop
 		for depth := int8(1); depth <= maxDepth; depth++ {
@@ -569,6 +587,7 @@ func (e *Engine) Search(
 			iterStartTime := time.Now()
 			master.RootMoveNodes = [64][64]uint64{}
 			excludedRootMoves := make([]types.Move, 0, multiPVCount)
+			e.multiPVExcl.Store(nil)
 
 			for pvIdx := 0; pvIdx < multiPVCount; pvIdx++ {
 				if e.Stopped.Load() {
@@ -593,6 +612,8 @@ func (e *Engine) Search(
 
 				if pvMove != types.MoveNone {
 					excludedRootMoves = append(excludedRootMoves, pvMove)
+					snap := append([]types.Move(nil), excludedRootMoves...)
+					e.multiPVExcl.Store(&snap)
 					if pvIdx == 0 {
 						rootBestMove = pvMove
 						rootScore = score
