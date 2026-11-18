@@ -325,7 +325,7 @@ var P = Params{
 	LMRMinMove:  1,
 	LMRCutNode:  1,
 	LMRExempt:   0,
-	PruneExempt: 1,
+	PruneExempt: 0,
 	// Null move. With NMPBase 4 and a further ply when not improving the
 	// null search was a bare quiescence search up to depth 9 or so, and only
 	// 24% of them cut off. Within 40 centipawns of beta fewer than 5% did:
@@ -374,7 +374,7 @@ var P = Params{
 	SMPDefer:       1,
 	SMPDeferDepth:  6,
 	SMPAdopt:       1,
-	PruneKing:      1,
+	PruneKing:      0,
 	HistExtra:      15,
 	Cycle:          1,
 	TTPV:           1,
