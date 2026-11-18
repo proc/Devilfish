@@ -95,3 +95,24 @@ func TestUnusableDirectoryFallsBack(t *testing.T) {
 		t.Fatalf("unusable directory: got %d threads, want 6", n)
 	}
 }
+
+func TestHasOthers(t *testing.T) {
+	dir := t.TempDir()
+	a, b := Open(dir, 8), Open(dir, 8)
+	if a.HasOthers() {
+		t.Fatal("HasOthers true before any Acquire")
+	}
+	_, ca := a.Acquire(8, Ponder)
+	if a.HasOthers() {
+		t.Fatal("HasOthers true when pondering alone")
+	}
+	_, cb := b.Acquire(8, Search)
+	if !a.HasOthers() {
+		t.Fatal("HasOthers false while another instance is searching")
+	}
+	b.Release(cb)
+	if a.HasOthers() {
+		t.Fatal("HasOthers true after other instance released")
+	}
+	a.Release(ca)
+}

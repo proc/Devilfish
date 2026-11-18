@@ -332,7 +332,10 @@ func (w *SearchWorker) pushAccumulator(ply int, m types.Move) {
 // just check Stopped.Load(), avoiding cross-core clock syscalls and reducing
 // shared atomic node-counter contention.
 func (w *SearchWorker) checkNodeLimits() bool {
-	if w.lowPrio {
+	if w.TimeMan.LowPriority {
+		if w.ID == 0 {
+			w.TimeMan.RefreshLowPriority()
+		}
 		w.syncPriority()
 	}
 	if w.TimeMan.MaxNodes > 0 {

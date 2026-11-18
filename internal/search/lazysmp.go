@@ -405,6 +405,15 @@ func (e *Engine) Search(
 
 	tm := NewTimeManager(limits, b.SideToMove, &e.Stopped, &e.Nodes, b)
 	tm.LowPriority = limits.LowPriority && limits.Ponder && threadprio.Supported()
+	tm.LowPriorityFn = limits.LowPriorityFn
+	if tm.LowPriority {
+		if tm.LowPriorityFn != nil {
+			tm.wantLowPrio.Store(tm.LowPriorityFn())
+			tm.lastPrioCheck.Store(time.Now().UnixNano())
+		} else {
+			tm.wantLowPrio.Store(true)
+		}
+	}
 	e.currentTM.Store(tm)
 	defer e.currentTM.Store(nil)
 	// A ponderhit that arrived before the line above found no TimeManager
@@ -1272,9 +1281,9 @@ func (w *SearchWorker) enterPriority() {
 }
 
 // syncPriority makes the thread's priority follow the search: low while it
-// is pondering, normal from the ponderhit on.
+// is pondering and sharing cores, normal otherwise.
 func (w *SearchWorker) syncPriority() {
-	if low := w.TimeMan.Ponder.Load(); low != w.lowPrio && threadprio.SetLow(low) {
+	if low := w.TimeMan.WantLowPriority(); low != w.lowPrio && threadprio.SetLow(low) {
 		w.lowPrio = low
 	}
 }

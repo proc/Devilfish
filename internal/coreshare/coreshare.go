@@ -61,12 +61,14 @@ type Pool struct {
 	cores      int
 	dirCreated bool
 
-	mu     sync.Mutex
-	claim  uint64 // identifies the current claim; 0 means none
-	last   uint64
-	mode   Mode
-	active lockFile   // the active lock held, if any
-	slots  []lockFile // the slot locks held
+	mu        sync.Mutex
+	claim     uint64 // identifies the current claim; 0 means none
+	last      uint64
+	mode      Mode
+	active    lockFile   // the active lock held, if any
+	activeIdx int        // index of active lock held, or -1
+	slots     []lockFile // the slot locks held
+	slotHeld  []bool     // slots held by this Pool, indexed by slot number
 }
 
 // Open returns a pool of the given number of cores that meets other
@@ -75,7 +77,7 @@ func Open(dir string, cores int) *Pool {
 	if cores < 1 {
 		cores = 1
 	}
-	return &Pool{dir: dir, cores: cores}
+	return &Pool{dir: dir, cores: cores, activeIdx: -1, slotHeld: make([]bool, cores)}
 }
 
 // Cores is the number of cores the pool divides.
@@ -159,11 +161,34 @@ func (p *Pool) Release(claim uint64) {
 func (p *Pool) releaseLocked() {
 	p.active.unlock()
 	p.active = lockFile{}
+	p.activeIdx = -1
 	for _, s := range p.slots {
 		s.unlock()
 	}
 	p.slots = p.slots[:0]
+	clear(p.slotHeld)
 	p.claim = 0
+}
+
+// HasOthers reports whether another engine instance currently holds any active
+// or core-slot lock in this pool.
+func (p *Pool) HasOthers() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.dirCreated {
+		return false
+	}
+	for i := 0; i < p.cores; i++ {
+		if !p.slotHeld[i] && isLocked(filepath.Join(p.dir, "slot-"+itoa(i))) {
+			return true
+		}
+	}
+	for i := 0; i < maxActive; i++ {
+		if i != p.activeIdx && isLocked(p.activePath(i)) {
+			return true
+		}
+	}
+	return false
 }
 
 // countActive returns the number of other processes searching now.
@@ -181,6 +206,7 @@ func (p *Pool) takeActive() {
 	for i := 0; i < maxActive; i++ {
 		if l, ok := lockTry(p.activePath(i)); ok {
 			p.active = l
+			p.activeIdx = i
 			return
 		}
 	}
@@ -191,6 +217,7 @@ func (p *Pool) takeSlots(n int) {
 	for i := 0; i < p.cores && len(p.slots) < n; i++ {
 		if l, ok := lockTry(filepath.Join(p.dir, "slot-"+itoa(i))); ok {
 			p.slots = append(p.slots, l)
+			p.slotHeld[i] = true
 		}
 	}
 }

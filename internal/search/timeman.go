@@ -25,7 +25,8 @@ type SearchLimits struct {
 	// LowPriority runs the search threads at a low scheduling priority for
 	// as long as the search is pondering, so it gives way to other engines'
 	// searches; a ponderhit brings the threads back to normal priority.
-	LowPriority bool
+	LowPriority   bool
+	LowPriorityFn func() bool // optional predicate: when non-nil, low priority only applies when it returns true
 }
 
 type TimeManager struct {
@@ -66,7 +67,37 @@ type TimeManager struct {
 	rootFailLow atomic.Bool
 	// LowPriority: see SearchLimits.LowPriority. Set before the search
 	// threads start and not changed afterwards.
-	LowPriority bool
+	LowPriority   bool
+	LowPriorityFn func() bool
+	wantLowPrio   atomic.Bool
+	lastPrioCheck atomic.Int64
+}
+
+// WantLowPriority reports whether search threads should currently run at low
+// scheduling priority.
+func (tm *TimeManager) WantLowPriority() bool {
+	if !tm.LowPriority || !tm.Ponder.Load() {
+		return false
+	}
+	if tm.LowPriorityFn == nil {
+		return true
+	}
+	return tm.wantLowPrio.Load()
+}
+
+// RefreshLowPriority re-evaluates LowPriorityFn at most once every 50 ms
+// while pondering so threads drop to low priority if another engine starts
+// sharing cores, or return to normal priority when alone.
+func (tm *TimeManager) RefreshLowPriority() {
+	if !tm.LowPriority || tm.LowPriorityFn == nil || !tm.Ponder.Load() {
+		return
+	}
+	now := time.Now().UnixNano()
+	if now-tm.lastPrioCheck.Load() < int64(50*time.Millisecond) {
+		return
+	}
+	tm.lastPrioCheck.Store(now)
+	tm.wantLowPrio.Store(tm.LowPriorityFn())
 }
 
 // Tuning for the clock-lead adjustment. Each side's budget is its clock plus

@@ -667,6 +667,9 @@ func (u *UCI) cmdGo(args []string) {
 	}
 	claim := u.claimCores(mode)
 	limits.LowPriority = u.shareCores
+	if u.shareCores {
+		limits.LowPriorityFn = u.cores.HasOthers
+	}
 
 	u.searching.Store(true)
 	u.isPonder.Store(limits.Ponder)
@@ -797,6 +800,9 @@ func (u *UCI) startAutoPonder(currentBoard *board.Board, bestMove, ponderMove ty
 	claim := u.claimCores(coreshare.Idle)
 	defer u.cores.Release(claim)
 	autoLimits := search.SearchLimits{Infinite: true, Ponder: true, LowPriority: u.shareCores}
+	if u.shareCores {
+		autoLimits.LowPriorityFn = u.cores.HasOthers
+	}
 	// Silent background search: pre-warms Transposition Table
 	u.engine.Search(hypoBoard, autoLimits, nil)
 }
