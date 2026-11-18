@@ -13,16 +13,22 @@ import (
 // busySlots is the size of the table of moves being searched. Only nodes of
 // at least P.SMPDeferDepth plies mark their moves, a few dozen per thread at
 // a time, so a small table is enough; a collision only puts off a move.
-const busySlots = 1 << 14
+// Each slot is padded to 64 bytes to prevent false sharing across cores.
+const busySlots = 1 << 12
+
+type busySlot struct {
+	key atomic.Uint64
+	_   [56]byte
+}
 
 // busyTable records the (position, move) pairs some thread is searching.
 // Each slot holds the key of the pair that last claimed it, or 0.
 type busyTable struct {
-	slots []atomic.Uint64
+	slots []busySlot
 }
 
 func newBusyTable() *busyTable {
-	return &busyTable{slots: make([]atomic.Uint64, busySlots)}
+	return &busyTable{slots: make([]busySlot, busySlots)}
 }
 
 // busyKey identifies move m in the position with hash. Never 0.
@@ -35,7 +41,7 @@ func busyKey(hash uint64, m types.Move) uint64 {
 }
 
 func (t *busyTable) slot(k uint64) *atomic.Uint64 {
-	return &t.slots[k>>(64-14)]
+	return &t.slots[k>>(64-12)].key
 }
 
 // busy reports whether a thread is searching the pair with key k.
@@ -45,7 +51,12 @@ func (t *busyTable) busy(k uint64) bool { return t.slot(k).Load() == k }
 func (t *busyTable) mark(k uint64) { t.slot(k).Store(k) }
 
 // unmark ends mark, unless another pair has claimed the slot since.
-func (t *busyTable) unmark(k uint64) { t.slot(k).CompareAndSwap(k, 0) }
+func (t *busyTable) unmark(k uint64) {
+	s := t.slot(k)
+	if s.Load() == k {
+		s.CompareAndSwap(k, 0)
+	}
+}
 
 func (t *busyTable) clear() { clear(t.slots) }
 

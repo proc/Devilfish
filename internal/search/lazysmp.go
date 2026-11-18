@@ -65,6 +65,7 @@ type Engine struct {
 	// once. Only Search uses them, under searchMu, and it waits for every
 	// helper before returning.
 	workers      []*SearchWorker
+	helperChs    []chan func()
 	evalCache    []atomic.Uint64
 	evalCacheNet *nnue.EightNetwork
 
@@ -88,7 +89,17 @@ func (e *Engine) worker(id int, b *board.Board, tm *TimeManager) *SearchWorker {
 			e.evalCacheNet = net
 		}
 		if len(e.workers) > e.NumThreads {
-			// The thread count went down: let the surplus workers go.
+			// The thread count went down: let the surplus workers and their
+			// parked helper goroutines go.
+			for i := e.NumThreads; i < len(e.helperChs); i++ {
+				if e.helperChs[i] != nil {
+					close(e.helperChs[i])
+					e.helperChs[i] = nil
+				}
+			}
+			if e.NumThreads < len(e.helperChs) {
+				e.helperChs = e.helperChs[:e.NumThreads]
+			}
 			clear(e.workers[e.NumThreads:])
 			e.workers = e.workers[:e.NumThreads]
 		}
@@ -107,6 +118,35 @@ func (e *Engine) worker(id int, b *board.Board, tm *TimeManager) *SearchWorker {
 	w.cacheNet = e.evalCacheNet
 	e.workers[id] = w
 	return w
+}
+
+func (e *Engine) helperChan(id int) chan func() {
+	for len(e.helperChs) <= id {
+		e.helperChs = append(e.helperChs, nil)
+	}
+	if e.helperChs[id] == nil {
+		ch := make(chan func(), 1)
+		e.helperChs[id] = ch
+		go func() {
+			for fn := range ch {
+				fn()
+			}
+		}()
+	}
+	return e.helperChs[id]
+}
+
+// Close stops all persistent helper worker goroutines.
+func (e *Engine) Close() {
+	e.searchMu.Lock()
+	defer e.searchMu.Unlock()
+	for i, ch := range e.helperChs {
+		if ch != nil {
+			close(ch)
+			e.helperChs[i] = nil
+		}
+	}
+	e.helperChs = nil
 }
 
 func (e *Engine) searchNodes(maxNodes uint64, master *SearchWorker) uint64 {
@@ -432,13 +472,14 @@ func (e *Engine) Search(
 	var wg sync.WaitGroup
 	var helpers []*SearchWorker
 
-	// Start helper workers
+	// Start helper workers on persistent goroutines
 	for id := 1; id < e.NumThreads; id++ {
 		wg.Add(1)
 		helper := e.worker(id, b, tm)
 		helper.busy = busy
 		helpers = append(helpers, helper)
-		go func(workerID int, w *SearchWorker) {
+		workerID, w := id, helper
+		e.helperChan(id) <- func() {
 			defer func() {
 				w.sharedNodes.Store(w.LocalNodes)
 				wg.Done()
@@ -498,13 +539,14 @@ func (e *Engine) Search(
 					}
 				}
 			}
-		}(id, helper)
+		}
 	}
 
 	startTime := time.Now()
 	var prevIterationScore int32
 	var prevIterationBestMove types.Move
 	var bestMoveStability int
+	var bestMoveChanges float64
 	var masterDepth int8 // the main thread's last finished iteration
 	e.mainDepth.Store(0)
 	var rootPV []types.Move
@@ -822,6 +864,7 @@ func (e *Engine) Search(
 			hasClockTime := tm.OptTime > 0 && limits.MaxDepth == 0 && limits.MaxNodes == 0 && !tm.Infinite && !tm.Ponder.Load() && !tm.IsMoveTime
 
 			if depth >= 5 && rootBestMove != types.MoveNone {
+				bestMoveChanges *= 0.75
 				if rootBestMove == prevIterationBestMove {
 					bestMoveStability++
 					isStable = true
@@ -832,10 +875,16 @@ func (e *Engine) Search(
 					}
 				} else {
 					bestMoveStability = 0
+					if prevIterationBestMove != types.MoveNone {
+						bestMoveChanges += 1.0
+					}
 				}
 
 				if hasClockTime {
 					scale := stabilityScale[min(bestMoveStability, len(stabilityScale)-1)]
+					if bestMoveChanges > 0 {
+						scale *= 1.0 + 0.12*min(bestMoveChanges, 4.0)
+					}
 
 					// Share of this iteration's nodes spent on the best move.
 					if iterNodes := master.LocalNodes - iterStartNodes; iterNodes > 0 {
@@ -851,7 +900,7 @@ func (e *Engine) Search(
 						}
 					}
 
-					// Score falling from the previous iteration: take time to recover
+					// Score falling or jumping from the previous iteration
 					if prevIterationScore != 0 {
 						switch drop := prevIterationScore - score; {
 						case drop >= 80:
@@ -862,6 +911,9 @@ func (e *Engine) Search(
 							isStable = false
 						case drop >= 20:
 							scale *= 1.15
+						case drop <= -50:
+							scale *= 1.15
+							isStable = false
 						}
 					}
 

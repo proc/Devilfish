@@ -57,8 +57,9 @@ func DefaultDir() string {
 // Pool is one process's view of the shared cores. Its methods may be called
 // from any goroutine.
 type Pool struct {
-	dir   string
-	cores int
+	dir        string
+	cores      int
+	dirCreated bool
 
 	mu     sync.Mutex
 	claim  uint64 // identifies the current claim; 0 means none
@@ -96,8 +97,11 @@ func (p *Pool) Acquire(maxThreads int, mode Mode) (threads int, claim uint64) {
 	p.last++
 	p.claim, p.mode = p.last, mode
 
-	if err := os.MkdirAll(p.dir, 0o755); err != nil {
-		return maxThreads, p.claim
+	if !p.dirCreated {
+		if err := os.MkdirAll(p.dir, 0o755); err != nil {
+			return maxThreads, p.claim
+		}
+		p.dirCreated = true
 	}
 	// The directory lock keeps two processes from counting and claiming at
 	// the same moment. It is held for a few file operations only.

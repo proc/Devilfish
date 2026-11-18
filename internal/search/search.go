@@ -332,7 +332,7 @@ func (w *SearchWorker) pushAccumulator(ply int, m types.Move) {
 // just check Stopped.Load(), avoiding cross-core clock syscalls and reducing
 // shared atomic node-counter contention.
 func (w *SearchWorker) checkNodeLimits() bool {
-	if w.TimeMan.LowPriority {
+	if w.lowPrio {
 		w.syncPriority()
 	}
 	if w.TimeMan.MaxNodes > 0 {
@@ -346,6 +346,83 @@ func (w *SearchWorker) checkNodeLimits() bool {
 		return w.TimeMan.CheckLimits()
 	}
 	return w.TimeMan.Stopped.Load()
+}
+
+// tryProbCut runs ProbCut out-of-line so Search does not zero probList/probScores
+// on the majority of nodes that never enter ProbCut.
+//
+//go:noinline
+func (w *SearchWorker) tryProbCut(
+	depth int8, beta int32, ply int, cutNode, inCheck bool,
+	excludedMove, ttMove types.Move, ttScore int32, ttDepth int8, ttFound bool,
+	staticEval, netEval int32, pvBit uint8, improving bool,
+	prevMove, prevMove2, prevMove4 types.Move,
+	ci *board.CheckInfo, hc *histCtx,
+) (int32, bool) {
+	if P.ProbCut == 0 || ply <= 0 || inCheck || excludedMove != types.MoveNone || abs(beta) >= MateThreshold {
+		return 0, false
+	}
+	probMinDepth, probBeta, probDepth := int8(5), beta+P.ProbCutMargin, depth-4
+	probTTDepth := depth - 3
+	if P.ProbCut == 2 {
+		probMinDepth, probBeta, probDepth, probTTDepth = 3, beta+80, depth-3, -128
+		if improving {
+			probBeta, probDepth = beta+59, depth-5
+		}
+	}
+	if depth < probMinDepth || (ttFound && ttDepth >= probTTDepth && ttScore < probBeta) {
+		return 0, false
+	}
+
+	var probList movegen.MoveList
+	movegen.GenerateMoves(w.Board, true, &probList)
+
+	var probScores [256]int32
+	ScoreMoves(w.Board, &probList, probScores[:probList.Count], ttMove, ply, prevMove, prevMove2, prevMove4, w.History)
+
+	st := &w.Stats
+	probTried := false
+	for i := 0; i < probList.Count; i++ {
+		m := PickNextMove(&probList, probScores[:probList.Count], i)
+		if !eval.SEEGe(w.Board, m, probBeta-staticEval) {
+			continue
+		}
+		w.prefetchNext(w.Board.HashAfter(m))
+		w.pushAccumulator(ply, m)
+		w.History.PushMove(ply, w.Board.Pieces[m.From()], m.To())
+		w.pushMoveInfo(ply, hc, m, 0)
+		if !w.makeMove(m, ci, inCheck) {
+			continue
+		}
+		if !probTried {
+			probTried = true
+			st.ProbTries++
+		}
+
+		probScore := -w.Quiescence(-probBeta, -probBeta+1, ply+1)
+		if probScore >= probBeta && probDepth > 0 {
+			probScore = -w.Search(probDepth, -probBeta, -probBeta+1, ply+1, false, !cutNode, types.MoveNone, m, prevMove, prevMove2)
+		}
+		w.Board.UnmakeMove(m)
+
+		if w.TimeMan.Stopped.Load() {
+			return 0, true
+		}
+
+		if probScore >= probBeta {
+			st.ProbCuts++
+			storeDepth := depth - 3
+			if P.ProbCut == 2 {
+				storeDepth = max(probDepth, 0) + 1
+			}
+			w.TT.StoreEval(w.Board.Hash, m, tt.ScoreToTT(probScore, ply), netEval, storeDepth, tt.LowerBound|pvBit)
+			if P.FailSoft&softPruning == 0 {
+				return beta, true
+			}
+			return probScore - (probBeta - beta), true
+		}
+	}
+	return 0, false
 }
 
 func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode bool, cutNode bool, excludedMove types.Move, prevMove types.Move, prevMove2 types.Move, prevMove4 types.Move) int32 {
@@ -699,6 +776,7 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 			}
 			r += int8(evalR)
 		}
+		w.TT.Prefetch(w.Board.Hash ^ board.ZobristSide)
 		if w.useAcc && ply+1 < MaxPly {
 			w.Accumulators[ply+1] = w.Accumulators[ply]
 		}
@@ -820,70 +898,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	// its moves (see makeMove and board.CheckInfo).
 	ci := w.Board.NewCheckInfo()
 
-	probMinDepth, probBeta, probDepth := int8(5), beta+P.ProbCutMargin, depth-4
-	probTTDepth := depth - 3 // a hash score below probBeta at this depth or more rules ProbCut out
-	if P.ProbCut == 2 {
-		// Stockfish's: from depth 3, against a margin of 241 of its units
-		// (64 less when improving), three to the centipawn, searched 3 plies
-		// shallower (5 when improving); any hash score below the raised
-		// bound rules it out.
-		probMinDepth, probBeta, probDepth, probTTDepth = 3, beta+80, depth-3, -128
-		if improving {
-			probBeta, probDepth = beta+59, depth-5
-		}
-	}
-	if P.ProbCut != 0 && ply > 0 && !isPVNode && !inCheck && excludedMove == types.MoveNone && depth >= probMinDepth && abs(beta) < MateThreshold {
-		if !(ttFound && ttDepth >= probTTDepth && ttScore < probBeta) {
-
-			var probList movegen.MoveList
-			movegen.GenerateMoves(w.Board, true, &probList)
-
-			var probScores [256]int32
-			ScoreMoves(w.Board, &probList, probScores[:probList.Count], ttMove, ply, prevMove, prevMove2, prevMove4, w.History)
-
-			probTried := false
-			for i := 0; i < probList.Count; i++ {
-				m := PickNextMove(&probList, probScores[:probList.Count], i)
-				// Only captures that can plausibly lift the score to probBeta
-				if !eval.SEEGe(w.Board, m, probBeta-staticEval) {
-					continue
-				}
-				w.prefetchNext(w.Board.HashAfter(m)) // before the move is made: see HashAfter
-				w.pushAccumulator(ply, m)
-				w.History.PushMove(ply, w.Board.Pieces[m.From()], m.To())
-				w.pushMoveInfo(ply, &hc, m, 0)
-				if !w.makeMove(m, &ci, inCheck) {
-					continue
-				}
-				if !probTried {
-					probTried = true
-					st.ProbTries++
-				}
-
-				// A quiescence search first: most candidates fail here, cheaply.
-				probScore := -w.Quiescence(-probBeta, -probBeta+1, ply+1)
-				if probScore >= probBeta && probDepth > 0 {
-					probScore = -w.Search(probDepth, -probBeta, -probBeta+1, ply+1, false, !cutNode, types.MoveNone, m, prevMove, prevMove2)
-				}
-				w.Board.UnmakeMove(m)
-
-				if w.TimeMan.Stopped.Load() {
-					return 0
-				}
-
-				if probScore >= probBeta {
-					st.ProbCuts++
-					storeDepth := depth - 3
-					if P.ProbCut == 2 {
-						storeDepth = max(probDepth, 0) + 1
-					}
-					w.TT.StoreEval(w.Board.Hash, m, tt.ScoreToTT(probScore, ply), netEval, storeDepth, tt.LowerBound|pvBit)
-					if P.FailSoft&softPruning == 0 {
-						return beta
-					}
-					return probScore - (probBeta - beta)
-				}
-			}
+	if !isPVNode {
+		if score, ok := w.tryProbCut(depth, beta, ply, cutNode, inCheck, excludedMove, ttMove, ttScore, ttDepth, ttFound, staticEval, netEval, pvBit, improving, prevMove, prevMove2, prevMove4, &ci, &hc); ok {
+			return score
 		}
 	}
 
@@ -911,9 +928,9 @@ func (w *SearchWorker) Search(depth int8, alpha, beta int32, ply int, isPVNode b
 	bestType := tt.UpperBound
 
 	// Staged Move Generation: Search TT move first before generating all moves.
-	// Odd helpers at the root defer ttMove if another thread is already on it
-	// so helpers spread across different root subtrees.
-	deferTTAtRoot := ply == 0 && (w.ID&1) == 1 && depth >= 5 && w.busy != nil && ttMove != types.MoveNone && w.busy.busy(busyKey(w.Board.Hash, ttMove))
+	// Odd helpers and higher-ID helpers at the root defer ttMove if another
+	// thread is already on it so helpers spread across different root subtrees.
+	deferTTAtRoot := ply == 0 && ((w.ID&1) == 1 || w.ID >= 4) && depth >= 5 && w.busy != nil && ttMove != types.MoveNone && w.busy.busy(busyKey(w.Board.Hash, ttMove))
 	if !deferTTAtRoot && ttMove != types.MoveNone && ttMove != excludedMove && (ply > 0 || !w.isRootExcluded(ttMove)) && movegen.IsPseudoLegal(w.Board, ttMove) {
 		// Check extension (parent side): only for checks that don't lose
 		// material, and never stacked on top of a singular extension.
