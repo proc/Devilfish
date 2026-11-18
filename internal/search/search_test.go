@@ -987,3 +987,25 @@ func TestRootAverage(t *testing.T) {
 		t.Errorf("after a change of best move: got %d, want -10", a.score)
 	}
 }
+
+func TestEasyMoveRecaptureStopsEarly(t *testing.T) {
+	// Equal material except Black's undefended queen on d4 can only be captured by Nf3xd4.
+	b, err := board.ParseFEN("r1b1kbnr/ppp2ppp/8/8/3qP3/5N2/PPP2PPP/R1B1KBNR w KQkq - 0 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(16, 1)
+	defer e.Close()
+	start := time.Now()
+	bm, _ := e.Search(b, SearchLimits{WhiteTime: 180000, BlackTime: 180000}, func(si SearchInfo) {
+		t.Logf("depth=%d score=%d time=%dms pv=%v", si.Depth, si.Score, si.TimeMs, si.PV)
+	})
+	elapsed := time.Since(start)
+	if bm.To() != types.D4 {
+		t.Fatalf("expected recapture on d4, got %s", bm)
+	}
+	// BaseOptTime for 180s is ~4700 ms (min floor ~2350 ms). Easy-move should stop well under 1s.
+	if elapsed > 1000*time.Millisecond {
+		t.Errorf("easy queen recapture took %v, expected early exit (< 1s)", elapsed)
+	}
+}

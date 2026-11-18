@@ -297,7 +297,7 @@ func (w *SearchWorker) parentHash(ply int) (uint64, bool) {
 func (w *SearchWorker) evaluateEight(ply int) int32 {
 	net := nnue.ActiveEightNetwork
 	parentHash, hasParent := w.parentHash(ply)
-	if hasParent && !w.Eight.Has(ply-1, parentHash) && !w.Eight.Has(ply, w.Board.Hash) {
+	if hasParent && !w.Eight.Has(ply-1, parentHash) && !w.Eight.HasValid(ply) {
 		b := w.Board
 		last := b.UndoStack[len(b.UndoStack)-1].Move
 		var grandHash uint64

@@ -582,6 +582,7 @@ func (e *Engine) Search(
 	var prevIterationBestMove types.Move
 	var bestMoveStability int
 	var bestMoveChanges float64
+	var easyMoveChecked, easyMove bool
 	var masterDepth int8 // the main thread's last finished iteration
 	e.mainDepth.Store(0)
 	var rootPV []types.Move
@@ -905,6 +906,7 @@ func (e *Engine) Search(
 					}
 				} else {
 					bestMoveStability = 0
+					easyMove = false
 					if prevIterationBestMove != types.MoveNone {
 						bestMoveChanges += 1.0
 					}
@@ -917,9 +919,11 @@ func (e *Engine) Search(
 					}
 
 					// Share of this iteration's nodes spent on the best move.
+					nodeRatio := 0.0
 					if iterNodes := master.LocalNodes - iterStartNodes; iterNodes > 0 {
 						rootNodes := master.RootMoveNodes[rootBestMove.From()][rootBestMove.To()]
-						switch nodeRatio := float64(rootNodes) / float64(iterNodes); {
+						nodeRatio = float64(rootNodes) / float64(iterNodes)
+						switch {
 						case nodeRatio >= 0.90:
 							scale *= 0.80
 						case nodeRatio >= 0.75:
@@ -928,6 +932,26 @@ func (e *Engine) Search(
 							// Disputed position: alternatives took most of the search
 							scale *= 1.20
 						}
+					}
+
+					// Easy-move detection (e.g. obvious queen/rook recapture): once
+					// the same move holds for 3+ iterations with >=85% of root nodes
+					// and no score drop, run one shallow verification search with
+					// rootBestMove excluded. If every alternative is >=250 cp worse,
+					// stop early once depth >= 10.
+					if !easyMoveChecked && depth >= 8 && bestMoveStability >= 3 && bestMoveChanges == 0 && abs(rootScore) < MateThreshold {
+						easyMoveChecked = true
+						verBeta := rootScore - 250
+						verDepth := max(depth/2, 4)
+						master.ExcludedRootMoves = []types.Move{rootBestMove}
+						altScore := master.Search(verDepth, verBeta-1, verBeta, 0, true, false, types.MoveNone, types.MoveNone, types.MoveNone, types.MoveNone)
+						master.ExcludedRootMoves = nil
+						if !e.Stopped.Load() && altScore < verBeta {
+							easyMove = true
+						}
+					}
+					if easyMove && depth >= 10 && bestMoveStability >= 4 {
+						break
 					}
 
 					// Score falling or jumping from the previous iteration

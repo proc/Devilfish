@@ -219,6 +219,11 @@ func (s *EightState) Has(ply int, hash uint64) bool {
 	return ply >= 0 && ply < len(s.plies) && s.plies[ply].valid && s.plies[ply].hash == hash
 }
 
+// HasValid reports whether the accumulator at ply holds any valid position.
+func (s *EightState) HasValid(ply int) bool {
+	return ply >= 0 && ply < len(s.plies) && s.plies[ply].valid
+}
+
 // Evaluate returns the same value as EvaluateEight(net, b), reusing stored
 // accumulators. ply is the search ply of b. If hasParent is set, parentHash is
 // the hash of the position one move before b on the current search path; when
@@ -310,11 +315,10 @@ func (s *EightState) Prepare(net *EightNetwork, b *board.Board, ply int, parentH
 		base.hash == b.UndoStack[n-1].Hash && pieceInc[0] && pieceInc[1] {
 		fromMove = true
 		earlier := cs
-		stepBack(tables, &earlier, &b.UndoStack[n-1], &views, &s.thrAdd, &s.thrRem)
+		d := stepBack(tables, &earlier, &b.UndoStack[n-1], &views, &s.thrAdd, &s.thrRem)
 		if moveDeltaVerify && earlier != base.snap {
 			panic("nnue: taking the move back did not give the stored position: " + b.ToFEN())
 		}
-		d := changedSquares(&earlier, &cs)
 		for pov := 0; pov < 2; pov++ {
 			pieceDelta(&earlier, &cs, d, &views[pov], pov, &pieceAdd[pov], &pieceRem[pov])
 		}

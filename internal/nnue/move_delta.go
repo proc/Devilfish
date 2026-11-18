@@ -124,14 +124,16 @@ func swapOn(tt *threatTables, x *eightSnap, p types.Piece, sq int, views *[2]eig
 }
 
 // stepBack takes back the move recorded in u on x, which holds the position
-// after it, and lists the threat rows that differ: add for those of the
-// later position, rem for those of the earlier one.
-func stepBack(tt *threatTables, x *eightSnap, u *board.UndoState, views *[2]eightView, add, rem *[2]rowList) {
+// after it, lists the threat rows that differ (add for those of the later
+// position, rem for those of the earlier one), and returns the bitboard of
+// squares whose occupancy or piece changed.
+func stepBack(tt *threatTables, x *eightSnap, u *board.UndoState, views *[2]eightView, add, rem *[2]rowList) bitboard.Bitboard {
 	m := u.Move
 	if m == types.MoveNone {
-		return // a null move changes no piece
+		return 0 // a null move changes no piece
 	}
 	from, to := int(m.From()), int(m.To())
+	d := bitboard.SquareBB[from] | bitboard.SquareBB[to]
 	moved := x.pieces[to]
 	us := moved.Color()
 	if m.IsCastle() {
@@ -147,7 +149,7 @@ func stepBack(tt *threatTables, x *eightSnap, u *board.UndoState, views *[2]eigh
 		takeOff(tt, x, rTo, views, add, rem)
 		putOn(tt, x, moved, from, views, add, rem)
 		putOn(tt, x, rook, rFrom, views, add, rem)
-		return
+		return d | bitboard.SquareBB[rFrom] | bitboard.SquareBB[rTo]
 	}
 	switch {
 	case u.Captured == types.PieceNone:
@@ -159,6 +161,7 @@ func stepBack(tt *threatTables, x *eightSnap, u *board.UndoState, views *[2]eigh
 			capSq = to + 8
 		}
 		putOn(tt, x, u.Captured, capSq, views, add, rem)
+		d |= bitboard.SquareBB[capSq]
 	default:
 		// A capture: the captured piece goes back where the capturer stands.
 		swapOn(tt, x, u.Captured, to, views, add, rem)
@@ -167,4 +170,5 @@ func stepBack(tt *threatTables, x *eightSnap, u *board.UndoState, views *[2]eigh
 		moved = types.MakePiece(us, types.Pawn)
 	}
 	putOn(tt, x, moved, from, views, add, rem)
+	return d
 }
