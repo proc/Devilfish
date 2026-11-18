@@ -169,3 +169,31 @@ func TestSoftStop(t *testing.T) {
 		t.Fatal("movetime search stopped early")
 	}
 }
+
+// The move overhead is set aside for each move the budget plans for, not
+// once: a larger overhead buys a smaller budget, more so in sudden death,
+// where no increment pays for it.
+func TestMoveOverheadPerMove(t *testing.T) {
+	opt := func(ms, inc, ovh int64) time.Duration {
+		return newTM(SearchLimits{WhiteTime: ms, BlackTime: ms, WhiteInc: inc, BlackInc: inc, MoveOverhead: ovh}, types.White).OptTime
+	}
+	for _, ms := range []int64{60000, 20000, 5000} {
+		low, high := opt(ms, 0, 20), opt(ms, 0, 200)
+		if high >= low {
+			t.Errorf("%d ms, no increment: opt %v with 200 ms overhead, %v with 20 ms", ms, high, low)
+		}
+		// Moving now must leave the overhead of the following moves, where
+		// the clock holds it.
+		if moves := int64(30); ms > 2*moves*200 && time.Duration(ms-moves*200)*time.Millisecond < high*time.Duration(moves) {
+			t.Errorf("%d ms: %d moves at %v and 200 ms overhead overrun the clock", ms, moves, high)
+		}
+	}
+	// An increment that thinking does not use pays for the overhead.
+	if a, b := opt(60000, 1000, 20), opt(60000, 1000, 200); a-b > a/100 {
+		t.Errorf("60+1: a 200 ms overhead covered by the increment changed opt: %v vs %v", b, a)
+	}
+	// With the overhead swamping the clock some thinking time remains.
+	if o := opt(3000, 0, 500); o < 5*time.Millisecond {
+		t.Errorf("3 s clock, 500 ms overhead: opt %v", o)
+	}
+}

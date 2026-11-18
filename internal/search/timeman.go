@@ -216,6 +216,7 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 		if tm.IsTimeTrouble && moves < 10 {
 			moves = 10
 		}
+		usableTime = reserveOverhead(myTime, moveOverhead, myInc-myInc*3/4, moves)
 		optTimeMs = (usableTime / (moves + 3)) + (myInc * 3 / 4)
 		if tm.IsEmergency {
 			maxMultiplier = 1.15
@@ -290,6 +291,7 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 		// A move now typically runs to about its whole budget (see
 		// CanStartNewIteration), so the increment share is set for the clock
 		// to settle around 15 increments in a long game rather than drain.
+		usableTime = reserveOverhead(myTime, moveOverhead, myInc-myInc*3/5, divisor)
 		optTimeMs = (usableTime / divisor) + (myInc * 3 / 5)
 	}
 
@@ -342,6 +344,22 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 	tm.updateSoftStop()
 
 	return tm
+}
+
+// reserveOverhead returns the clock time left for thinking once the move
+// overhead is set aside for each of the next horizon moves: the time the GUI
+// charges between our move and the start of our next clock is not ours to
+// think with. Taking it off only once, from the whole clock, left the budget
+// blind to it, and a GUI charging 200 ms a move used up half of a one-minute
+// clock in long games. The part of the increment a move does not spend
+// (spareInc) pays for the overhead first. With the overhead swamping the
+// clock, an eighth of it is still kept for thinking.
+func reserveOverhead(myTime, overhead, spareInc, horizon int64) int64 {
+	usable := myTime - overhead
+	if lag := overhead - spareInc; lag > 0 {
+		usable = max(usable-lag*horizon, usable/8)
+	}
+	return max(usable, 5)
 }
 
 // PonderHit ends pondering: the opponent played the expected move, and the

@@ -50,6 +50,9 @@ type UCI struct {
 	sharedThreads    int             // thread count of the last shared search, for reporting changes
 	showWDL          bool            // UCI_ShowWDL: print win/draw/loss chances with each score
 	moveOverhead     int
+	lag              lagTracker // the GUI's per-move charge, measured from its clocks
+	posGame          string     // the last position command's start ("startpos" or the FEN)
+	posPly           int        // and the number of moves it played
 	evalFile         string
 	bookFile         string
 	outMu            sync.Mutex
@@ -566,6 +569,7 @@ func (u *UCI) cmdPosition(args []string) {
 		return
 	}
 
+	game, ply := strings.Join(args[:idx], " "), 0
 	if idx < len(args) && args[idx] == "moves" {
 		for _, moveStr := range args[idx+1:] {
 			m, err := parseMove(b, moveStr)
@@ -573,10 +577,12 @@ func (u *UCI) cmdPosition(args []string) {
 				break
 			}
 			b.MakeMove(m)
+			ply++
 		}
 	}
 
 	u.board = b
+	u.posGame, u.posPly = game, ply
 
 	if opening := book.FindOpening(b); opening.Name != "" {
 		logger.Infof("Position Opening: %s", opening)
@@ -595,7 +601,6 @@ func (u *UCI) cmdGo(args []string) {
 	u.bestMoveSent.Store(false)
 
 	var limits search.SearchLimits
-	limits.MoveOverhead = int64(u.moveOverhead)
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -652,6 +657,20 @@ func (u *UCI) cmdGo(args []string) {
 		case "ponder":
 			limits.Ponder = true
 		}
+	}
+
+	// Plan with the time the GUI really charges per move, when that is more
+	// than the Move Overhead option.
+	own, inc := limits.WhiteTime, limits.WhiteInc
+	if u.board.SideToMove == types.Black {
+		own, inc = limits.BlackTime, limits.BlackInc
+	}
+	if own > 0 && limits.MoveTime == 0 {
+		u.lag.onGo(u.posGame, u.posPly, own, inc, limits.Ponder, time.Now())
+	}
+	limits.MoveOverhead = u.lag.overhead(int64(u.moveOverhead))
+	if limits.MoveOverhead > int64(u.moveOverhead) {
+		logger.Infof("Move overhead: %d ms measured from the GUI's clocks (option %d ms)", limits.MoveOverhead, u.moveOverhead)
 	}
 
 	// In UCI protocol: "If no parameters are sent, search until stop."
@@ -714,6 +733,7 @@ func (u *UCI) cmdGo(args []string) {
 				return
 			}
 			u.bestMoveSent.Store(true)
+			u.lag.onBestMove(time.Now())
 			if ponderMove != types.MoveNone {
 				u.sendLine(fmt.Sprintf("bestmove %s ponder %s", bestMove, ponderMove))
 			} else {
@@ -724,6 +744,7 @@ func (u *UCI) cmdGo(args []string) {
 
 		// Normal search completed: emit bestmove to GUI
 		u.bestMoveSent.Store(true)
+		u.lag.onBestMove(time.Now())
 		if ponderMove != types.MoveNone {
 			u.sendLine(fmt.Sprintf("bestmove %s ponder %s", bestMove, ponderMove))
 		} else {
@@ -834,6 +855,7 @@ func (u *UCI) cmdPonderHit() {
 	if u.shareCores {
 		u.cores.Promote() // the search now counts as searching for the other engines
 	}
+	u.lag.onPonderHit(time.Now())
 	u.isPonder.Store(false)
 	u.engine.PonderHit()
 }
