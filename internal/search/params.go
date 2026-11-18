@@ -74,6 +74,7 @@ type Params struct {
 	// Quiescence and in-check pruning.
 	QSEvenPrune    int32 // 1: with the stand-pat score well below alpha, captures that do not win material are skipped
 	QSMaxMoves     int32 // captures searched per quiescence node before the rest (unless they give check) are skipped; 0: no limit
+	QSRecapture    int32 // 1: a recapture on the last move's square is exempt from QSMaxMoves, QSEvenPrune and the per-capture futility pruning (Stockfish's rule); not match-tested
 	QSEvasionPrune int32 // 1: in check in quiescence, once one evasion holds, quiet evasions after the second move and losing captures are skipped
 	CheckLMR       int32 // 1: late evasions are reduced like other late moves (one ply less)
 	CheckSEEPrune  int32 // 1: SEE pruning also applies to evasions
@@ -285,8 +286,8 @@ const (
 
 // P is the live parameter set used by Search.
 var P = Params{
-	LMRBase:       100,
-	LMRDivisor:    200,
+	LMRBase:       115,
+	LMRDivisor:    185,
 	LMRHistDiv:    5000,
 	RFPMargin:     75,
 	RFPNonImpr:    35,
@@ -302,11 +303,11 @@ var P = Params{
 	QSFutMargin:   175,
 	CheckExtSEE:   0,
 	QSChecks:      0,
-	RFPDepth:      8,
-	LMPDepth:      8,
-	FutDepth:      8,
-	HistDepth:     6,
-	SEEDepth:      8,
+	RFPDepth:      10,
+	LMPDepth:      10,
+	FutDepth:      12,
+	HistDepth:     10,
+	SEEDepth:      10,
 	// Reverse futility pruning unguarded; null move guarded only by king
 	// safety. With both guards at 1 the tree was three times the size. With
 	// both at 0 it is no smaller than this, but a quiet mating threat behind
@@ -323,7 +324,7 @@ var P = Params{
 	LMRChecks: 0,
 
 	LMRMinMove:  1,
-	LMRCutNode:  1,
+	LMRCutNode:  2,
 	LMRExempt:   0,
 	PruneExempt: 0,
 	// Null move. With NMPBase 4 and a further ply when not improving the
@@ -331,7 +332,7 @@ var P = Params{
 	// 24% of them cut off. Within 40 centipawns of beta fewer than 5% did:
 	// the side to move is worth about that much, and the null move gives it
 	// away. Not yet match-tested.
-	NMPBase:        3,
+	NMPBase:        4,
 	NMPDepthDiv:    3,
 	NMPMargin:      40,
 	NMPMarginStep:  3,
@@ -358,6 +359,7 @@ var P = Params{
 	// nodes without them; all five together 103%).
 	QSEvenPrune:    1,
 	QSMaxMoves:     3,
+	QSRecapture:    1,
 	QSEvasionPrune: 1,
 	CheckLMR:       1,
 	CheckSEEPrune:  1,
@@ -394,7 +396,7 @@ var P = Params{
 
 	IIRCut: 0,
 
-	ProbCut:       1,
+	ProbCut:       2,
 	ProbCutMargin: 200,
 }
 
@@ -455,6 +457,7 @@ func TunableParams() []ParamSpec {
 		{"FailSoft", &P.FailSoft, 0, 31},
 		{"QSEvenPrune", &P.QSEvenPrune, 0, 1},
 		{"QSMaxMoves", &P.QSMaxMoves, 0, 16},
+		{"QSRecapture", &P.QSRecapture, 0, 1},
 		{"QSEvasionPrune", &P.QSEvasionPrune, 0, 1},
 		{"CheckLMR", &P.CheckLMR, 0, 1},
 		{"CheckSEEPrune", &P.CheckSEEPrune, 0, 1},

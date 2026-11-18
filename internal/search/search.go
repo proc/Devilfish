@@ -1951,6 +1951,16 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 		}
 	}
 
+	// P.QSRecapture: a recapture on the square of the last move is exempt
+	// from the capture pruning below, as in Stockfish; cutting it makes the
+	// opponent's capture look as if it simply won the piece.
+	recapSq := types.SquareNone
+	if n := len(w.Board.UndoStack); P.QSRecapture != 0 && n > 0 {
+		if last := w.Board.UndoStack[n-1].Move; last != types.MoveNone {
+			recapSq = last.To()
+		}
+	}
+
 	for i := 0; i < ml.Count; i++ {
 		m := PickNextMove(ml, scores[:ml.Count], i)
 		if m == triedTTMove {
@@ -1971,7 +1981,7 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 		// Per-capture futility pruning: if even winning the captured piece
 		// plus a margin cannot lift the stand-pat score above alpha, the
 		// capture is futile (non-promotions that don't give check only).
-		if !inCheck && m.IsCapture() && !m.IsPromotion() {
+		if !inCheck && m.IsCapture() && !m.IsPromotion() && m.To() != recapSq {
 			victim := w.Board.Pieces[m.To()].Type()
 			if m.IsEnPassant() {
 				victim = types.Pawn
@@ -1985,7 +1995,7 @@ func (w *SearchWorker) quiescence(alpha, beta int32, ply, qply int) int32 {
 			}
 		}
 
-		if !inCheck && m.IsCapture() && !m.IsPromotion() {
+		if !inCheck && m.IsCapture() && !m.IsPromotion() && m.To() != recapSq {
 			// Far below alpha, a capture has to win material to matter.
 			if P.QSEvenPrune != 0 && futBase <= alpha && !eval.SEEGe(w.Board, m, 1) && !w.Board.GivesCheckWith(m, &ci) {
 				st.QFutPruned++
