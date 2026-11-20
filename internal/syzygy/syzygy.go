@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"devilfish/internal/bitboard"
@@ -38,6 +39,10 @@ var (
 	Use50MoveRule  bool   = true
 	ProbeLimit     int    = 6
 	maxPiecesCount int    = 0
+	// largest mirrors maxPiecesCount for the search, which asks at nearly
+	// every node: a read lock there is an atomic write to one shared cache
+	// line from every thread.
+	largest atomic.Int32
 )
 
 // NormalizePath resolves path elements, automatically expanding directories that contain
@@ -139,6 +144,7 @@ func Init(path string) bool {
 	if trimmed == "" {
 		C.tb_free()
 		maxPiecesCount = 0
+		largest.Store(0)
 		logger.Infof("Syzygy tablebases disabled: no path configured")
 		return true
 	}
@@ -150,6 +156,7 @@ func Init(path string) bool {
 
 	success := bool(C.tb_init(cPath))
 	maxPiecesCount = int(C.TB_LARGEST)
+	largest.Store(int32(maxPiecesCount))
 	if maxPiecesCount > 0 {
 		logger.Infof("Syzygy tablebases loaded successfully: %d-piece tablebases detected (configured: %q, normalized: %q)", maxPiecesCount, Path, normalized)
 	} else {
@@ -163,6 +170,7 @@ func Free() {
 	defer mu.Unlock()
 	C.tb_free()
 	maxPiecesCount = 0
+	largest.Store(0)
 	Path = ""
 	logger.Infof("Syzygy tablebases unloaded / freed")
 }
@@ -175,16 +183,19 @@ func maxPiecesLocked() int {
 	return maxPiecesCount
 }
 
+// MaxPieces is the most pieces a position may have to be probed. It takes no
+// lock: the search calls it at nearly every node.
 func MaxPieces() int {
-	mu.RLock()
-	defer mu.RUnlock()
-	return maxPiecesLocked()
+	n := int(largest.Load())
+	if limit := ProbeLimit; limit > 0 && limit < n {
+		return limit
+	}
+	return n
 }
 
+// IsAvailable reports whether any tablebases are loaded, without locking.
 func IsAvailable() bool {
-	mu.RLock()
-	defer mu.RUnlock()
-	return maxPiecesCount > 0
+	return largest.Load() > 0
 }
 
 func extractBitboards(b *board.Board) (white, black, kings, queens, rooks, bishops, knights, pawns uint64, ep uint32) {

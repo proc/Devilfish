@@ -590,6 +590,8 @@ func (u *UCI) cmdPosition(args []string) {
 }
 
 func (u *UCI) cmdGo(args []string) {
+	// The GUI's clock is already running: time from here.
+	received := time.Now()
 	// Stop any running search or auto-ponder first
 	u.stopSearch(false)
 	gen := u.searchGen.Load()
@@ -601,6 +603,8 @@ func (u *UCI) cmdGo(args []string) {
 	u.bestMoveSent.Store(false)
 
 	var limits search.SearchLimits
+	limits.StartTime = received
+	limits.PonderEnabled = u.ponderEnabled
 
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -666,7 +670,7 @@ func (u *UCI) cmdGo(args []string) {
 		own, inc = limits.BlackTime, limits.BlackInc
 	}
 	if own > 0 && limits.MoveTime == 0 {
-		u.lag.onGo(u.posGame, u.posPly, own, inc, limits.Ponder, time.Now())
+		u.lag.onGo(u.posGame, u.posPly, own, inc, limits.Ponder, received)
 	}
 	limits.MoveOverhead = u.lag.overhead(int64(u.moveOverhead))
 	if limits.MoveOverhead > int64(u.moveOverhead) {

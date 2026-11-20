@@ -27,6 +27,13 @@ type SearchLimits struct {
 	// searches; a ponderhit brings the threads back to normal priority.
 	LowPriority   bool
 	LowPriorityFn func() bool // optional predicate: when non-nil, low priority only applies when it returns true
+	// StartTime is when the GUI's go arrived; the clock runs from then, not
+	// from when the search got round to starting (after stopping a background
+	// search, claiming cores, ...). Zero means now.
+	StartTime time.Time
+	// PonderEnabled: the Ponder option is on, so pondered moves will hand
+	// time back (see ponderBonus).
+	PonderEnabled bool
 }
 
 type TimeManager struct {
@@ -120,6 +127,9 @@ const (
 
 	// longClockMs: from this much time left, extensions may go further.
 	longClockMs = 600000
+
+	// ponderBonusPct: extra share of OptTime when pondering is on.
+	ponderBonusPct = 25
 )
 
 // clockLeadScale returns the factor to scale our budget by for a given lead.
@@ -132,13 +142,16 @@ func clockLeadScale(lead float64) float64 {
 
 func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool, nodes *atomic.Uint64, boards ...*board.Board) *TimeManager {
 	tm := &TimeManager{
-		StartTime:  time.Now(),
+		StartTime:  limits.StartTime,
 		MaxDepth:   limits.MaxDepth,
 		MaxNodes:   limits.MaxNodes,
 		Infinite:   limits.Infinite,
 		Stopped:    stopped,
 		Nodes:      nodes,
 		PieceCount: 32,
+	}
+	if tm.StartTime.IsZero() {
+		tm.StartTime = time.Now()
 	}
 	tm.Ponder.Store(limits.Ponder)
 
@@ -330,6 +343,12 @@ func NewTimeManager(limits SearchLimits, side types.Color, stopped *atomic.Bool,
 	}
 	if optTimeMs < 5 {
 		optTimeMs = 5
+	}
+	// With pondering, a share of moves are ponder hits, which take less
+	// clock time than they search; each move may plan for more (Stockfish:
+	// a quarter more). Not beyond MaxTime, and not in an emergency.
+	if (limits.Ponder || limits.PonderEnabled) && !tm.IsEmergency {
+		optTimeMs = min(optTimeMs+optTimeMs*ponderBonusPct/100, maxTimeMs)
 	}
 
 	tm.OptTime = time.Duration(optTimeMs) * time.Millisecond

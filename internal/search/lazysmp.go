@@ -60,6 +60,9 @@ type Engine struct {
 	// has set up its clock (currentTM still nil) is not lost.
 	ponderHit atomic.Bool
 	searchMu  sync.Mutex
+	// prevTimeReduction is the last timed move's stability scale (0: none
+	// this game), for carryScale.
+	prevTimeReduction float64
 
 	// workers are kept between searches so their large tables are allocated
 	// once. Only Search uses them, under searchMu, and it waits for every
@@ -76,10 +79,23 @@ type Engine struct {
 }
 
 // worker returns the worker for thread id, ready for a new search of b.
-// stabilityScale is the time factor by number of consecutive iterations the
-// best move has held: a fresh best move earns extra time, a long-standing one
-// gives some back.
-var stabilityScale = [...]float64{1.30, 1.15, 1.00, 0.92, 0.85, 0.80}
+// moveStabilityScale is the time factor for a best move that has held for
+// stable consecutive iterations: 1.3 for a fresh one, falling towards 0.72.
+func moveStabilityScale(stable int) float64 {
+	return 0.72 + 0.58/(1.0+0.35*float64(stable))
+}
+
+// carryScale passes time saved or spent on the previous move on to this one,
+// as Stockfish does with its previous time reduction: after a stable move
+// that finished early the next may take more, after a hard one less. prev is
+// the previous move's moveStabilityScale (0: none), cur this move's. At
+// prev == cur == 1 it is 1.
+func carryScale(prev float64) float64 {
+	if prev <= 0 {
+		return 1
+	}
+	return (1.468 + 1/prev) / 2.468
+}
 
 func (e *Engine) worker(id int, b *board.Board, tm *TimeManager) *SearchWorker {
 	if id == 0 {
@@ -209,6 +225,7 @@ func (e *Engine) NewGame() {
 	e.searchMu.Lock()
 	defer e.searchMu.Unlock()
 	e.TT.Clear()
+	e.prevTimeReduction = 0
 	for _, w := range e.workers {
 		if w != nil {
 			w.History.Clear()
@@ -579,6 +596,8 @@ func (e *Engine) Search(
 
 	startTime := time.Now()
 	var prevIterationScore int32
+	var prevAvgScore int32
+	lastTimeReduction := 0.0 // this move's final stability scale, for the next move
 	var prevIterationBestMove types.Move
 	var bestMoveStability int
 	var bestMoveChanges float64
@@ -895,7 +914,7 @@ func (e *Engine) Search(
 			hasClockTime := tm.OptTime > 0 && limits.MaxDepth == 0 && limits.MaxNodes == 0 && !tm.Infinite && !tm.Ponder.Load() && !tm.IsMoveTime
 
 			if depth >= 5 && rootBestMove != types.MoveNone {
-				bestMoveChanges *= 0.75
+				bestMoveChanges *= 0.5
 				if rootBestMove == prevIterationBestMove {
 					bestMoveStability++
 					isStable = true
@@ -913,32 +932,49 @@ func (e *Engine) Search(
 				}
 
 				if hasClockTime {
-					scale := stabilityScale[min(bestMoveStability, len(stabilityScale)-1)]
-					if bestMoveChanges > 0 {
-						scale *= 1.0 + 0.12*min(bestMoveChanges, 4.0)
-					}
+					// Smooth move-stability reduction (Stockfish-style timeReduction).
+					timeReduction := moveStabilityScale(bestMoveStability)
+					lastTimeReduction = timeReduction
+					timeReduction *= carryScale(e.prevTimeReduction)
+					instability := 1.0 + 0.55*bestMoveChanges/float64(max(e.NumThreads, 1))
 
-					// Share of this iteration's nodes spent on the best move.
+					// Effort spent on the best move vs alternatives.
 					nodeRatio := 0.0
+					effort := 1.0
 					if iterNodes := master.LocalNodes - iterStartNodes; iterNodes > 0 {
 						rootNodes := master.RootMoveNodes[rootBestMove.From()][rootBestMove.To()]
 						nodeRatio = float64(rootNodes) / float64(iterNodes)
 						switch {
-						case nodeRatio >= 0.90:
-							scale *= 0.80
+						case nodeRatio >= 0.93:
+							effort = 0.78
 						case nodeRatio >= 0.75:
-							scale *= 0.90
+							effort = 0.90
 						case nodeRatio < 0.40:
 							// Disputed position: alternatives took most of the search
-							scale *= 1.20
+							effort = 1.20
 						}
 					}
 
+					// Continuous fallingEval factor using both last-iteration and
+					// running-average score deltas.
+					fallingEval := 1.0
+					if prevIterationScore != 0 {
+						avgRef := prevAvgScore
+						if avgRef == 0 {
+							avgRef = prevIterationScore
+						}
+						drop := float64(prevIterationScore-score)*0.008 + float64(avgRef-score)*0.004
+						fallingEval = min(max(1.0+drop, 0.65), 1.65)
+						if prevIterationScore-score >= 40 || score-prevIterationScore >= 50 {
+							isStable = false
+						}
+					}
+
+					scale := timeReduction * fallingEval * instability * effort
+
 					// Easy-move detection (e.g. obvious queen/rook recapture): once
-					// the same move holds for 3+ iterations with >=85% of root nodes
-					// and no score drop, run one shallow verification search with
-					// rootBestMove excluded. If every alternative is >=250 cp worse,
-					// stop early once depth >= 10.
+					// the same move holds for 3+ iterations with no move changes,
+					// verify alternatives are >=250 cp worse and stop early at depth >= 10.
 					if !easyMoveChecked && depth >= 8 && bestMoveStability >= 3 && bestMoveChanges == 0 && abs(rootScore) < MateThreshold {
 						easyMoveChecked = true
 						verBeta := rootScore - 250
@@ -954,23 +990,6 @@ func (e *Engine) Search(
 						break
 					}
 
-					// Score falling or jumping from the previous iteration
-					if prevIterationScore != 0 {
-						switch drop := prevIterationScore - score; {
-						case drop >= 80:
-							scale *= 1.50
-							isStable = false
-						case drop >= 40:
-							scale *= 1.30
-							isStable = false
-						case drop >= 20:
-							scale *= 1.15
-						case drop <= -50:
-							scale *= 1.15
-							isStable = false
-						}
-					}
-
 					// In time trouble the budget may shrink but not grow.
 					if tm.IsTimeTrouble {
 						scale = min(scale, 1.0)
@@ -980,6 +999,7 @@ func (e *Engine) Search(
 			}
 			prevIterationBestMove = rootBestMove
 			prevIterationScore = rootScore
+			prevAvgScore = rootAvg.score
 
 			iterDuration := time.Since(iterStartTime)
 			if !tm.CanStartNewIteration(iterDuration, isStable) {
@@ -991,6 +1011,9 @@ func (e *Engine) Search(
 	// Stop helper threads
 	e.Stopped.Store(true)
 	wg.Wait()
+	if lastTimeReduction > 0 {
+		e.prevTimeReduction = lastTimeReduction
+	}
 
 	// With several threads, the move comes from the thread the vote picks,
 	// which need not be the main one (as in Stockfish; not at a fixed depth,

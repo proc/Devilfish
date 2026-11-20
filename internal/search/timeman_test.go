@@ -197,3 +197,47 @@ func TestMoveOverheadPerMove(t *testing.T) {
 		t.Errorf("3 s clock, 500 ms overhead: opt %v", o)
 	}
 }
+
+// The clock runs from the go the GUI sent, not from when the time manager is
+// set up.
+func TestStartTimeFromGo(t *testing.T) {
+	sent := time.Now().Add(-300 * time.Millisecond)
+	tm := newTM(SearchLimits{WhiteTime: 60000, BlackTime: 60000, StartTime: sent}, types.White)
+	if !tm.StartTime.Equal(sent) {
+		t.Fatalf("start %v, want the go time %v", tm.StartTime, sent)
+	}
+	if now := newTM(SearchLimits{WhiteTime: 60000, BlackTime: 60000}, types.White); time.Since(now.StartTime) > time.Second {
+		t.Fatalf("no go time given: start %v is not now", now.StartTime)
+	}
+}
+
+// With pondering on, a move plans for a quarter more, within MaxTime, and
+// not in an emergency.
+func TestPonderBonus(t *testing.T) {
+	l := SearchLimits{WhiteTime: 60000, BlackTime: 60000}
+	plain := newTM(l, types.White)
+	l.PonderEnabled = true
+	on := newTM(l, types.White)
+	if want := plain.OptTime * 5 / 4; on.OptTime < want-time.Millisecond || on.OptTime > want+time.Millisecond || on.OptTime > on.MaxTime {
+		t.Errorf("ponder on: opt %v (max %v), want %v", on.OptTime, on.MaxTime, want)
+	}
+	e := SearchLimits{WhiteTime: 2000, BlackTime: 2000, PonderEnabled: true}
+	if a, b := newTM(e, types.White).OptTime, newTM(SearchLimits{WhiteTime: 2000, BlackTime: 2000}, types.White).OptTime; a != b {
+		t.Errorf("emergency: ponder bonus applied (%v vs %v)", a, b)
+	}
+}
+
+// Time saved on a stable previous move is spent on this one, and the other
+// way round; with no previous move nothing changes.
+func TestCarryScale(t *testing.T) {
+	if carryScale(0) != 1 || carryScale(1) != 1 {
+		t.Errorf("neutral: %v %v", carryScale(0), carryScale(1))
+	}
+	stable, hard := moveStabilityScale(10), moveStabilityScale(0)
+	if c := carryScale(stable); c <= 1 || c > 1.2 {
+		t.Errorf("after a stable move: %v", c)
+	}
+	if c := carryScale(hard); c >= 1 || c < 0.85 {
+		t.Errorf("after an unsettled move: %v", c)
+	}
+}
